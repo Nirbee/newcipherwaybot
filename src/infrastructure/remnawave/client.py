@@ -394,8 +394,31 @@ class RemnawaveHttpClient:
         )
         raise RemnawaveError("panel v3: cannot resolve the numeric user id from this reference")
 
+    async def _write_user(self, method: str, payload: dict[str, Any]) -> Any:
+        """POST/PATCH /api/users, degrading past a stale ``externalSquadUuid``.
+
+        Remnawave 500s with ``errorCode: "A039"`` (a DB foreign-key violation, not validated
+        before it hits the DB) when ``externalSquadUuid`` points at an external squad that no
+        longer exists on the panel — e.g. it was deleted there after being sold/assigned. Seen
+        live: https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot (independent
+        Remnawave-integrating bot, same fix). Retry once without the field so the rest of the
+        write (expiry/traffic/squads/etc.) still goes through — same "omit ⇒ leave the panel's
+        existing exit alone" rule _spec_payload already applies when we have no opinion on it.
+        """
+        try:
+            return await self._request(method, _PATHS["users"], json=payload)
+        except RemnawaveError as exc:
+            if "externalSquadUuid" not in payload or "A039" not in str(exc):
+                raise
+            log.warning(
+                "panel rejected externalSquadUuid (FK violation, A039) — retrying without it",
+                external_squad=payload["externalSquadUuid"],
+            )
+            retry_payload = {k: v for k, v in payload.items() if k != "externalSquadUuid"}
+            return await self._request(method, _PATHS["users"], json=retry_payload)
+
     async def create_user(self, spec: ProvisionSpec) -> PanelUser:
-        data = await self._request("POST", _PATHS["users"], json=_spec_payload(spec))
+        data = await self._write_user("POST", _spec_payload(spec))
         return _to_panel_user(dict(data))
 
     async def update_user(self, ref: PanelRef, spec: ProvisionSpec) -> PanelUser:
@@ -404,12 +427,12 @@ class RemnawaveHttpClient:
             # an expireAt in the past, so "expire immediately" is clamped to near-now.
             payload = _spec_payload(spec) | {"id": await self._v3_id(ref)}
             payload["expireAt"] = _v3_expire_at(spec.expire_at)
-            data = await self._request("PATCH", _PATHS["users"], json=payload)
+            data = await self._write_user("PATCH", payload)
             return _to_panel_user(dict(data))
         # Backend v2 updates a user via PATCH /api/users with the uuid IN THE BODY —
         # PATCH /api/users/{uuid} 404s. (Verified against a live 2.x panel.)
         payload = _spec_payload(spec) | {"uuid": str(self._v2_uuid(ref))}
-        data = await self._request("PATCH", _PATHS["users"], json=payload)
+        data = await self._write_user("PATCH", payload)
         return _to_panel_user(dict(data))
 
     async def get_user(self, ref: PanelRef) -> PanelUser | None:
