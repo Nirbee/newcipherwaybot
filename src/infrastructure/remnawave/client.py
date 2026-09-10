@@ -246,7 +246,17 @@ class RemnawaveHttpClient:
                     )
                     raise RemnawaveAuthError(f"panel rejected credentials ({resp.status_code})")
                 if resp.status_code >= 500:
-                    last_exc = RemnawaveTransientError(f"panel {resp.status_code}")
+                    # Also logged+captured (not just a bare status) — a 500 while WRITING
+                    # (create/update user) usually means the panel's own handler rejected our
+                    # payload shape and the body carries the real reason, e.g. a stack trace or
+                    # validation message naming the offending field.
+                    log.warning(
+                        "panel request failed", method=method, path=path,
+                        status=resp.status_code, body=resp.text[:500], attempt=attempt,
+                    )
+                    last_exc = RemnawaveTransientError(
+                        f"panel {resp.status_code}: {resp.text[:200]}"
+                    )
                 elif resp.status_code >= 400:
                     # Logged here (not just raised) because callers wrap this into a generic
                     # "panel returned an error" message for the admin UI — the raw status/body
