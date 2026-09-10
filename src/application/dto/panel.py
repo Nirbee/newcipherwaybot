@@ -21,6 +21,11 @@ class PanelUserRef:
     uuid: uuid.UUID | None = None
     panel_id: int | None = None
     short_id: str | None = None
+    # Last-resort v3 id-resolution key: when username/shortUuid guessing fails (e.g. a sub
+    # provisioned before a panel upgrade, or one whose short_id never matched the panel's
+    # own naming), the client falls back to the same telegramId lookup get_user_by_telegram_id
+    # already uses. Optional and never required — callers that don't have it just omit it.
+    telegram_id: int | None = None
 
     @property
     def is_empty(self) -> bool:

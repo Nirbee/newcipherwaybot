@@ -143,6 +143,8 @@ class SubscriptionService:
         panel_ref = subscription.panel_ref
         if panel_ref is None:
             raise PurchaseError("cannot renew a subscription with no panel user")
+        if telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=telegram_id)
         if adopt_plan is not None and subscription.plan_id is None:
             subscription.plan_id = adopt_plan.id
             subscription.plan_snapshot = _plan_snapshot(adopt_plan)
@@ -178,6 +180,8 @@ class SubscriptionService:
         panel_ref = subscription.panel_ref
         if panel_ref is None:
             raise PurchaseError("cannot change a subscription with no panel user")
+        if telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=telegram_id)
         subscription.expire_at = expire_at
         subscription.status = (
             SubscriptionStatus.ACTIVE
@@ -219,6 +223,8 @@ class SubscriptionService:
         panel_ref = subscription.panel_ref
         if panel_ref is None:
             raise PurchaseError("cannot change a subscription with no panel user")
+        if user.telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
         bonus = bonus_days
         if carryover_trial and subscription.is_trial and subscription.expire_at is not None:
             remaining = (subscription.expire_at - dt.datetime.now(dt.UTC)).total_seconds()
@@ -272,6 +278,8 @@ class SubscriptionService:
         panel_ref = subscription.panel_ref
         if panel_ref is None:
             raise PurchaseError("subscription has no panel user")
+        if telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=telegram_id)
         spec = self._remnawave.build_spec(
             short_id=subscription.short_id,
             telegram_id=telegram_id,
@@ -304,6 +312,8 @@ class SubscriptionService:
         panel_ref = subscription.panel_ref
         if panel_ref is None:
             raise PurchaseError("cannot grace a subscription with no panel user")
+        if telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=telegram_id)
         now = dt.datetime.now(dt.UTC)
         grace_until = now + dt.timedelta(days=days)
         spec = self._remnawave.build_spec(

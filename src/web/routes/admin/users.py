@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -526,6 +527,8 @@ async def change_device_limit(
         new_limit = max(1, (sub.device_limit or 1) + body.delta)
         sub.device_limit = new_limit
         panel_ref = sub.panel_ref
+        if panel_ref is not None and user.telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
         if panel_ref is not None and sub.expire_at is not None:
             spec = container.remnawave.build_spec(
                 short_id=sub.short_id,
@@ -562,6 +565,8 @@ async def reset_traffic(
         # and the local zero is reverted — a traffic-LIMITED user would stay throttled (#3).
         panel_ref = sub.panel_ref
         if panel_ref is not None:
+            if user.telegram_id is not None:
+                panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
             try:
                 await container.remnawave_client.reset_traffic(panel_ref)
             except RemnawaveError as exc:
@@ -585,6 +590,8 @@ async def reset_devices(
             raise HTTPException(400, "user has no subscription")
         sub = await uow.subscriptions.get(user.current_subscription_id)
         panel_ref = sub.panel_ref if sub else None
+        if panel_ref is not None and user.telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
     if panel_ref is None:
         raise HTTPException(400, "subscription is not on the panel")
     try:
@@ -614,7 +621,9 @@ async def delete_user(
         if user.role.is_staff:
             raise HTTPException(400, "cannot delete a staff account")
         panel_refs = [
-            ref for s in (await uow.subscriptions.list(user_id=user_id)) if (ref := s.panel_ref)
+            replace(ref, telegram_id=user.telegram_id) if user.telegram_id is not None else ref
+            for s in (await uow.subscriptions.list(user_id=user_id))
+            if (ref := s.panel_ref)
         ]
         label = user.username or str(user.telegram_id or user_id)
         # Panel-first, best-effort: a refunded/deleted user must not keep connecting. A panel

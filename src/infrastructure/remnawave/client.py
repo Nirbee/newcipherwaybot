@@ -354,9 +354,33 @@ class RemnawaveHttpClient:
                 if panel_id is not None:
                     self._id_cache[r.short_id] = panel_id
                     return panel_id
+        # Last resort: username `sub_<short_id>` / shortUuid guessing assumes the panel user
+        # was named the way THIS bot names it. A sub provisioned before short_id existed, one
+        # whose panel user was renamed, or one carried over across a panel upgrade can fail
+        # both guesses while still very much existing on the panel — but the panel still tags
+        # it with our telegramId, so fall back to the same lookup get_user_by_telegram_id uses.
+        if r.telegram_id is not None:
+            try:
+                data = await self._request(
+                    "GET",
+                    _PATHS_V3["users_stream"],
+                    params={"telegramId": str(r.telegram_id), "size": 25},
+                )
+            except (RemnawaveAuthError, RemnawaveTransientError):
+                raise
+            except RemnawaveError:
+                data = None
+            rows = data.get("users") if isinstance(data, dict) else data
+            for row in rows or []:
+                panel_id = _numeric_id(row.get("id")) if isinstance(row, dict) else None
+                if panel_id is not None:
+                    if r.short_id:
+                        self._id_cache[r.short_id] = panel_id
+                    return panel_id
         log.warning(
             "panel v3: could not resolve numeric user id",
             short_id=r.short_id, panel_id=r.panel_id, uuid=str(r.uuid) if r.uuid else None,
+            telegram_id=r.telegram_id,
         )
         raise RemnawaveError("panel v3: cannot resolve the numeric user id from this reference")
 
