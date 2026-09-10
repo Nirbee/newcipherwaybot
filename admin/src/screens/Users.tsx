@@ -530,6 +530,31 @@ export default function Users() {
                         +90
                       </button>
                     </div>
+                    <div className="caps" style={{ marginTop: 6 }}>{t.takeDays}</div>
+                    <div className="row">
+                      {[7, 30, 90].map((n) => (
+                        <button
+                          key={n}
+                          className="btn secondary sm"
+                          disabled={!d.expire_at}
+                          title={!d.expire_at ? t.noExpiry : undefined}
+                          onClick={() => {
+                            // Same /extend endpoint, absolute-date path (it already handles a
+                            // past date correctly, unlike the relative `days` path which is
+                            // meant for real renewals only) — undoes an accidental +N misclick
+                            // without needing to compute/type a calendar date by hand.
+                            const target = new Date(d.expire_at!);
+                            target.setUTCDate(target.getUTCDate() - n);
+                            act.mutate({
+                              path: "/extend",
+                              body: { until: target.toISOString().slice(0, 10) },
+                            });
+                          }}
+                        >
+                          −{n}
+                        </button>
+                      ))}
+                    </div>
                     <div className="row" style={{ marginTop: 6 }}>
                       <input
                         className="inp sm"
