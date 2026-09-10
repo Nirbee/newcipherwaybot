@@ -1,0 +1,132 @@
+"""RemnawaveResyncService — nightly self-healing sweep of bot <-> panel drift.
+
+For every locally-active subscription we fetch its panel user and reconcile:
+  * panel user vanished        -> local sub DISABLED (someone deleted it in the panel)
+  * panel disabled / expired   -> re-apply our authoritative spec (what the customer
+    actually paid for), panel-first — corrects manual panel edits
+  * expiry drifted > 1 day     -> same re-apply
+
+We are the source of truth for what was PAID; the panel is only a projection. This
+keeps subscribers working after admins poke the panel by hand.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from src.core.enums import SubscriptionStatus
+from src.core.logging import get_logger
+
+if TYPE_CHECKING:
+    from src.application.common.panel import RemnawaveClient
+    from src.application.dto.panel import PanelUser
+    from src.application.services.subscription import SubscriptionService
+    from src.infrastructure.database.uow import UnitOfWork
+
+log = get_logger(__name__)
+
+_DRIFT_DAYS = 1
+
+
+def _traffic_exhausted(panel: PanelUser) -> bool:
+    """The panel turned this user LIMITED for exhausting the traffic cap we sold — its own
+    correct enforcement of the plan, not drift. 0 == unlimited, so it never exhausts."""
+    return panel.traffic_limit_bytes > 0 and panel.traffic_used_bytes >= panel.traffic_limit_bytes
+
+
+@dataclass
+class ResyncReport:
+    checked: int = 0
+    healed: int = 0
+    orphaned_local: int = 0  # sub gone from the panel
+    notes: list[str] = field(default_factory=list)
+
+
+class RemnawaveResyncService:
+    def __init__(self, client: RemnawaveClient, subscriptions: SubscriptionService) -> None:
+        self._client = client
+        self._subscriptions = subscriptions
+
+    async def resync(self, uow: UnitOfWork, *, limit: int = 500) -> ResyncReport:
+        report = ResyncReport()
+        subs = await uow.subscriptions.live_with_panel(limit)
+        for sub in subs:
+            report.checked += 1
+            panel_ref = sub.panel_ref
+            assert panel_ref is not None  # live_with_panel guarantees a provisioned sub
+            if sub.grace_until is not None:
+                # In a grace window: the panel's reduced traffic + short expiry are intentional.
+                # Re-applying the authoritative paid spec here would undo grace (full traffic, and
+                # the past paid expiry would instantly disable the user). The grace sweep owns it.
+                continue
+            try:
+                panel = await self._client.get_user(panel_ref)
+            except Exception as exc:
+                log.warning("resync fetch failed", sub=sub.id, error=str(exc))
+                continue
+
+            if panel is None:
+                sub.status = SubscriptionStatus.DISABLED
+                report.orphaned_local += 1
+                report.notes.append(f"#{sub.id}: пропал из панели → DISABLED")
+                continue
+
+            expire_drift = (
+                sub.expire_at is not None
+                and panel.expire_at is not None
+                and abs((panel.expire_at - sub.expire_at).total_seconds()) > _DRIFT_DAYS * 86400
+            )
+            # A user the panel turned LIMITED for hitting the traffic cap we sold is the panel
+            # enforcing that cap correctly — not drift. Re-enabling would flip them ACTIVE only
+            # for the next panel check to re-limit them: a pointless flap that briefly overrides
+            # real enforcement (B7). Re-enable only genuinely disabled/expired users.
+            needs_enable = not panel.is_enabled and not _traffic_exhausted(panel)
+            if needs_enable or expire_drift:
+                try:
+                    user = await uow.users.get(sub.user_id)
+                    await self._subscriptions.push_limits(
+                        uow, sub, telegram_id=user.telegram_id if user else None
+                    )
+                    if needs_enable:
+                        # push_limits PATCHes limits but never flips status; a DISABLED user
+                        # needs the explicit enable action, else self-heal is a no-op (#2).
+                        await self._client.enable_user(panel_ref)
+                    report.healed += 1
+                    report.notes.append(
+                        f"#{sub.id}: панель разошлась (enabled={panel.is_enabled}) → восстановлено"
+                    )
+                except Exception as exc:
+                    log.warning("resync heal failed", sub=sub.id, error=str(exc))
+        log.info(
+            "resync done",
+            checked=report.checked,
+            healed=report.healed,
+            orphaned=report.orphaned_local,
+        )
+        report.notes = report.notes[:50]
+        return report
+
+    async def reconcile_disabled(self, uow: UnitOfWork, *, limit: int = 500) -> int:
+        """Backstop for refund/revoke: re-disable panel users of locally-DISABLED subs.
+
+        A refund disables locally + best-effort on the panel; if the panel was down the
+        immediate retry can't recover (no real backoff), and ``resync`` never re-checks these
+        (they aren't usable). Without this a refunded/revoked customer keeps connecting. Fixing
+        it here — idempotent, panel-first — is the durable safety net. Returns count re-disabled.
+        """
+        fixed = 0
+        subs = await uow.subscriptions.disabled_with_panel(limit)
+        for sub in subs:
+            panel_ref = sub.panel_ref
+            assert panel_ref is not None  # disabled_with_panel guarantees a provisioned sub
+            try:
+                panel = await self._client.get_user(panel_ref)
+                if panel is not None and panel.is_enabled:
+                    await self._client.disable_user(panel_ref)
+                    fixed += 1
+            except Exception as exc:
+                log.warning("reconcile_disabled failed", sub=sub.id, error=str(exc))
+        if fixed:
+            log.info("reconcile_disabled", re_disabled=fixed)
+        return fixed

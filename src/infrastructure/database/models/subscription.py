@@ -1,0 +1,143 @@
+"""Subscription — each one is its OWN Remnawave panel user (ADR-0003).
+
+``short_id`` is a permanent, unique per-subscription suffix. It is generated once at
+creation and never derived from the mutable ``id``.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import uuid
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import Boolean, Enum, ForeignKey, Index, String, Uuid, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from src.application.dto.panel import PanelUserRef
+from src.core.enums import SubscriptionStatus
+from src.infrastructure.database.base import (
+    AwareDateTime,
+    Base,
+    BigInt,
+    IntPk,
+    JsonB,
+    TimestampMixin,
+)
+
+if TYPE_CHECKING:
+    from src.infrastructure.database.models.user import User
+
+
+# Enum(native_enum=False) persists the member NAME ('ACTIVE'), not .value ('active'),
+# so the partial-index predicate must match NAMES. Derived from the enum to prevent drift.
+_LIVE_STATUS_SQL = ", ".join(
+    f"'{s.name}'"
+    for s in (SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIAL, SubscriptionStatus.LIMITED)
+)
+
+
+class Subscription(IntPk, TimestampMixin, Base):
+    __tablename__ = "subscriptions"
+    __table_args__ = (
+        # At most one live subscription per (user, plan). Partial-unique (gotcha #2).
+        Index(
+            "uq_active_sub",
+            "user_id",
+            "plan_id",
+            unique=True,
+            postgresql_where=text(f"status IN ({_LIVE_STATUS_SQL})"),
+            sqlite_where=text(f"status IN ({_LIVE_STATUS_SQL})"),
+        ),
+        # Hottest read path: every inbound panel webhook resolves the sub by remnawave_uuid —
+        # index it so it isn't a full-table scan that degrades with the user base (perf).
+        Index(
+            "ix_subscriptions_remnawave_uuid",
+            "remnawave_uuid",
+            postgresql_where=text("remnawave_uuid IS NOT NULL"),
+            sqlite_where=text("remnawave_uuid IS NOT NULL"),
+        ),
+        # Same hot path for Remnawave >=3.0 panels: their webhooks carry a numeric user id
+        # instead of the uuid, so the 3.x resolution needs its own partial index.
+        Index(
+            "ix_subscriptions_remnawave_id",
+            "remnawave_id",
+            postgresql_where=text("remnawave_id IS NOT NULL"),
+            sqlite_where=text("remnawave_id IS NOT NULL"),
+        ),
+    )
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    # --- panel linkage -----------------------------------------------------
+    # 2.x panels key users by uuid; 3.x panels by a numeric id. A subscription carries
+    # whichever its panel issued (both after a 2.x -> 3.x panel upgrade is observed).
+    remnawave_uuid: Mapped[uuid.UUID | None] = mapped_column(Uuid())
+    remnawave_id: Mapped[int | None] = mapped_column(BigInt)
+    short_id: Mapped[str] = mapped_column(String(16), unique=True)
+
+    # --- plan + frozen snapshot -------------------------------------------
+    plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id", ondelete="RESTRICT"))
+    plan_snapshot: Mapped[dict[str, Any]] = mapped_column(JsonB, default=dict)
+
+    status: Mapped[SubscriptionStatus] = mapped_column(
+        Enum(SubscriptionStatus, native_enum=False, length=16),
+        default=SubscriptionStatus.PENDING,
+        index=True,
+    )
+    is_trial: Mapped[bool] = mapped_column(Boolean, default=False)
+    disabled_by_channel_leave: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- limits / usage ----------------------------------------------------
+    traffic_limit_bytes: Mapped[int] = mapped_column(BigInt, default=0)  # 0 -> unlimited
+    traffic_used_bytes: Mapped[int] = mapped_column(BigInt, default=0)
+    device_limit: Mapped[int | None] = mapped_column()
+    traffic_limit_strategy: Mapped[str | None] = mapped_column(String(32))
+    internal_squads: Mapped[list[Any]] = mapped_column(JsonB, default=list)
+    external_squad: Mapped[str | None] = mapped_column(String(36))
+
+    # --- lifecycle timestamps ---------------------------------------------
+    start_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+    expire_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime, index=True)
+    subscription_url: Mapped[str | None] = mapped_column(String(512))
+    crypto_link: Mapped[str | None] = mapped_column(String(512))  # happ link
+
+    # --- autopay -----------------------------------------------------------
+    autopay_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    autopay_days_before: Mapped[int] = mapped_column(default=1)
+    autopay_period_days: Mapped[int | None] = mapped_column()
+    # Opt-in to charge the user's saved card when the balance is short.
+    autopay_card_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    autopay_card_attempted_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+
+    # --- audit -------------------------------------------------------------
+    device_reset_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+    link_reset_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+    last_webhook_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+    last_revoke_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+
+    # Grace / «спасательный круг»: while set, the sub is in a post-expiry limited window
+    # (panel: enabled, short expiry + small traffic cap). Cleared on renew. ``grace_started_at``
+    # gates the cooldown so grace can't be farmed every expiry. Authoritative paid limits on the
+    # row are left untouched, so a renew restores full traffic/expiry without extra bookkeeping.
+    grace_until: Mapped[dt.datetime | None] = mapped_column(AwareDateTime, index=True)
+    grace_started_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+
+    user: Mapped[User] = relationship(back_populates="subscriptions")
+
+    @property
+    def is_usable(self) -> bool:
+        return self.status.is_usable
+
+    @property
+    def panel_ref(self) -> PanelUserRef | None:
+        """Address of this subscription's panel user, or None when never provisioned.
+
+        Carries uuid (2.x), numeric id (3.x) and short_id so the client can talk to
+        whichever panel version it probed — including re-resolving the id right after
+        a 2.x -> 3.x panel upgrade, before any webhook backfilled ``remnawave_id``.
+        """
+        if self.remnawave_uuid is None and self.remnawave_id is None:
+            return None
+        return PanelUserRef(
+            uuid=self.remnawave_uuid, panel_id=self.remnawave_id, short_id=self.short_id
+        )

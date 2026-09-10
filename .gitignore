@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv / uv
+.venv/
+venv/
+uv.lock.local
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime artifacts
+*.log
+/backups/
+/data/
+
+# Docs site build
+docs-site/node_modules/
+docs-site/.vitepress/dist/
+docs-site/.vitepress/cache/
+
+# Local AI-assistant context (not part of the public repo)
+.claude/
+CLAUDE.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+migration_inbox/
+admin/tsconfig.tsbuildinfo
+.installans

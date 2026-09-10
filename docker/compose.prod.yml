@@ -1,0 +1,192 @@
+# Production stack for one-command install (scripts/install.sh).
+# Caddy terminates HTTPS automatically when DOMAIN is set (Let's Encrypt).
+#
+# Low-RAM VPS (1 GB): the pressure point is `docker compose build` (SPA + Python
+# image), which BuildKit runs outside these service limits — so install.sh creates
+# a 2 GB swapfile before building instead. We deliberately avoid hard per-service
+# mem_limit/reservations here: on a swap-less 1 GB box too-tight limits just move the
+# OOM into runtime, and compose v2 without swap-limit support can't cap swap anyway.
+# Redis is bounded (--maxmemory 256mb, volatile-lru) and postgres shm_size is modest (128mb).
+name: vpnhub
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    args:
+      GIT_SHA: ${GIT_SHA:-}
+  env_file: ../.env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  volumes:
+    - uploads:/app/uploads
+    - backups:/app/backups
+    - update-signals:/app/update-signals
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DATABASE__USER:-vpn}
+      POSTGRES_PASSWORD: ${DATABASE__PASSWORD:?set in .env}
+      POSTGRES_DB: ${DATABASE__NAME:-vpn}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE__USER:-vpn}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # volatile-lru: evict ONLY keys with a TTL (rate-limit / cart / dedup caches). The taskiq
+    # job queue and aiogram FSM state carry no TTL, so under memory pressure a queued
+    # broadcast/backup/reminder or a live form is never silently dropped (allkeys-lru could).
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    <<: *app
+    environment:
+      RUN_MIGRATIONS: "true"
+    command: ["uvicorn", "src.web.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    # Publish to the host so, when ports 80/443 are already taken (e.g. the panel's nginx),
+    # the stack still comes up and an existing reverse proxy can reach it. Bind to loopback by
+    # default (not internet-exposed); install.sh sets WEB_BIND and picks a free port. Harmless
+    # when Caddy is running (it fronts web over the internal network regardless).
+    ports:
+      - "${WEB_BIND:-127.0.0.1:8080}:8080"
+    expose: ["8080"]
+    # web owns migrations (entrypoint runs `alembic upgrade head` BEFORE exec'ing uvicorn), so a
+    # 200 here means the schema is migrated and db+redis are reachable — the gate bot/worker/
+    # scheduler wait on below. No curl in the slim runtime image; python + urllib is always present
+    # (urlopen raises on a non-200, failing the check). start_period covers first-boot migrations.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # bot/worker/scheduler must not start against an un-migrated DB. They wait for web to be
+  # healthy (web runs migrations before serving), which transitively implies postgres+redis are
+  # up too — but we keep those conditions explicit. A service-level depends_on replaces the one
+  # merged from *app, so postgres/redis are re-listed here. No cycle: web depends only on pg+redis.
+  bot:
+    <<: *app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    command: ["python", "-m", "src.bot.main"]
+
+  worker:
+    <<: *app
+    # The broker acks on pickup, so a SIGKILL mid-task LOSES the message (a verified payment).
+    # taskiq waits for in-flight tasks on SIGTERM; give it room to outlast the payment task's
+    # in-task backoff (~85s worst case) instead of docker's default 10s.
+    stop_grace_period: 120s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    command:
+      [
+        "taskiq",
+        "worker",
+        "src.infrastructure.taskiq.broker:broker",
+        "src.infrastructure.taskiq.tasks",
+        "--workers",
+        "1",
+      ]
+
+  scheduler:
+    <<: *app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    command:
+      [
+        "taskiq",
+        "scheduler",
+        "src.infrastructure.taskiq.broker:scheduler",
+        "src.infrastructure.taskiq.tasks",
+      ]
+
+  # Built-in mock Remnawave panel for trying the stack without a real panel.
+  # Enabled by install.sh via COMPOSE_PROFILES=mock in .env when no panel URL is given.
+  mockpanel:
+    <<: *app
+    profiles: ["mock"]
+    command: ["uvicorn", "scripts.mock_panel:app", "--host", "0.0.0.0", "--port", "3010"]
+    expose: ["3010"]
+
+  # Self-update runner: watches for the marker the bot's «Обновить» button drops and runs
+  # scripts/update.sh (backup → git pull → rebuild → restart). Needs the host docker socket
+  # and the host repo bind-mounted so it can rebuild the OTHER services. Disable by setting
+  # COMPOSE_PROFILES without "updater" — the button then tells the operator to run update.sh.
+  updater:
+    profiles: ["updater"]  # opt-in (needs the docker socket); install.sh enables it by default
+    build:
+      context: ..
+      dockerfile: docker/updater.Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ..:/repo
+      - update-signals:/repo/update-signals
+    working_dir: /repo
+    environment:
+      UPDATE_REQUEST_FILE: /repo/update-signals/request
+
+  # Automatic HTTPS in front of web (uses DOMAIN + ACME_EMAIL from .env).
+  # Profile-gated: install.sh enables "caddy" only when host ports 80/443 are free.
+  # If they're taken (another web server on the box), the stack runs without Caddy and
+  # web is reachable at 127.0.0.1:8080 for that existing proxy to front.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["caddy"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  pgdata:
+  uploads:
+  backups:
+  caddy_data:
+  caddy_config:
+  # Shared signal dir: web drops an update-request file, the updater picks it up.
+  update-signals:
