@@ -193,7 +193,10 @@ async def me(
         pay_balance_label = str(await cfg.value(uow, "PAYMENT_BALANCE_LABEL") or "").strip()
         pay_stars_label = str(await cfg.value(uow, "PAYMENT_STARS_LABEL") or "").strip()
         rank = order_rank(str(await cfg.value(uow, "PAYMENT_METHOD_ORDER") or ""))
-        payment_order = (["balance"] if balance_on else []) + ["stars"]
+        # Stars dropped from the mini-app's payment chips on request — the /topup and
+        # /purchase "stars" method still exists server-side (untouched), this only hides
+        # the chip so the mini-app storefront no longer offers it.
+        payment_order = ["balance"] if balance_on else []
         payment_order += [g["id"] for g in gateways]
         payment_order.sort(key=rank)  # stable — unlisted methods keep default order
         if sub is not None and sub.status.is_usable:

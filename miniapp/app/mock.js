@@ -25,7 +25,7 @@ window.__MOCK__ = {
       subscription_url: "https://sub.vpn.app/u/8fk2m3n9x7q1w5e8r4t6y2u9a3",
       crypto_link: null,
     },
-    app: { template: "a", title: "VPN", greeting: null, accent_color: null, bot_username: "bot_vpn4_bot", sales_mode: "plans" },
+    app: { template: "a", title: "VPN", greeting: null, accent_color: null, bot_username: "bot_vpn4_bot", sales_mode: "plans", payment_order: ["balance"], balance_enabled: true },
   },
   // Own key on purpose: without it __MOCK__["constructor"] resolves to Object.prototype.constructor.
   // Preview the constructor UI with ?mock=1&sales=constructor.

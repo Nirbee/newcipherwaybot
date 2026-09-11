@@ -273,7 +273,7 @@
   }
 
   // ---------- state ----------
-  const state = { tab: "home", me: null, plans: null, constructor: null, referral: null, payments: null, connection: null, tariffSel: 0, planSel: 0, routerTariffSel: 0, routerPlanSel: 0, cPerSel: 0, cPackSel: 0, paySel: "stars", devices: undefined, topupOpen: false, topupAmountSel: 0, topupPaySel: "stars", topupCustom: "" };
+  const state = { tab: "home", me: null, plans: null, constructor: null, referral: null, payments: null, connection: null, tariffSel: 0, planSel: 0, routerTariffSel: 0, routerPlanSel: 0, cPerSel: 0, cPackSel: 0, paySel: "balance", devices: undefined, topupOpen: false, topupAmountSel: 0, topupPaySel: "balance", topupCustom: "" };
   // Preset top-up amounts (RUB) offered in the mini-app — mirrors the bot's own topup_amount
   // presets (src/bot/handlers/purchase.py); the server re-validates against MIN_DEPOSIT_AMOUNT
   // regardless of which preset the client claims to have tapped.
@@ -1265,9 +1265,10 @@
   async function submitPurchase(payload) {
     haptic();
     try {
+      const order = (state.me && state.me.app.payment_order) || ["balance"];
       const method =
         state.paySel === "balance" && state.me && state.me.app.balance_enabled === false
-          ? "stars"
+          ? order.find((id) => id !== "balance") || order[0]
           : state.paySel;
       const r = await api("POST", "/api/cabinet/purchase", { ...payload, method });
       if (r.redirect_url) {
@@ -1294,7 +1295,7 @@
 
   async function submitTopup(amountMinor) {
     haptic();
-    const method = state.topupPaySel || "stars";
+    const method = state.topupPaySel || (state.me && state.me.app.payment_order[0]) || "balance";
     try {
       const r = await api("POST", "/api/cabinet/topup", { amount_minor: amountMinor, method });
       if (r.redirect_url) {
@@ -1381,6 +1382,13 @@
         api("GET", "/api/cabinet/payments").catch(() => null),
       ]);
       Object.assign(state, { me, plans, constructor, referral, payments });
+      // Keep the selected payment method valid for whatever the operator actually offers —
+      // the default ("balance") or a method disabled/removed since the last load (e.g. Stars
+      // taken off the storefront) must not stay silently selected with no matching chip drawn.
+      const payOrder = (me.app.payment_order && me.app.payment_order.length)
+        ? me.app.payment_order : ["balance"];
+      if (!payOrder.includes(state.paySel)) state.paySel = payOrder[0];
+      if (!payOrder.includes(state.topupPaySel)) state.topupPaySel = payOrder[0];
       // A full refresh (boot, or after a purchase) invalidates the cached connection + wizard
       // fetch flags — so a user who hit the Connect tab BEFORE buying (got a 404, connErr set)
       // sees the wizard work the moment they come back with a live subscription. Devices too.
