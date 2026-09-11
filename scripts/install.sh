@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPN-HUB BOT — one-command install.
+# CipherWay BOT — one-command install.
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/STEP-CORP/StepBot/main/scripts/install.sh)
 #
@@ -25,7 +25,7 @@ fail()  { printf "\n  %s✗ %s%s\n" "$RED" "$*" "$R"; exit 1; }
 banner() {
   printf "\n"
   hr
-  printf "   %sVPN%s%s-HUB%s %sBOT%s  %s· установка одной командой%s\n" \
+  printf "   %sCipher%s%sWay%s %sBOT%s  %s· установка одной командой%s\n" \
     "$B" "$R" "$ORANGE$B" "$R" "$B" "$R" "$DIM" "$R"
   hr
 }

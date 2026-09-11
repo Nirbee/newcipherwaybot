@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPN-HUB BOT — safe one-command update.
+# CipherWay BOT — safe one-command update.
 #
 #   cd <папка бота> && ./scripts/update.sh
 #
@@ -139,7 +139,7 @@ trap 'exit 143' TERM
 trap recover EXIT
 
 printf "\n"; hr
-printf "   %sVPN%s%s-HUB%s %sBOT%s  %s· безопасное обновление%s\n" \
+printf "   %sCipher%s%sWay%s %sBOT%s  %s· безопасное обновление%s\n" \
   "$B" "$R" "$ORANGE$B" "$R" "$B" "$R" "$DIM" "$R"
 hr
 

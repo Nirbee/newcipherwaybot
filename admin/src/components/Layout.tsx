@@ -83,7 +83,7 @@ export function BrandLogo({ size = 15 }: { size?: number }) {
         lineHeight: 1,
       }}
     >
-      <span style={{ color: "var(--text)" }}>VPN</span>
+      <span style={{ color: "var(--text)" }}>Cipher</span>
       <span
         style={{
           background: "#F7971D",
@@ -92,7 +92,7 @@ export function BrandLogo({ size = 15 }: { size?: number }) {
           padding: `${size * 0.14}px ${size * 0.38}px`,
         }}
       >
-        HUB
+        Way
       </span>
     </span>
   );
