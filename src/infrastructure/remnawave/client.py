@@ -395,27 +395,41 @@ class RemnawaveHttpClient:
         raise RemnawaveError("panel v3: cannot resolve the numeric user id from this reference")
 
     async def _write_user(self, method: str, payload: dict[str, Any]) -> Any:
-        """POST/PATCH /api/users, degrading past a stale ``externalSquadUuid``.
+        """POST/PATCH /api/users, degrading past stale squad references.
 
         Remnawave 500s with ``errorCode: "A039"`` (a DB foreign-key violation, not validated
-        before it hits the DB) when ``externalSquadUuid`` points at an external squad that no
-        longer exists on the panel — e.g. it was deleted there after being sold/assigned. Seen
-        live: https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot (independent
-        Remnawave-integrating bot, same fix). Retry once without the field so the rest of the
-        write (expiry/traffic/squads/etc.) still goes through — same "omit ⇒ leave the panel's
-        existing exit alone" rule _spec_payload already applies when we have no opinion on it.
+        before it hits the DB) when ``activeInternalSquads`` or ``externalSquadUuid`` name a
+        squad that no longer exists on THIS panel — the common case being a subscription
+        imported from another bot/panel, whose locally-stored squad uuids are foreign to
+        whatever panel we're actually talking to now. Confirmed against an independent
+        Remnawave bot integration (BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot) hitting the
+        same code for the same reason. Retry with the squad field(s) dropped, one at a time,
+        so the rest of the write (expiry/traffic/device limit/etc.) still lands — same
+        "omit ⇒ leave the panel's existing value alone" rule _spec_payload already applies
+        when we have no opinion on a field.
         """
+        fk_fields = [f for f in ("activeInternalSquads", "externalSquadUuid") if f in payload]
         try:
             return await self._request(method, _PATHS["users"], json=payload)
         except RemnawaveError as exc:
-            if "externalSquadUuid" not in payload or "A039" not in str(exc):
+            if not fk_fields or "A039" not in str(exc):
                 raise
-            log.warning(
-                "panel rejected externalSquadUuid (FK violation, A039) — retrying without it",
-                external_squad=payload["externalSquadUuid"],
-            )
-            retry_payload = {k: v for k, v in payload.items() if k != "externalSquadUuid"}
-            return await self._request(method, _PATHS["users"], json=retry_payload)
+            last_exc: RemnawaveError = exc
+            remaining = dict(payload)
+            for field in fk_fields:
+                dropped = remaining.pop(field)
+                log.warning(
+                    "panel rejected a squad reference (FK violation, A039) — retrying"
+                    " without it",
+                    field=field, value=dropped,
+                )
+                try:
+                    return await self._request(method, _PATHS["users"], json=remaining)
+                except RemnawaveError as retry_exc:
+                    if "A039" not in str(retry_exc):
+                        raise
+                    last_exc = retry_exc
+            raise last_exc from None
 
     async def create_user(self, spec: ProvisionSpec) -> PanelUser:
         data = await self._write_user("POST", _spec_payload(spec))
