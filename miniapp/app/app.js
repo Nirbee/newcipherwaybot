@@ -28,6 +28,7 @@
     profile: "Профиль", subscription: "Подписка", devices: "Устройства",
     myDevices: "Мои устройства",
     deviceRemoved: "Устройство отвязано",
+    noDevices: "Пока ни одно устройство не подключалось",
     history: "История платежей", promo: "Промокод", promoPh: "Введи код",
     apply: "Применить", promoOk: "Промокод применён", support: "Поддержка",
     send: "Отпр.", supportPh: "Опишите вопрос…", supportHint: "Напишите нам — ответим здесь.",
@@ -91,6 +92,7 @@
     profile: "Profile", subscription: "Subscription", devices: "Devices",
     myDevices: "My devices",
     deviceRemoved: "Device unlinked",
+    noDevices: "No devices have connected yet",
     history: "Payment history", promo: "Promo code", promoPh: "Enter code",
     apply: "Apply", promoOk: "Promo applied", support: "Support",
     send: "Send", supportPh: "Describe your question…", supportHint: "Message us — we'll reply here.",
@@ -1035,31 +1037,33 @@
           .then((r) => { state.devices = r.items || []; render(); })
           .catch(() => { state.devices = []; });
       }
-      if (state.devices && state.devices.length) {
+      if (Array.isArray(state.devices)) {
         frag.push(
           el("div", { class: "card fade" }, [
             el("div", { class: "h-cap", text: T.myDevices }),
-            ...state.devices.map((d) =>
-              el("div", { class: "li" }, [
-                el("span", { class: "sub", text: [d.platform, d.model].filter(Boolean).join(" · ") || d.hwid.slice(0, 12) }),
-                el("button", {
-                  class: "btn ghost sm",
-                  text: "✕",
-                  onclick: async () => {
-                    try {
-                      await api("DELETE", `/api/cabinet/devices/${encodeURIComponent(d.hwid)}`);
-                      // `undefined` (not null) is the "refetch me" sentinel — null means
-                      // "load in flight" and would leave the list hidden until an app restart.
-                      state.devices = undefined;
-                      toast(T.deviceRemoved);
-                      render();
-                    } catch (e) {
-                      toast(String(e.message || e));
-                    }
-                  },
-                }),
-              ]),
-            ),
+            state.devices.length
+              ? el("div", {}, state.devices.map((d) =>
+                  el("div", { class: "li" }, [
+                    el("span", { class: "sub", text: [d.platform, d.model].filter(Boolean).join(" · ") || d.hwid.slice(0, 12) }),
+                    el("button", {
+                      class: "btn ghost sm",
+                      text: "✕",
+                      onclick: async () => {
+                        try {
+                          await api("DELETE", `/api/cabinet/devices/${encodeURIComponent(d.hwid)}`);
+                          // `undefined` (not null) is the "refetch me" sentinel — null means
+                          // "load in flight" and would leave the list hidden until an app restart.
+                          state.devices = undefined;
+                          toast(T.deviceRemoved);
+                          render();
+                        } catch (e) {
+                          toast(String(e.message || e));
+                        }
+                      },
+                    }),
+                  ]),
+                ))
+              : el("div", { class: "sub", text: T.noDevices }),
           ]),
         );
       }
