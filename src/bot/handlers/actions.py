@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 from html import escape as hesc
 from typing import Any
 
@@ -118,7 +119,7 @@ async def act_subscription(
         miniapp_url = str(await container.bot_config.value(uow, "SUBSCRIPTION_MINI_APP_URL") or "")
         autopay_global = bool(await container.bot_config.value(uow, "AUTO_RENEWAL_ENABLED"))
         if sub is not None and sub.status.is_usable and show_traffic:
-            await container.traffic.refresh_used_bytes(sub)
+            await container.traffic.refresh_used_bytes(sub, telegram_id=db_user.telegram_id)
             await uow.commit()
     if sub is None or not sub.status.is_usable:
         text = (
@@ -270,7 +271,7 @@ async def act_cabinet(
         tpl_inactive = str(await container.bot_config.value(uow, "CABINET_SUB_INACTIVE") or "")
         cabinet_emoji = str(await container.bot_config.value(uow, "CABINET_TEXT_EMOJI") or "")
         if sub is not None and sub.status.is_usable and show_traffic:
-            await container.traffic.refresh_used_bytes(sub)
+            await container.traffic.refresh_used_bytes(sub, telegram_id=db_user.telegram_id)
             await uow.commit()
 
     from src.bot.cabinet_text import (
@@ -753,6 +754,12 @@ async def act_devices(cb: CallbackQuery | Message, container: AppContainer, db_u
             else None
         )
     panel_ref = sub.panel_ref if sub is not None else None
+    # Attach telegram_id: a uuid/short_id-only ref (2.x-era or imported subscriptions) can't be
+    # resolved to a v3 numeric id when the panel username doesn't match this bot's own
+    # `sub_<short_id>` convention — the client's last-resort lookup needs telegram_id, which
+    # `sub.panel_ref` alone never carries (see PanelUserRef, subscription.py's grant/renew/change).
+    if panel_ref is not None:
+        panel_ref = replace(panel_ref, telegram_id=db_user.telegram_id)
     if sub is None or not sub.status.is_usable or panel_ref is None:
         await ack(cb, "Сначала оформи подписку", alert=True)
         return
@@ -790,6 +797,12 @@ async def devdel(cb: CallbackQuery, container: AppContainer, db_user: User) -> N
             else None
         )
     panel_ref = sub.panel_ref if sub is not None else None
+    # Attach telegram_id: a uuid/short_id-only ref (2.x-era or imported subscriptions) can't be
+    # resolved to a v3 numeric id when the panel username doesn't match this bot's own
+    # `sub_<short_id>` convention — the client's last-resort lookup needs telegram_id, which
+    # `sub.panel_ref` alone never carries (see PanelUserRef, subscription.py's grant/renew/change).
+    if panel_ref is not None:
+        panel_ref = replace(panel_ref, telegram_id=db_user.telegram_id)
     if sub is None or panel_ref is None or idx < 0:
         await ack(cb, "Нет активной подписки", alert=True)
         return

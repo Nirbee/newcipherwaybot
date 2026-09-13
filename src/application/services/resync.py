@@ -12,7 +12,7 @@ keeps subscribers working after admins poke the panel by hand.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from src.core.enums import SubscriptionStatus
@@ -60,6 +60,12 @@ class RemnawaveResyncService:
                 # Re-applying the authoritative paid spec here would undo grace (full traffic, and
                 # the past paid expiry would instantly disable the user). The grace sweep owns it.
                 continue
+            # Attach telegram_id up front: a uuid/short_id-only ref (2.x-era or imported
+            # subscriptions) can't be resolved to a v3 numeric id when the panel username
+            # doesn't match this bot's own naming, and the client's last-resort lookup needs it.
+            user = await uow.users.get(sub.user_id)
+            if user is not None:
+                panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
             try:
                 panel = await self._client.get_user(panel_ref)
             except Exception as exc:
@@ -84,7 +90,6 @@ class RemnawaveResyncService:
             needs_enable = not panel.is_enabled and not _traffic_exhausted(panel)
             if needs_enable or expire_drift:
                 try:
-                    user = await uow.users.get(sub.user_id)
                     await self._subscriptions.push_limits(
                         uow, sub, telegram_id=user.telegram_id if user else None
                     )

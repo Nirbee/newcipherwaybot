@@ -11,6 +11,7 @@ renders either way.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from src.application.common.cache import KeyValueCache
@@ -41,16 +42,22 @@ class TrafficService:
         self._ttl = ttl_seconds
         self._timeout = panel_timeout
 
-    async def refresh_used_bytes(self, sub: Subscription) -> int:
+    async def refresh_used_bytes(self, sub: Subscription, *, telegram_id: int | None = None) -> int:
         """Refresh ``sub.traffic_used_bytes`` from the panel; returns the current value.
 
         Cache-hit means we refreshed this sub less than TTL ago: the DB copy can only be
         same-or-newer (webhooks write it too), so the panel round-trip is skipped and the
         stored value stands. The caller owns the commit after a live refresh.
+
+        ``telegram_id`` lets the panel client resolve a v3 numeric id for a uuid/short_id-only
+        ref (2.x-era or imported subscriptions) when the panel username doesn't match this
+        bot's own naming — without it those subscriptions silently keep showing stale usage.
         """
         panel_ref = sub.panel_ref
         if panel_ref is None:
             return sub.traffic_used_bytes
+        if telegram_id is not None:
+            panel_ref = replace(panel_ref, telegram_id=telegram_id)
         key = f"{_CACHE_PREFIX}{sub.id}"
         if await self._is_fresh(key):
             return sub.traffic_used_bytes

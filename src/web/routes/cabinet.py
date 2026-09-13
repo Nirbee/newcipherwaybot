@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import math
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -200,7 +201,7 @@ async def me(
         payment_order += [g["id"] for g in gateways]
         payment_order.sort(key=rank)  # stable — unlisted methods keep default order
         if sub is not None and sub.status.is_usable:
-            await container.traffic.refresh_used_bytes(sub)
+            await container.traffic.refresh_used_bytes(sub, telegram_id=user.telegram_id)
         await uow.commit()
     return {
         "user": {
@@ -1001,6 +1002,12 @@ async def reset_link(
             else None
         )
     panel_ref = sub.panel_ref if sub is not None else None
+    # Attach telegram_id: a uuid/short_id-only ref (2.x-era or imported subscriptions) can't be
+    # resolved to a v3 numeric id when the panel username doesn't match this bot's own
+    # `sub_<short_id>` convention — the client's last-resort lookup needs telegram_id, which
+    # `sub.panel_ref` alone never carries (see PanelUserRef, subscription.py's grant/renew/change).
+    if panel_ref is not None:
+        panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
     if sub is None or not sub.status.is_usable or panel_ref is None:
         raise HTTPException(404, "no active subscription")
     if not await container.redis.set(f"resetlink:{user.id}", "1", nx=True, ex=600):
@@ -1046,7 +1053,7 @@ async def traffic(
         if sub is None:
             return {"used_bytes": 0, "limit_bytes": 0, "unlimited": True, "series": []}
         if sub.status.is_usable:
-            await container.traffic.refresh_used_bytes(sub)
+            await container.traffic.refresh_used_bytes(sub, telegram_id=user.telegram_id)
             await uow.commit()
         rows = await uow.traffic.series(sub.id, limit=30)
     return {
@@ -1096,6 +1103,12 @@ async def list_devices(
             else None
         )
     panel_ref = sub.panel_ref if sub is not None else None
+    # Attach telegram_id: a uuid/short_id-only ref (2.x-era or imported subscriptions) can't be
+    # resolved to a v3 numeric id when the panel username doesn't match this bot's own
+    # `sub_<short_id>` convention — the client's last-resort lookup needs telegram_id, which
+    # `sub.panel_ref` alone never carries (see PanelUserRef, subscription.py's grant/renew/change).
+    if panel_ref is not None:
+        panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
     if sub is None or panel_ref is None:
         return {"items": [], "device_limit": None}
     try:
@@ -1129,6 +1142,12 @@ async def delete_device(
             else None
         )
     panel_ref = sub.panel_ref if sub is not None else None
+    # Attach telegram_id: a uuid/short_id-only ref (2.x-era or imported subscriptions) can't be
+    # resolved to a v3 numeric id when the panel username doesn't match this bot's own
+    # `sub_<short_id>` convention — the client's last-resort lookup needs telegram_id, which
+    # `sub.panel_ref` alone never carries (see PanelUserRef, subscription.py's grant/renew/change).
+    if panel_ref is not None:
+        panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
     if sub is None or panel_ref is None:
         raise HTTPException(400, "no active subscription")
     try:
