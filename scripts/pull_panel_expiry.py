@@ -1,21 +1,29 @@
-"""One-off reconciliation: pull `expire_at` FROM Remnawave INTO the local `subscriptions` table.
+"""One-off reconciliation: pull `expire_at` + the panel's numeric id INTO `subscriptions`.
 
-The bot normally treats its own DB as authoritative for expire_at (it computes the date on
-purchase/renewal and pushes it to the panel — see src/application/services/subscription.py and
-src/application/services/resync.py). That breaks down when an admin edits dates directly in the
-panel (a single fix, or a bulk squad-wide extension): nothing pulls that change back into the bot
-unless Remnawave is configured to call this bot's /webhook/panel, which most deployments never
-set up. This script is the manual fallback for that case — run it once after any direct-in-panel
-date edit so the bot's cabinet/mini-app (which read the local DB, not the panel) show the right
-date again.
+Two independent drifts this fixes in one pass over the panel (each subscription is fetched once):
 
-Dry-run by default: prints every subscription whose local expire_at disagrees with the panel's by
-more than a minute, without writing anything. Pass --apply to actually commit the panel's value
-into the local DB.
+1. expire_at: the bot treats its own DB as authoritative (computes the date on purchase/renewal,
+   pushes it to the panel — see src/application/services/subscription.py and resync.py). That
+   breaks down when an admin edits dates directly in the panel (a single fix, or a bulk
+   squad-wide extension): nothing pulls that change back into the bot unless Remnawave is
+   configured to call this bot's /webhook/panel, which most deployments never set up. Run this
+   after any direct-in-panel date edit so the bot's cabinet/mini-app (which read the local DB,
+   not the panel) show the right date again.
+
+2. remnawave_id: subscriptions imported from another bot (or created on a pre-3.0 panel) only
+   ever got a uuid/short_id, never the numeric id Remnawave >=3.0 addresses users by. Every panel
+   call for those has to *guess* the numeric id from a username/shortUuid pattern this bot
+   controls — which fails for anything not created by this bot — then fall back to a slower,
+   uncached-across-restarts telegram_id lookup (see client.py's `_v3_id`). Once resolved here
+   and written to `subscriptions.remnawave_id`, `Subscription.panel_ref` carries the id directly
+   and every future panel call for that subscription skips resolution entirely — this is the
+   permanent fix; the telegram_id fallback stays as a safety net for whatever this misses.
+
+Dry-run by default: prints what would change without writing anything. Pass --apply to commit.
 
 Usage:
   uv run python scripts/pull_panel_expiry.py            # preview only
-  uv run python scripts/pull_panel_expiry.py --apply     # write the panel's dates into the DB
+  uv run python scripts/pull_panel_expiry.py --apply     # write the changes to the DB
 """
 
 from __future__ import annotations
@@ -60,23 +68,35 @@ async def main(argv: list[str]) -> int:
                 except Exception as exc:
                     log.warning("panel fetch failed", sub=sub.id, error=str(exc))
                     continue
-                if panel is None or panel.expire_at is None:
+                if panel is None:
                     continue
 
-                drift = (
-                    sub.expire_at is None
-                    or abs((panel.expire_at - sub.expire_at).total_seconds()) > _DRIFT_SECONDS
-                )
-                if not drift:
-                    continue
+                touched = False
+                if panel.expire_at is not None:
+                    drift = (
+                        sub.expire_at is None
+                        or abs((panel.expire_at - sub.expire_at).total_seconds()) > _DRIFT_SECONDS
+                    )
+                    if drift:
+                        print(
+                            f"sub #{sub.id} (user {sub.user_id}): expire_at "
+                            f"bot={sub.expire_at} -> panel={panel.expire_at}"
+                        )
+                        if apply:
+                            sub.expire_at = panel.expire_at
+                        touched = True
 
-                print(
-                    f"sub #{sub.id} (user {sub.user_id}): "
-                    f"bot={sub.expire_at} -> panel={panel.expire_at}"
-                )
-                if apply:
-                    sub.expire_at = panel.expire_at
-                changed += 1
+                if sub.remnawave_id is None and panel.panel_id is not None:
+                    print(
+                        f"sub #{sub.id} (user {sub.user_id}): remnawave_id "
+                        f"None -> {panel.panel_id}"
+                    )
+                    if apply:
+                        sub.remnawave_id = panel.panel_id
+                    touched = True
+
+                if touched:
+                    changed += 1
 
             if apply and changed:
                 await uow.commit()
