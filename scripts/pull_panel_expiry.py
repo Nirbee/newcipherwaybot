@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 
 from src.core.logging import configure_logging, get_logger
 from src.infrastructure.di import AppContainer
@@ -47,6 +48,13 @@ async def main(argv: list[str]) -> int:
                 panel_ref = sub.panel_ref
                 if panel_ref is None:
                     continue
+                # A uuid/short_id-only ref can't be resolved to a v3 numeric id when the panel
+                # user's name doesn't match this bot's own naming (e.g. imported from another
+                # bot) — the client's last-resort lookup is by telegram_id, so attach it (same
+                # as subscription.py's grant/renew/change do before calling apply()).
+                user = await uow.users.get(sub.user_id)
+                if user is not None:
+                    panel_ref = replace(panel_ref, telegram_id=user.telegram_id)
                 try:
                     panel = await container.remnawave_client.get_user(panel_ref)
                 except Exception as exc:
