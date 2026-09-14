@@ -33,7 +33,7 @@ def _summarize(data: Any) -> str:
     resp = data.get("response", data) if isinstance(data, dict) else data
     if isinstance(resp, dict):
         # unwrap a common {response: {users: [...]}} shape
-        for key in ("users", "internalSquads", "nodes", "items", "data", "hosts"):
+        for key in ("users", "internalSquads", "nodes", "items", "data", "hosts", "configProfiles"):
             if isinstance(resp.get(key), list):
                 lst = resp[key]
                 first = sorted(lst[0].keys()) if lst and isinstance(lst[0], dict) else None
@@ -46,15 +46,19 @@ def _summarize(data: Any) -> str:
 
 
 def _summarize_nested(item: dict[str, Any], *, depth: int = 1) -> dict[str, Any]:
-    """Field NAMES only, one level deep into any object-valued field — no values, so
-    Reality/stream-settings shapes (pbk/sid/sni/fingerprint/flow/network) can be inspected
-    without printing secrets (private keys, short ids) to a terminal/log."""
+    """Field NAMES/shapes only, `depth` levels into any object/list-of-objects field — never
+    values, so Reality/stream-settings shapes (pbk/sid/sni/fingerprint/flow/network) can be
+    inspected without printing secrets (private keys, short ids, client uuids) to a log."""
     out: dict[str, Any] = {}
     for key, val in item.items():
-        if isinstance(val, dict) and depth > 0:
-            out[key] = _summarize_nested(val, depth=depth - 1) if depth > 1 else sorted(val.keys())
+        if isinstance(val, dict):
+            out[key] = _summarize_nested(val, depth=depth - 1) if depth > 0 else sorted(val.keys())
         elif isinstance(val, list):
-            out[key] = f"list[{len(val)}]"
+            if val and isinstance(val[0], dict):
+                shape = _summarize_nested(val[0], depth=depth - 1) if depth > 0 else sorted(val[0].keys())
+                out[key] = f"list[{len(val)}] of {shape}"
+            else:
+                out[key] = f"list[{len(val)}]"
         else:
             out[key] = type(val).__name__
     return out
@@ -75,6 +79,7 @@ async def main() -> int:
         ("internal-squads", "/api/internal-squads", None),
         ("nodes", "/api/nodes", None),
         ("hosts", "/api/hosts", None),
+        ("config-profiles", "/api/config-profiles", None),
         ("users (1 record, keys only)", "/api/users", {"size": 1, "start": 0}),
     ]
     async with httpx.AsyncClient(
@@ -114,6 +119,32 @@ async def main() -> int:
                 print("[hosts[0] shape               ] (empty list — no hosts configured?)")
         except Exception as exc:
             print(f"[hosts[0] shape               ] ERROR {type(exc).__name__}: {exc}")
+
+        # Hosts only reference an inbound by uuid (inbound.configProfileUuid +
+        # configProfileInboundUuid) — the actual Xray inbound (protocol/flow/streamSettings/
+        # realitySettings: publicKey, shortIds, network) lives on the config profile, a
+        # separate resource. Go several levels deep since Xray inbound JSON nests: profile ->
+        # inbounds[] -> streamSettings -> realitySettings/xhttpSettings/grpcSettings.
+        try:
+            r = await GET(client, "/api/config-profiles")
+            data = r.json()
+            resp = data.get("response", data)
+            profiles = None
+            for key in ("configProfiles", "profiles", "items"):
+                if isinstance(resp.get(key), list) if isinstance(resp, dict) else False:
+                    profiles = resp[key]
+                    break
+            if profiles is None and isinstance(resp, list):
+                profiles = resp
+            if profiles:
+                print(
+                    "[config-profiles[0] shape (names only)] "
+                    f"{_summarize_nested(dict(profiles[0]), depth=4)}"
+                )
+            else:
+                print(f"[config-profiles shape        ] no list found, top keys={sorted(resp.keys()) if isinstance(resp, dict) else type(resp).__name__}")
+        except Exception as exc:
+            print(f"[config-profiles shape        ] ERROR {type(exc).__name__}: {exc}")
 
         # Mapping verification: run one real user through our DTO mapper (flags only, no values).
         try:
