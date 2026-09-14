@@ -56,6 +56,10 @@ class PanelUser:
     tag: str | None = None  # e.g. "IMPORTED" — ignore user.created for these (gotcha #19)
     # Remnawave >=3.0 numeric user id (the uuid is gone there); None on 2.x panels.
     panel_id: int | None = None
+    # This user's own VLESS client uuid — the `id` a client outbound authenticates as. Needed
+    # to build a router's outbound config (see PanelHost); everything else there comes from
+    # get_hosts(), not from the user record.
+    vless_uuid: str | None = None
 
     @property
     def ref(self) -> PanelUserRef:
@@ -131,3 +135,39 @@ class PanelDevice:
     platform: str | None = None
     device_model: str | None = None
     created_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PanelHost:
+    """A Remnawave host resolved against its Xray inbound — everything a client outbound
+    config (a router's, in particular) needs to connect, short of the connecting user's own
+    identity (``PanelUser.vless_uuid``).
+
+    Hosts and inbounds are two separate Remnawave resources, cross-referenced by uuid: a host
+    is the public-facing presentation (address/port/sni/fingerprint/path an app or router
+    actually dials), an inbound is the underlying Xray protocol/Reality definition (network,
+    security, the keys). See ``RemnawaveClient.get_hosts()``.
+
+    This is a faithful mapping, not a router-specific filter: Hysteria2 hosts
+    (``protocol == "hysteria"``) and disabled hosts are still returned here — callers that need
+    only vless/enabled hosts (e.g. the router config generator) filter for themselves.
+    """
+
+    uuid: str
+    remark: str
+    address: str
+    port: int
+    protocol: str  # "vless" | "hysteria" | ...
+    network: str  # tcp | raw | xhttp | grpc | ws | ...
+    security: str  # reality | tls | none
+    sni: str | None
+    fingerprint: str | None
+    # Reality only. The panel stores only the inbound's PRIVATE key (correctly — the server
+    # must keep it secret); this is derived locally via X25519, never read from the API.
+    public_key: str | None
+    short_id: str  # Reality only; "" is a valid value (panel-side: any/no short id required)
+    path: str | None  # xhttp
+    xhttp_mode: str | None  # xhttp: auto | packet-up | stream-up
+    service_name: str | None  # grpc
+    is_disabled: bool
+    squad_uuids: tuple[str, ...]  # internal squads this host is reachable through

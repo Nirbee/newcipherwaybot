@@ -13,15 +13,19 @@ contract, so the rest of the app never learns which panel generation it talks to
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import random
 import uuid
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
 
 from src.application.dto.panel import (
     PanelDevice,
+    PanelHost,
     PanelNode,
     PanelRef,
     PanelSquad,
@@ -53,6 +57,7 @@ _PATHS = {
     "user_actions": "/api/users/{uuid}/actions/{action}",
     "internal_squads": "/api/internal-squads",
     "nodes": "/api/nodes",
+    "hosts": "/api/hosts",
 }
 
 # Remnawave >=3.0: users are addressed by their numeric id; ip-control became connections.
@@ -155,6 +160,7 @@ def _to_panel_user(data: dict[str, Any]) -> PanelUser:
         external_squad=data.get("externalSquadUuid") or data.get("activeExternalSquad"),
         tag=data.get("tag"),
         panel_id=panel_id,
+        vless_uuid=data.get("vlessUuid"),
     )
 
 
@@ -201,6 +207,59 @@ def _spec_payload(spec: ProvisionSpec) -> dict[str, Any]:
     # Caller-supplied passthrough fields (e.g. vlessUuid/shortUuid/status on import).
     payload.update(spec.extra)
     return payload
+
+
+def _derive_reality_public_key(private_key_b64: Any) -> str | None:
+    """Reality's client outbound needs the PUBLIC key; the panel only ever stores the
+    inbound's PRIVATE key (correctly — the server must keep it secret, and no Remnawave
+    version exposes a derived public key via the API). X25519's public key is a deterministic
+    function of the private key, so it's derived locally instead of being fetched."""
+    if not private_key_b64 or not isinstance(private_key_b64, str):
+        return None
+    try:
+        padded = private_key_b64 + "=" * (-len(private_key_b64) % 4)
+        raw = base64.urlsafe_b64decode(padded)
+        private_key = x25519.X25519PrivateKey.from_private_bytes(raw)
+        public_bytes = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+        )
+        return base64.urlsafe_b64encode(public_bytes).rstrip(b"=").decode("ascii")
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_panel_host(
+    host: dict[str, Any], inbound: dict[str, Any], squad_uuids: tuple[str, ...]
+) -> PanelHost:
+    """``host`` is one /api/hosts record; ``inbound`` is the matching record from an internal
+    squad's ``inbounds`` list (see ``RemnawaveHttpClient.get_hosts``) — same shape as
+    /api/config-profiles' flattened ``inbounds``, keyed by ``host["inbound"]["configProfileInboundUuid"]``.
+    """
+    raw = inbound.get("rawInbound") or {}
+    stream = raw.get("streamSettings") or {}
+    reality = stream.get("realitySettings") or {}
+    xhttp = stream.get("xhttpSettings") or {}
+    grpc = stream.get("grpcSettings") or {}
+    short_ids = [s for s in (reality.get("shortIds") or []) if isinstance(s, str)]
+    server_names = [s for s in (reality.get("serverNames") or []) if isinstance(s, str)]
+    return PanelHost(
+        uuid=str(host.get("uuid") or ""),
+        remark=str(host.get("remark") or ""),
+        address=str(host.get("address") or ""),
+        port=int(host.get("port") or 0),
+        protocol=str(inbound.get("type") or raw.get("protocol") or ""),
+        network=str(inbound.get("network") or stream.get("network") or ""),
+        security=str(inbound.get("security") or stream.get("security") or ""),
+        sni=host.get("sni") or (server_names[0] if server_names else None),
+        fingerprint=host.get("fingerprint") or None,
+        public_key=_derive_reality_public_key(reality.get("privateKey")),
+        short_id=short_ids[0] if short_ids else "",
+        path=host.get("path") or xhttp.get("path") or None,
+        xhttp_mode=xhttp.get("mode") or None,
+        service_name=grpc.get("serviceName") or None,
+        is_disabled=bool(host.get("isDisabled")),
+        squad_uuids=squad_uuids,
+    )
 
 
 class RemnawaveHttpClient:
@@ -625,3 +684,57 @@ class RemnawaveHttpClient:
             )
             for n in items
         ]
+
+    async def get_hosts(self) -> list[PanelHost]:
+        """Router-control-plane use only. Requires a Remnawave >=3.0 panel: the Reality/
+        transport parameters live on a separate config-profile inbound resource there — a
+        shape never observed live on a 2.x panel, so rather than guess at an unverified
+        format this intentionally returns nothing on 2.x.
+
+        A host only carries a reference to its inbound (``inbound.configProfileInboundUuid``)
+        and a squad EXCLUDE-list (``excludedInternalSquads``) — squad MEMBERSHIP is defined
+        from the other side, on each internal squad's own ``inbounds`` list (which embeds the
+        full inbound record, the same shape /api/config-profiles' flattened ``inbounds`` use).
+        So: fetch squads first to build an inbound-uuid -> (inbound, {squad uuids}) index,
+        then resolve every host against it.
+        """
+        if not await self._is_v3():
+            log.warning("get_hosts: not supported on Remnawave 2.x panels")
+            return []
+
+        squads_data = await self._request("GET", _PATHS["internal_squads"])
+        squad_items = (
+            squads_data.get("internalSquads", squads_data)
+            if isinstance(squads_data, dict)
+            else squads_data
+        )
+        inbound_index: dict[str, dict[str, Any]] = {}
+        inbound_squads: dict[str, set[str]] = {}
+        for sq in squad_items or []:
+            squad_uuid = str(sq.get("uuid") or "")
+            for ib in sq.get("inbounds") or []:
+                ib_uuid = str(ib.get("uuid") or "")
+                if not ib_uuid:
+                    continue
+                inbound_index.setdefault(ib_uuid, ib)
+                inbound_squads.setdefault(ib_uuid, set()).add(squad_uuid)
+
+        hosts_data = await self._request("GET", _PATHS["hosts"])
+        host_items = (
+            hosts_data.get("hosts", hosts_data) if isinstance(hosts_data, dict) else hosts_data
+        )
+
+        out: list[PanelHost] = []
+        for h in host_items or []:
+            ib_uuid = str((h.get("inbound") or {}).get("configProfileInboundUuid") or "")
+            inbound = inbound_index.get(ib_uuid)
+            if inbound is None:
+                log.warning(
+                    "host references an inbound not found in any squad",
+                    host_uuid=h.get("uuid"), inbound_uuid=ib_uuid,
+                )
+                continue
+            excluded = {str(x) for x in (h.get("excludedInternalSquads") or [])}
+            squads = tuple(sorted(inbound_squads.get(ib_uuid, set()) - excluded))
+            out.append(_to_panel_host(h, inbound, squads))
+        return out

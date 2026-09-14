@@ -7,6 +7,7 @@ import uuid
 
 from src.application.dto.panel import (
     PanelDevice,
+    PanelHost,
     PanelNode,
     PanelRef,
     PanelSquad,
@@ -33,6 +34,7 @@ class FakeRemnawaveClient:
         self.deleted: list[uuid.UUID | None] = []
         self.devices: dict[uuid.UUID | None, list[PanelDevice]] = {}
         self.users_ips: dict[str, list[tuple[str, list[str]]]] = {}
+        self.hosts: list[PanelHost] = []
 
     async def get_version(self) -> PanelVersion:
         maj, minr, pat = self._version
@@ -127,6 +129,9 @@ class FakeRemnawaveClient:
 
     async def get_nodes(self) -> list[PanelNode]:
         return [PanelNode(uuid=uuid.uuid4(), name="node-1", is_online=True)]
+
+    async def get_hosts(self) -> list[PanelHost]:
+        return list(self.hosts)
 
     # not part of the protocol, but handy in assertions
     def created_count(self) -> int:

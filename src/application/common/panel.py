@@ -15,6 +15,7 @@ from typing import Protocol, runtime_checkable
 
 from src.application.dto.panel import (
     PanelDevice,
+    PanelHost,
     PanelNode,
     PanelRef,
     PanelSquad,
@@ -61,3 +62,5 @@ class RemnawaveClient(Protocol):
     async def get_internal_squads(self) -> list[PanelSquad]: ...
 
     async def get_nodes(self) -> list[PanelNode]: ...
+
+    async def get_hosts(self) -> list[PanelHost]: ...
