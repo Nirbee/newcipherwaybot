@@ -146,6 +146,26 @@ async def main() -> int:
         except Exception as exc:
             print(f"[config-profiles shape        ] ERROR {type(exc).__name__}: {exc}")
 
+        # Squad -> host membership: hosts only carry `excludedInternalSquads` (a blocklist), so
+        # membership must be defined from the squad side via its `inbounds` field. Values here
+        # are just uuids/refs (not secrets), so print them for real to nail the join key exactly.
+        try:
+            r = await GET(client, "/api/internal-squads")
+            data = r.json()
+            resp = data.get("response", data)
+            squads = resp.get("internalSquads") if isinstance(resp, dict) else resp
+            if squads:
+                sq = dict(squads[0])
+                inbounds = sq.get("inbounds")
+                print(
+                    "[internal-squads[0].inbounds  ] "
+                    f"type={type(inbounds).__name__} value={inbounds!r}"
+                )
+            else:
+                print("[internal-squads[0].inbounds  ] (no squads)")
+        except Exception as exc:
+            print(f"[internal-squads[0].inbounds  ] ERROR {type(exc).__name__}: {exc}")
+
         # Mapping verification: run one real user through our DTO mapper (flags only, no values).
         try:
             r = await GET(client, "/api/users", {"size": 1, "start": 0})
