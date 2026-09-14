@@ -24,6 +24,7 @@ import Payments from "./screens/Payments";
 import Promogroups from "./screens/Promogroups";
 import Promos from "./screens/Promos";
 import Reminders from "./screens/Reminders";
+import Routers from "./screens/Routers";
 import Sales from "./screens/Sales";
 import Servers from "./screens/Servers";
 import Settings from "./screens/Settings";
@@ -69,6 +70,7 @@ const router = createHashRouter([
       { path: "ai-support", element: <AiSupport /> },
       { path: "blacklist", element: <Blacklist /> },
       { path: "servers", element: <Servers /> },
+      { path: "routers", element: <Routers /> },
       { path: "settings", element: <Settings /> },
       { path: "maintenance", element: <Maintenance /> },
     ],

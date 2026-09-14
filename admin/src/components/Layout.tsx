@@ -144,6 +144,7 @@ export default function Layout() {
     { icon: "🤖", path: "/ai-support", label: t.aiSupport },
     { icon: "🚫", path: "/blacklist", label: t.blacklist },
     { group: t.gSystem, icon: "🌍", path: "/servers", label: t.servers },
+    { icon: "📡", path: "/routers", label: t.routers },
     { icon: "⚙️", path: "/settings", label: t.settings },
     { icon: "🛠️", path: "/maintenance", label: t.maintenance },
   ];
