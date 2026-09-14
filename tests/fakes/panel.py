@@ -61,6 +61,7 @@ class FakeRemnawaveClient:
             telegram_id=spec.telegram_id,
             internal_squads=spec.internal_squads,
             external_squad=spec.external_squad,
+            tag=spec.tag,
         )
 
     async def create_user(self, spec: ProvisionSpec) -> PanelUser:

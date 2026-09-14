@@ -79,6 +79,7 @@ class RemnawaveService:
         internal_squads: tuple[str, ...] = (),
         external_squad: str | None = None,
         unlimited_expire: bool = False,
+        tag: str | None = None,
     ) -> ProvisionSpec:
         if unlimited_expire:
             expire_at = dt.datetime.now(dt.UTC) + dt.timedelta(days=UNLIMITED_EXPIRE_DAYS)
@@ -92,6 +93,7 @@ class RemnawaveService:
             internal_squads=internal_squads,
             external_squad=external_squad,
             description=f"tg:{telegram_id}" if telegram_id else None,
+            tag=tag,
         )
 
     async def provision(self, spec: ProvisionSpec) -> PanelUser:

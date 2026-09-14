@@ -118,6 +118,7 @@ class ProvisionSpec:
     internal_squads: tuple[str, ...] = ()
     external_squad: str | None = None
     description: str | None = None
+    tag: str | None = None  # e.g. "ROUTER" — admin-visible marker in the panel's own UI
     extra: dict[str, object] = field(default_factory=dict)
     # Explicit "clear" intent for a plan CHANGE. When set, a None device_limit / falsy
     # external_squad is actively CLEARED on the panel (hwidDeviceLimit:0 / externalSquadUuid:
