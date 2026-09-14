@@ -55,6 +55,7 @@ from src.infrastructure.database.dao.promocode import (
     PromocodeDAO,
 )
 from src.infrastructure.database.dao.referral import ReferralDAO, ReferralEarningDAO
+from src.infrastructure.database.dao.router_device import RouterDeviceDAO
 from src.infrastructure.database.dao.subscription import SubscriptionDAO
 from src.infrastructure.database.dao.transaction import TransactionDAO
 from src.infrastructure.database.dao.user import LinkedAccountDAO, UserDAO
@@ -108,6 +109,7 @@ class UnitOfWork:
         self.audit = AuditLogDAO(session)
         self.constructor_periods = ConstructorPeriodDAO(session)
         self.traffic_packs = TrafficPackDAO(session)
+        self.router_devices = RouterDeviceDAO(session)
         return self
 
     async def __aexit__(

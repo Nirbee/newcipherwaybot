@@ -309,3 +309,17 @@ class WithdrawalStatus(StrEnum):
     PENDING = "pending"
     PAID = "paid"
     REJECTED = "rejected"
+
+
+class RouterDeviceMode(StrEnum):
+    """Which host(s) a router device's config uses."""
+
+    AUTO = "auto"  # least-connections assignment across the eligible-hosts allowlist
+    FORCE = "force"  # admin pinned primary_host_uuid (and optionally backup_host_uuid)
+
+
+class RouterDeviceStatus(StrEnum):
+    PENDING = "pending"  # token issued, device has never checked in
+    ONLINE = "online"
+    OFFLINE = "offline"  # no heartbeat within the staleness window
+    REVOKED = "revoked"
