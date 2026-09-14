@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import ColumnElement, Select, func, or_, select
 from sqlalchemy import delete as sa_delete
 
+from src.application.services.ids import generate_referral_code
 from src.core.enums import (
+    AuthType,
     Role,
     SubscriptionStatus,
     TransactionStatus,
@@ -98,6 +100,7 @@ def _row(user: User, sub: Subscription | None) -> dict[str, Any]:
         "traffic_used_bytes": sub.traffic_used_bytes if sub else 0,
         "traffic_limit_bytes": sub.traffic_limit_bytes if sub else 0,
         "device_limit": sub.device_limit if sub else None,
+        "current_subscription_id": user.current_subscription_id,
         "created_at": iso(user.created_at),
         "last_seen_at": iso(user.updated_at),
     }
@@ -121,6 +124,53 @@ async def list_users(
         ).all()
         items = [_row(u, s) for u, s in rows]
     return Page(items=items, total=total, limit=limit, offset=offset)
+
+
+class UserCreateIn(BaseModel):
+    """Manual onboarding — e.g. a technician registering a cash customer for a router install
+    who has no bot interaction (no /start) yet, or an email-only contact. Not the normal
+    signup path (that's /start or the web cabinet's own registration); this is admin-only."""
+
+    telegram_id: int | None = None
+    username: str | None = Field(None, max_length=64)
+    first_name: str | None = Field(None, max_length=128)
+    email: str | None = Field(None, max_length=255)
+
+    @model_validator(mode="after")
+    def _needs_an_identity(self) -> UserCreateIn:
+        if not self.telegram_id and not (self.email or "").strip():
+            raise ValueError("provide telegram_id or email")
+        return self
+
+
+@router.post("")
+async def create_user(
+    body: UserCreateIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    email = body.email.strip().lower() if body.email else None
+    async with container.uow() as uow:
+        if body.telegram_id and await uow.users.find_one(telegram_id=body.telegram_id):
+            raise HTTPException(409, "a user with this telegram_id already exists")
+        if email and await uow.users.find_one(email=email):
+            raise HTTPException(409, "a user with this email already exists")
+        user = User(
+            telegram_id=body.telegram_id,
+            username=(body.username or "").lstrip("@").strip() or None,
+            first_name=(body.first_name or "").strip() or None,
+            email=email,
+            auth_type=AuthType.TELEGRAM if body.telegram_id else AuthType.EMAIL,
+            referral_code=generate_referral_code(),
+        )
+        await uow.users.add(user)
+        await audit(
+            uow, identity, "user.create_manual", f"user:{user.id}",
+            telegram_id=body.telegram_id, email=email,
+        )
+        await uow.commit()
+        row = _row(user, None)
+    return row
 
 
 class CountersOut(BaseModel):

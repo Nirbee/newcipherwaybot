@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, dtTime } from "../api/client";
-import { Drawer, Field, Modal, SecretInput } from "../components/ui";
+import { Drawer, Field, Modal, Seg, SecretInput } from "../components/ui";
 import { useApp } from "../state/app";
 
 type Mode = "auto" | "force";
@@ -51,6 +51,21 @@ type CreateResp = {
   backup_host_uuid: string | null;
   warning: string | null;
 };
+type CustomerUser = {
+  id: number;
+  telegram_id: number | null;
+  username: string | null;
+  name: string | null;
+  status: string;
+  current_subscription_id: number | null;
+};
+type Plan = {
+  id: number;
+  name: string;
+  category: string;
+  is_active: boolean;
+  durations: { id: number; days: number }[];
+};
 
 function hostLabel(hosts: EligibleHost[] | AvailableHost[], uuid: string | null): string {
   if (!uuid) return "—";
@@ -72,11 +87,27 @@ export default function Routers() {
   });
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [subId, setSubId] = useState("");
+  const [customerMode, setCustomerMode] = useState<"find" | "new">("find");
+  const [searchQ, setSearchQ] = useState("");
+  const [searchResults, setSearchResults] = useState<CustomerUser[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [picked, setPicked] = useState<CustomerUser | null>(null);
+  const [newTelegramId, setNewTelegramId] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [grantPlanId, setGrantPlanId] = useState<number | "">("");
+  const [grantDays, setGrantDays] = useState(30);
   const [label, setLabel] = useState("");
   const [mode, setMode] = useState<Mode>("auto");
   const [primaryHost, setPrimaryHost] = useState("");
   const [note, setNote] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const plans = useQuery({
+    queryKey: ["plans-for-routers"],
+    queryFn: () => api.get<{ items: Plan[] }>("/api/admin/plans"),
+    enabled: createOpen,
+  });
 
   const [tokenModal, setTokenModal] = useState<{ label: string; token: string; warning: string | null } | null>(null);
   const [hostsOpen, setHostsOpen] = useState(false);
@@ -90,16 +121,60 @@ export default function Routers() {
   });
 
   function resetCreate() {
-    setSubId("");
+    setCustomerMode("find");
+    setSearchQ("");
+    setSearchResults([]);
+    setPicked(null);
+    setNewTelegramId("");
+    setNewUsername("");
+    setNewEmail("");
+    setGrantPlanId("");
+    setGrantDays(30);
     setLabel("");
     setMode("auto");
     setPrimaryHost("");
     setNote("");
   }
 
+  async function searchUsers() {
+    if (!searchQ.trim()) return;
+    setSearching(true);
+    try {
+      const r = await api.get<{ items: CustomerUser[] }>(
+        `/api/admin/users?q=${encodeURIComponent(searchQ.trim())}&limit=8`,
+      );
+      setSearchResults(r.items);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function registerNew() {
+    if (!newTelegramId.trim() && !newEmail.trim()) {
+      toast(t.routersNeedIdentity);
+      return;
+    }
+    try {
+      const u = await api.post<CustomerUser>("/api/admin/users", {
+        telegram_id: newTelegramId.trim() ? Number(newTelegramId.trim()) : undefined,
+        username: newUsername.trim() || undefined,
+        email: newEmail.trim() || undefined,
+      });
+      setPicked(u);
+      toast("✓");
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
   async function create() {
-    const sid = Number(subId);
-    if (!sid || !label.trim()) {
+    if (!picked) {
+      toast(t.routersPickCustomer);
+      return;
+    }
+    if (!label.trim()) {
       toast(t.routersFillRequired);
       return;
     }
@@ -107,10 +182,31 @@ export default function Routers() {
       toast(t.routersForceNeedsHost);
       return;
     }
+    const finalLabel = label.trim();
+    setCreating(true);
     try {
+      let subId = picked.current_subscription_id;
+      if (!subId) {
+        if (!grantPlanId) {
+          toast(t.routersPickPlan);
+          setCreating(false);
+          return;
+        }
+        await api.post(`/api/admin/users/${picked.id}/grant`, {
+          plan_id: grantPlanId,
+          days: grantDays,
+        });
+        const fresh = await api.get<CustomerUser>(`/api/admin/users/${picked.id}`);
+        subId = fresh.current_subscription_id;
+        if (!subId) {
+          toast(t.routersGrantFailed);
+          setCreating(false);
+          return;
+        }
+      }
       const r = await api.post<CreateResp>("/api/admin/routers", {
-        subscription_id: sid,
-        label: label.trim(),
+        subscription_id: subId,
+        label: finalLabel,
         mode,
         primary_host_uuid: mode === "force" ? primaryHost : undefined,
         note: note.trim() || undefined,
@@ -118,9 +214,11 @@ export default function Routers() {
       setCreateOpen(false);
       resetCreate();
       void qc.invalidateQueries({ queryKey: ["routers"] });
-      setTokenModal({ label, token: r.token, warning: r.warning });
+      setTokenModal({ label: finalLabel, token: r.token, warning: r.warning });
     } catch (e) {
       toast((e as Error).message);
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -204,7 +302,13 @@ export default function Routers() {
           <button className="btn secondary" onClick={openHostsModal}>
             {t.routersEligibleHosts}
           </button>
-          <button className="btn primary" onClick={() => setCreateOpen(true)}>
+          <button
+            className="btn primary"
+            onClick={() => {
+              resetCreate();
+              setCreateOpen(true);
+            }}
+          >
             {t.routersCreate}
           </button>
         </div>
@@ -282,17 +386,146 @@ export default function Routers() {
       {createOpen && (
         <Modal title={t.routersCreate} onClose={() => setCreateOpen(false)}>
           <div className="grid" style={{ gap: 12 }}>
-            <Field label={t.routersSubId}>
-              <input
-                className="input mono"
-                type="number"
-                value={subId}
-                onChange={(e) => setSubId(e.target.value)}
-              />
-              <span className="dim" style={{ fontSize: 11 }}>
-                {t.routersSubIdHint}
-              </span>
-            </Field>
+            {picked ? (
+              <div className="card" style={{ padding: 10 }}>
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <span>
+                    <b>{picked.name ?? picked.username ?? `id${picked.telegram_id ?? picked.id}`}</b>
+                    {picked.username && <span className="dim"> @{picked.username}</span>}
+                    <div className="dim" style={{ fontSize: 11.5 }}>
+                      {picked.current_subscription_id
+                        ? `${t.routersSubId} #${picked.current_subscription_id}`
+                        : t.routersNoSub}
+                    </div>
+                  </span>
+                  <button className="btn secondary sm" onClick={() => setPicked(null)}>
+                    {t.routersChangeCustomer}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Seg
+                  value={customerMode}
+                  options={[
+                    { id: "find" as const, label: t.routersFindCustomer },
+                    { id: "new" as const, label: t.routersNewCustomer },
+                  ]}
+                  onChange={setCustomerMode}
+                />
+                {customerMode === "find" ? (
+                  <Field label={t.routersSearchPh}>
+                    <div className="row">
+                      <input
+                        className="input"
+                        style={{ flex: 1 }}
+                        value={searchQ}
+                        placeholder={t.routersSearchPh}
+                        onChange={(e) => setSearchQ(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && void searchUsers()}
+                      />
+                      <button className="btn secondary sm" disabled={searching} onClick={() => void searchUsers()}>
+                        {t.routersSearchBtn}
+                      </button>
+                    </div>
+                    {searchResults.length > 0 && (
+                      <div className="grid" style={{ gap: 2, marginTop: 6 }}>
+                        {searchResults.map((u) => (
+                          <button
+                            key={u.id}
+                            type="button"
+                            className="btn secondary sm"
+                            style={{ justifyContent: "space-between", textAlign: "left" }}
+                            onClick={() => setPicked(u)}
+                          >
+                            <span>
+                              {u.name ?? u.username ?? `id${u.telegram_id ?? u.id}`}
+                              {u.username && <span className="dim"> @{u.username}</span>}
+                            </span>
+                            <span className="dim">
+                              {u.current_subscription_id ? "✓ " + t.routersHasSub : t.routersNoSub}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </Field>
+                ) : (
+                  <div className="grid" style={{ gap: 10 }}>
+                    <Field label={t.routersNewTelegramId}>
+                      <input
+                        className="input mono"
+                        type="number"
+                        value={newTelegramId}
+                        onChange={(e) => setNewTelegramId(e.target.value)}
+                      />
+                    </Field>
+                    <Field label={t.routersNewUsername}>
+                      <input
+                        className="input"
+                        value={newUsername}
+                        placeholder="@username"
+                        onChange={(e) => setNewUsername(e.target.value)}
+                      />
+                    </Field>
+                    <Field label={t.routersNewEmail}>
+                      <input
+                        className="input"
+                        type="email"
+                        value={newEmail}
+                        onChange={(e) => setNewEmail(e.target.value)}
+                      />
+                    </Field>
+                    <span className="dim" style={{ fontSize: 11 }}>
+                      {t.routersNewHint}
+                    </span>
+                    <button className="btn secondary" onClick={() => void registerNew()}>
+                      {t.routersRegister}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {picked && !picked.current_subscription_id && (
+              <div className="card" style={{ padding: 10 }}>
+                <div className="caps" style={{ marginBottom: 8 }}>
+                  {t.routersGrantTitle}
+                </div>
+                <div className="grid" style={{ gap: 10 }}>
+                  <Field label={t.routersPlan}>
+                    <select
+                      className="input"
+                      value={grantPlanId}
+                      onChange={(e) => {
+                        const id = e.target.value ? Number(e.target.value) : "";
+                        setGrantPlanId(id);
+                        const p = plans.data?.items.find((x) => x.id === id);
+                        if (p?.durations[0]) setGrantDays(p.durations[0].days);
+                      }}
+                    >
+                      <option value="">{t.routersPlanPh}</option>
+                      {(plans.data?.items ?? [])
+                        .filter((p) => p.is_active)
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                  <Field label={t.routersDays}>
+                    <input
+                      className="input num"
+                      type="number"
+                      value={grantDays}
+                      onChange={(e) => setGrantDays(Number(e.target.value) || 0)}
+                    />
+                  </Field>
+                </div>
+              </div>
+            )}
+
             <Field label={t.routersLabel}>
               <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} />
             </Field>
@@ -325,7 +558,7 @@ export default function Routers() {
               <button className="btn secondary" onClick={() => setCreateOpen(false)}>
                 {t.cancel}
               </button>
-              <button className="btn primary" onClick={() => void create()}>
+              <button className="btn primary" disabled={creating} onClick={() => void create()}>
                 {t.create}
               </button>
             </div>

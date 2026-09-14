@@ -1575,3 +1575,68 @@ async def test_message_reports_undelivered(
     res = await http.post(f"/api/admin/users/{uid}/message", json={"text": "т"}, headers=auth)
     assert res.status_code == 502
     assert "не доставлено" in res.text
+
+
+# --- manual user onboarding (technician registers a cash/router customer) -----------------
+
+
+async def test_create_user_by_telegram_id(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    auth = await _login(http)
+    res = await http.post(
+        "/api/admin/users",
+        headers=auth,
+        json={"telegram_id": 909090, "username": "@newguy", "first_name": "Coстя"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["telegram_id"] == 909090
+    assert body["username"] == "newguy"  # leading @ stripped
+    assert body["current_subscription_id"] is None
+
+
+async def test_create_user_by_email(client: tuple[httpx.AsyncClient, ApiTestContainer]) -> None:
+    http, _ = client
+    auth = await _login(http)
+    res = await http.post(
+        "/api/admin/users", headers=auth, json={"email": "Client@Example.com"}
+    )
+    assert res.status_code == 200, res.text
+
+
+async def test_create_user_requires_telegram_id_or_email(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    auth = await _login(http)
+    res = await http.post("/api/admin/users", headers=auth, json={"username": "onlyname"})
+    assert res.status_code == 422
+
+
+async def test_create_user_rejects_duplicate_telegram_id(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    auth = await _login(http)
+    body = {"telegram_id": 42424242}
+    first = await http.post("/api/admin/users", headers=auth, json=body)
+    assert first.status_code == 200
+    second = await http.post("/api/admin/users", headers=auth, json=body)
+    assert second.status_code == 409
+
+
+async def test_create_user_rejects_duplicate_email(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    auth = await _login(http)
+    first = await http.post(
+        "/api/admin/users", headers=auth, json={"email": "dup@example.com"}
+    )
+    assert first.status_code == 200
+    second = await http.post(
+        "/api/admin/users", headers=auth, json={"email": "DUP@example.com"}
+    )
+    assert second.status_code == 409
