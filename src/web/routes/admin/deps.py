@@ -17,10 +17,17 @@ class AdminIdentity:
     user_id: int
     username: str
     role: Role
+    allowed_screens: list[str] | None = None
 
 
 def _unauthorized(detail: str = "unauthorized") -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+
+def _screen_of(path: str) -> str:
+    """First path segment after /api/admin/, e.g. '/api/admin/routers/5/rotate' -> 'routers'."""
+    rest = path.removeprefix("/api/admin/").removeprefix("/api/admin")
+    return rest.split("/", 1)[0]
 
 
 async def require_admin(
@@ -49,4 +56,20 @@ async def require_admin(
             )
     elif not user.role.is_staff:
         raise _unauthorized("admin access revoked")
-    return AdminIdentity(user_id=user.id, username=user.username or f"id{user.id}", role=user.role)
+
+    # A restricted staff account (allowed_admin_screens set, even to an empty list) can only
+    # reach the admin API prefixes explicitly granted to it — "auth" (login/me/logout) always
+    # passes so the frontend can still identify the session and redirect appropriately.
+    if user.allowed_admin_screens is not None:
+        screen = _screen_of(request.url.path)
+        if screen not in ("auth", *user.allowed_admin_screens):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="this admin account has no access to this screen",
+            )
+    return AdminIdentity(
+        user_id=user.id,
+        username=user.username or f"id{user.id}",
+        role=user.role,
+        allowed_screens=user.allowed_admin_screens,
+    )

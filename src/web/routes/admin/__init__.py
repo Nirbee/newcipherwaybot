@@ -31,6 +31,7 @@ from src.web.routes.admin import (
     servers,
     settings,
     smart,
+    staff,
     stats,
     tickets,
     uploads,
@@ -56,6 +57,7 @@ _protected.include_router(payments.router)
 _protected.include_router(tickets.router)
 _protected.include_router(servers.router)
 _protected.include_router(routers.router)
+_protected.include_router(staff.router)
 _protected.include_router(settings.router)
 _protected.include_router(menu.router)
 _protected.include_router(reminders.router)

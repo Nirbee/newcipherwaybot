@@ -33,9 +33,12 @@ const CAT_META: Record<string, { icon: string; ru: string; en: string }> = {
   support: { icon: "💬", ru: "ИИ-поддержка: модель и база знаний", en: "AI support: model and knowledge base" },
 };
 
+type Me = { role: string };
+
 export default function Settings() {
   const { t, lang, toast } = useApp();
   const nav = useNavigate();
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/admin/auth/me") });
   const qc = useQueryClient();
   const [q, setQ] = useState(() => {
     const handoff = sessionStorage.getItem("settings_q") ?? "";
@@ -252,6 +255,28 @@ export default function Settings() {
           className="kpis"
           style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}
         >
+          {me.data?.role === "OWNER" && (
+            <button
+              onClick={() => nav("/admins")}
+              style={{
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: 18,
+                cursor: "pointer",
+                textAlign: "left",
+                color: "var(--text)",
+              }}
+            >
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span style={{ fontSize: 22 }}>🔑</span>
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 600, margin: "10px 0 4px" }}>{t.admins}</div>
+              <div className="muted" style={{ fontSize: 12.5, minHeight: 34 }}>
+                {t.adminsTileHint}
+              </div>
+            </button>
+          )}
           {cats.map((c) => {
             const params = all.filter((p) => p.category === c.id);
             const overridden = params.filter((p) => p.is_overridden || p.key in dirty).length;

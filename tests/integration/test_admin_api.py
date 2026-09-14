@@ -1640,3 +1640,134 @@ async def test_create_user_rejects_duplicate_email(
         "/api/admin/users", headers=auth, json={"email": "DUP@example.com"}
     )
     assert second.status_code == 409
+
+
+# --- scoped admin accounts (staff.py) ------------------------------------------------------
+
+
+async def test_non_owner_cannot_manage_admins(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from src.application.services.ids import generate_referral_code
+    from src.core.enums import AuthType, Role
+
+    http, container = client
+    async with container.uow() as uow:
+        plain_admin = User(
+            username="plain_admin",
+            auth_type=AuthType.EMAIL,
+            role=Role.ADMIN,
+            referral_code=generate_referral_code(),
+            password_hash=hash_password("PlainAdmin123!"),
+        )
+        await uow.users.add(plain_admin)
+        await uow.commit()
+
+    res = await http.post(
+        "/api/admin/auth/login",
+        json={"username": "plain_admin", "password": "PlainAdmin123!"},
+    )
+    auth = {"Authorization": f"Bearer {res.json()['token']}"}
+    res = await http.post(
+        "/api/admin/admins", headers=auth, json={"username": "xx", "password": "xxxxxxxx"}
+    )
+    assert res.status_code == 403
+
+
+async def test_owner_creates_scoped_admin_confined_to_its_screens(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    owner_auth = await _login(http)
+
+    res = await http.post(
+        "/api/admin/admins",
+        headers=owner_auth,
+        json={"username": "router_tech", "password": "RouterTech123!", "allowed_screens": ["routers"]},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["allowed_screens"] == ["routers"]
+
+    login = await http.post(
+        "/api/admin/auth/login",
+        json={"username": "router_tech", "password": "RouterTech123!"},
+    )
+    assert login.status_code == 200
+    tech_auth = {"Authorization": f"Bearer {login.json()['token']}"}
+
+    # allowed screen: works
+    assert (await http.get("/api/admin/routers", headers=tech_auth)).status_code == 200
+    # always allowed regardless of scope
+    assert (await http.get("/api/admin/auth/me", headers=tech_auth)).status_code == 200
+    me = (await http.get("/api/admin/auth/me", headers=tech_auth)).json()
+    assert me["allowed_screens"] == ["routers"]
+    # not in the allowlist: blocked
+    assert (await http.get("/api/admin/users", headers=tech_auth)).status_code == 403
+    assert (await http.get("/api/admin/dashboard", headers=tech_auth)).status_code == 403
+
+
+async def test_unscopable_screen_names_are_dropped_silently(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """A frontend screen with no verified backend-prefix match (e.g. "tariffs") must never be
+    grantable — it would look like access was given while the request 403s anyway."""
+    http, _ = client
+    auth = await _login(http)
+    res = await http.post(
+        "/api/admin/admins",
+        headers=auth,
+        json={
+            "username": "half_bogus", "password": "HalfBogus123!",
+            "allowed_screens": ["routers", "tariffs", "not-a-real-screen"],
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["allowed_screens"] == ["routers"]
+
+
+async def test_patch_and_revoke_admin(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    auth = await _login(http)
+    created = await http.post(
+        "/api/admin/admins",
+        headers=auth,
+        json={"username": "temp_admin", "password": "TempAdmin123!", "allowed_screens": ["routers"]},
+    )
+    admin_id = created.json()["id"]
+
+    res = await http.patch(
+        f"/api/admin/admins/{admin_id}", headers=auth,
+        json={"allowed_screens": ["routers", "servers"]},
+    )
+    assert res.status_code == 200
+    listing = (await http.get("/api/admin/admins", headers=auth)).json()
+    row = next(i for i in listing["items"] if i["id"] == admin_id)
+    assert set(row["allowed_screens"]) == {"routers", "servers"}
+
+    res = await http.post(f"/api/admin/admins/{admin_id}/revoke", headers=auth)
+    assert res.status_code == 200
+
+    login = await http.post(
+        "/api/admin/auth/login",
+        json={"username": "temp_admin", "password": "TempAdmin123!"},
+    )
+    assert login.status_code == 401  # password cleared, role demoted
+
+
+async def test_owner_account_cannot_be_edited_via_admins_endpoints(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+    async with container.uow() as uow:
+        owner = await uow.users.find_one(username="root_admin")
+        owner_id = owner.id
+
+    res = await http.patch(
+        f"/api/admin/admins/{owner_id}", headers=auth, json={"allowed_screens": ["routers"]}
+    )
+    assert res.status_code == 400
+    res = await http.post(f"/api/admin/admins/{owner_id}/revoke", headers=auth)
+    assert res.status_code == 400

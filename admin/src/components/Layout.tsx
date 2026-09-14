@@ -2,14 +2,14 @@
    panel badge, theme/lang segments, avatar). */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 
 import { api, setToken } from "../api/client";
 import { useApp } from "../state/app";
 import { Seg } from "./ui";
 
-type Me = { user_id: number; username: string; role: string };
+type Me = { user_id: number; username: string; role: string; allowed_screens: string[] | null };
 type Counters = { all: number };
 type TicketsResp = { open_count: number };
 
@@ -147,18 +147,37 @@ export default function Layout() {
     { icon: "📡", path: "/routers", label: t.routers },
     { icon: "⚙️", path: "/settings", label: t.settings },
     { icon: "🛠️", path: "/maintenance", label: t.maintenance },
+    ...(me.data?.role === "OWNER"
+      ? [{ icon: "🔑", path: "/admins", label: t.admins }]
+      : []),
   ];
 
-  const current = items.find(
+  // A scoped staff account only sees (and may only reach) its granted screens — the backend
+  // already 403s anything else, this just keeps the sidebar and routing from offering dead ends.
+  const allowedScreens = me.data?.allowed_screens ?? null;
+  const visibleItems = allowedScreens
+    ? items.filter((i) => allowedScreens.includes(i.path.slice(1)))
+    : items;
+
+  useEffect(() => {
+    if (!allowedScreens) return;
+    const segment = loc.pathname === "/" ? "" : loc.pathname.split("/")[1];
+    if (!allowedScreens.includes(segment)) {
+      nav(allowedScreens[0] ? `/${allowedScreens[0]}` : "/login", { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedScreens, loc.pathname]);
+
+  const current = visibleItems.find(
     (i) => i.path === (loc.pathname === "/" ? "/" : "/" + loc.pathname.split("/")[1]),
   );
 
   const [navQ, setNavQ] = useState("");
   const filteredItems = useMemo(() => {
-    if (!navQ.trim()) return items;
+    if (!navQ.trim()) return visibleItems;
     const n = navQ.toLowerCase();
-    return items.filter((i) => i.label.toLowerCase().includes(n));
-  }, [items, navQ]);
+    return visibleItems.filter((i) => i.label.toLowerCase().includes(n));
+  }, [visibleItems, navQ]);
 
   // Settings quick-search: jump straight to the matching parameter block.
   const paramHits = useQuery({

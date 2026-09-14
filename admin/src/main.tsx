@@ -8,6 +8,7 @@ import { getToken } from "./api/client";
 import { AppProvider } from "./state/app";
 import "./theme.css";
 
+import Admins from "./screens/Admins";
 import AiSupport from "./screens/AiSupport";
 import Blacklist from "./screens/Blacklist";
 import Broadcasts from "./screens/Broadcasts";
@@ -73,6 +74,7 @@ const router = createHashRouter([
       { path: "routers", element: <Routers /> },
       { path: "settings", element: <Settings /> },
       { path: "maintenance", element: <Maintenance /> },
+      { path: "admins", element: <Admins /> },
     ],
   },
 ]);

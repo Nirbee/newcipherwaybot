@@ -62,11 +62,17 @@ class MeOut(BaseModel):
     user_id: int
     username: str
     role: str
+    allowed_screens: list[str] | None = None
 
 
 @router.get("/me", response_model=MeOut)
 async def me(identity: AdminIdentity = Depends(require_admin)) -> MeOut:
-    return MeOut(user_id=identity.user_id, username=identity.username, role=identity.role.name)
+    return MeOut(
+        user_id=identity.user_id,
+        username=identity.username,
+        role=identity.role.name,
+        allowed_screens=identity.allowed_screens,
+    )
 
 
 class DemoOut(BaseModel):

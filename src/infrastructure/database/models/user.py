@@ -87,6 +87,13 @@ class User(IntPk, TimestampMixin, Base):
     # circular constraint; integrity is maintained by SubscriptionService).
     current_subscription_id: Mapped[int | None] = mapped_column()
 
+    # --- scoped admin access -------------------------------------------------
+    # None (default): normal role-based access (ADMIN+ sees every /api/admin/* screen).
+    # A list (even empty): this staff account is confined to exactly these admin API path
+    # prefixes (e.g. ["routers"]) regardless of role — see require_admin. Set only via the
+    # owner-only /api/admin/admins endpoints, never by the account itself.
+    allowed_admin_screens: Mapped[list[str] | None] = mapped_column(JsonB)
+
     # --- saved card (provider charge token for autopay, Fernet-encrypted at rest) ---
     saved_payment_method_id: Mapped[str | None] = mapped_column(String(512))
     saved_payment_method_title: Mapped[str | None] = mapped_column(String(64))
