@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from src.core.enums import RouterDeviceStatus
 from src.infrastructure.database.dao.base import BaseDAO
@@ -19,11 +19,14 @@ class RouterDeviceDAO(BaseDAO[RouterDevice]):
         return await self.find_one(token_hash=token_hash)
 
     async def list_stale(self, older_than: dt.datetime) -> Sequence[RouterDevice]:
-        """Devices due to flip OFFLINE: no heartbeat since ``older_than``, currently PENDING
-        or ONLINE — already-OFFLINE/REVOKED devices need no further action."""
+        """ONLINE devices whose last heartbeat is older than ``older_than`` — due to flip
+        OFFLINE. PENDING is deliberately excluded: it means "never checked in yet" (created but
+        not installed), which is normal and can last arbitrarily long — flipping it to OFFLINE
+        would wrongly read as "was working, now isn't" to an admin. Already-OFFLINE/REVOKED
+        need no further action."""
         stmt = select(RouterDevice).where(
-            RouterDevice.status.in_((RouterDeviceStatus.PENDING, RouterDeviceStatus.ONLINE)),
-            or_(RouterDevice.last_seen_at.is_(None), RouterDevice.last_seen_at < older_than),
+            RouterDevice.status == RouterDeviceStatus.ONLINE,
+            RouterDevice.last_seen_at < older_than,
         )
         return (await self.session.scalars(stmt)).all()
 

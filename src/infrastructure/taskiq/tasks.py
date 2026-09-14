@@ -7,7 +7,7 @@ import datetime as dt
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from src.core.enums import PurchaseType, TransactionStatus, TransactionType
+from src.core.enums import PurchaseType, RouterDeviceStatus, TransactionStatus, TransactionType
 from src.core.logging import get_logger
 from src.infrastructure.taskiq.broker import broker, get_container, is_transient_infra
 
@@ -2040,3 +2040,24 @@ async def _autopay_charge_card(c: AppContainer, subscription_id: int) -> bool:
         return True
     await _lifecycle_dm(c, telegram_id, "autopay_failed")
     return False
+
+
+@broker.task(schedule=[{"cron": "*/5 * * * *"}])
+async def mark_stale_router_devices() -> int:
+    """Flip ONLINE router devices to OFFLINE once their heartbeat goes stale (>15 min).
+
+    The admin list/detail routes already compute a live `is_online` view for display (a stale
+    ONLINE reads as offline there regardless of the persisted column), but the persisted
+    `status` should catch up too — otherwise anything that later filters devices by
+    `status == ONLINE` (a future notification, a fleet health report) would be fooled by a
+    router that stopped heartbeating hours ago. PENDING is untouched here on purpose — see
+    RouterDeviceDAO.list_stale's docstring.
+    """
+    container = get_container()
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=15)
+    async with container.uow() as uow:
+        stale = await uow.router_devices.list_stale(cutoff)
+        for device in stale:
+            device.status = RouterDeviceStatus.OFFLINE
+        await uow.commit()
+    return len(stale)
