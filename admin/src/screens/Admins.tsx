@@ -51,6 +51,7 @@ export default function Admins() {
   const [editId, setEditId] = useState<number | null>(null);
   const [editScreens, setEditScreens] = useState<Record<string, boolean>>({});
   const [editFullAccess, setEditFullAccess] = useState(false);
+  const [editPassword, setEditPassword] = useState("");
 
   const scopable = data.data?.scopable_screens ?? [];
 
@@ -90,15 +91,23 @@ export default function Admins() {
     const checked: Record<string, boolean> = {};
     for (const s of a.allowed_screens ?? []) checked[s] = true;
     setEditScreens(checked);
+    setEditPassword("");
   }
 
   async function saveEdit() {
     if (editId === null) return;
+    if (editPassword && editPassword.length < 8) {
+      toast(t.adminsPasswordTooShort);
+      return;
+    }
     const allowed_screens = editFullAccess
       ? null
       : Object.entries(editScreens).filter(([, v]) => v).map(([k]) => k);
     try {
-      await api.patch(`/api/admin/admins/${editId}`, { allowed_screens });
+      await api.patch(`/api/admin/admins/${editId}`, {
+        allowed_screens,
+        password: editPassword || undefined,
+      });
       setEditId(null);
       void qc.invalidateQueries({ queryKey: ["admins"] });
       toast("✓");
@@ -219,7 +228,7 @@ export default function Admins() {
       )}
 
       {editId !== null && (
-        <Modal title={t.adminsEditAccess} onClose={() => setEditId(null)}>
+        <Modal title={t.adminsEditTitle} onClose={() => setEditId(null)}>
           <div className="grid" style={{ gap: 12 }}>
             <label className="row" style={{ gap: 8, fontSize: 13 }}>
               <input
@@ -243,6 +252,16 @@ export default function Admins() {
                 ))}
               </div>
             )}
+            <Field label={t.adminsNewPassword}>
+              <input
+                className="input mono"
+                type="password"
+                autoComplete="new-password"
+                placeholder={t.adminsNewPasswordPh}
+                value={editPassword}
+                onChange={(e) => setEditPassword(e.target.value)}
+              />
+            </Field>
             <div className="row" style={{ justifyContent: "flex-end" }}>
               <button className="btn secondary" onClick={() => setEditId(null)}>
                 {t.cancel}

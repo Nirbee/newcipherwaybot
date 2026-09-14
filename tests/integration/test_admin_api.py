@@ -1756,6 +1756,43 @@ async def test_patch_and_revoke_admin(
     assert login.status_code == 401  # password cleared, role demoted
 
 
+async def test_patch_admin_can_change_password(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """The Admins screen's edit modal changes a scoped admin's password via this same PATCH —
+    regression for the case where an admin got locked out with no in-panel way to fix it."""
+    http, _ = client
+    auth = await _login(http)
+    created = await http.post(
+        "/api/admin/admins",
+        headers=auth,
+        json={"username": "pw_admin", "password": "OldPassword123!", "allowed_screens": ["routers"]},
+    )
+    admin_id = created.json()["id"]
+
+    res = await http.patch(
+        f"/api/admin/admins/{admin_id}", headers=auth, json={"password": "NewPassword456!"},
+    )
+    assert res.status_code == 200
+
+    old_login = await http.post(
+        "/api/admin/auth/login",
+        json={"username": "pw_admin", "password": "OldPassword123!"},
+    )
+    assert old_login.status_code == 401
+
+    new_login = await http.post(
+        "/api/admin/auth/login",
+        json={"username": "pw_admin", "password": "NewPassword456!"},
+    )
+    assert new_login.status_code == 200
+
+    # allowed_screens must survive a password-only PATCH (field simply omitted, not cleared)
+    listing = (await http.get("/api/admin/admins", headers=auth)).json()
+    row = next(i for i in listing["items"] if i["id"] == admin_id)
+    assert row["allowed_screens"] == ["routers"]
+
+
 async def test_owner_account_cannot_be_edited_via_admins_endpoints(
     client: tuple[httpx.AsyncClient, ApiTestContainer],
 ) -> None:
