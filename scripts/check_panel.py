@@ -33,7 +33,7 @@ def _summarize(data: Any) -> str:
     resp = data.get("response", data) if isinstance(data, dict) else data
     if isinstance(resp, dict):
         # unwrap a common {response: {users: [...]}} shape
-        for key in ("users", "internalSquads", "nodes", "items", "data"):
+        for key in ("users", "internalSquads", "nodes", "items", "data", "hosts"):
             if isinstance(resp.get(key), list):
                 lst = resp[key]
                 first = sorted(lst[0].keys()) if lst and isinstance(lst[0], dict) else None
@@ -43,6 +43,21 @@ def _summarize(data: Any) -> str:
         first = sorted(resp[0].keys()) if resp and isinstance(resp[0], dict) else None
         return f"list count={len(resp)} first_keys={first}"
     return f"scalar={type(resp).__name__}"
+
+
+def _summarize_nested(item: dict[str, Any], *, depth: int = 1) -> dict[str, Any]:
+    """Field NAMES only, one level deep into any object-valued field — no values, so
+    Reality/stream-settings shapes (pbk/sid/sni/fingerprint/flow/network) can be inspected
+    without printing secrets (private keys, short ids) to a terminal/log."""
+    out: dict[str, Any] = {}
+    for key, val in item.items():
+        if isinstance(val, dict) and depth > 0:
+            out[key] = _summarize_nested(val, depth=depth - 1) if depth > 1 else sorted(val.keys())
+        elif isinstance(val, list):
+            out[key] = f"list[{len(val)}]"
+        else:
+            out[key] = type(val).__name__
+    return out
 
 
 async def main() -> int:
@@ -59,6 +74,7 @@ async def main() -> int:
         ("system/stats", "/api/system/stats", None),
         ("internal-squads", "/api/internal-squads", None),
         ("nodes", "/api/nodes", None),
+        ("hosts", "/api/hosts", None),
         ("users (1 record, keys only)", "/api/users", {"size": 1, "start": 0}),
     ]
     async with httpx.AsyncClient(
@@ -84,6 +100,20 @@ async def main() -> int:
             else:
                 snippet = "" if "json" in ctype else r.text[:80].replace("\n", " ")
                 print(f"[{name:32}] {r.status_code}  ctype={ctype.split(';')[0]} {snippet}")
+
+        # Host shape: field names one level deep (Reality/stream settings are almost certainly
+        # nested) — needed to write the get_hosts() parser without guessing at the real shape.
+        try:
+            r = await GET(client, "/api/hosts")
+            data = r.json()
+            resp = data.get("response", data)
+            hosts = resp.get("hosts") if isinstance(resp, dict) else resp
+            if hosts:
+                print(f"[hosts[0] shape (names only)  ] {_summarize_nested(dict(hosts[0]), depth=2)}")
+            else:
+                print("[hosts[0] shape               ] (empty list — no hosts configured?)")
+        except Exception as exc:
+            print(f"[hosts[0] shape               ] ERROR {type(exc).__name__}: {exc}")
 
         # Mapping verification: run one real user through our DTO mapper (flags only, no values).
         try:
