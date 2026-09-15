@@ -1,0 +1,17 @@
+# CipherWay router agent config — copy to /opt/etc/cipherway-agent/agent.conf and fill in.
+# Sourced as a plain POSIX shell file by agent.sh — keep it to simple VAR="value" lines.
+
+# Base URL of the bot's web API (no trailing slash).
+API_BASE="https://cabinet.cipherway.net.ru"
+
+# This device's bearer token — from the admin panel: Роутеры → создать/rotate. Shown once.
+TOKEN=""
+
+# Directory XKeen merges *.json config fragments from on this router. Varies by XKeen
+# version/install — check with `xkeen -status` or look for the directory containing XKeen's
+# own numbered *.json files (e.g. `ls /opt/etc/xray/configs/`) before setting this.
+CONFDIR="/opt/etc/xray/configs"
+
+# Filename this agent writes its outbounds/routing fragment to inside CONFDIR. Pick a name
+# that sorts after XKeen's own base files (inbounds/log/dns) so it doesn't collide with them.
+OUTFILE="10_cipherway.json"
