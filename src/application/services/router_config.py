@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from src.application.dto.panel import PanelHost
@@ -24,10 +25,96 @@ _TCP_LIKE_NETWORKS = {"tcp", "raw"}
 
 _DIRECT: dict[str, Any] = {"tag": "direct", "protocol": "freedom"}
 _BLOCK: dict[str, Any] = {"tag": "block", "protocol": "blackhole"}
+_BALANCER_TAG = "balancer"
+_NON_PROXY_PROTOCOLS = {"freedom", "blackhole", "dns"}
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingTemplate:
+    """Split-tunnel rules lifted from the Xray-JSON subscription Happ receives, already
+    retargeted at this router config's own tags (``direct``/``block``/``balancer``)."""
+
+    rules: tuple[dict[str, Any], ...]
+    fallback_tag: str | None = None
+    domain_strategy: str | None = None
+    domain_matcher: str | None = None
+    dns: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rules": list(self.rules),
+            "fallback_tag": self.fallback_tag,
+            "domain_strategy": self.domain_strategy,
+            "domain_matcher": self.domain_matcher,
+            "dns": self.dns,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RoutingTemplate:
+        return cls(
+            rules=tuple(data.get("rules") or ()),
+            fallback_tag=data.get("fallback_tag"),
+            domain_strategy=data.get("domain_strategy"),
+            domain_matcher=data.get("domain_matcher"),
+            dns=data.get("dns"),
+        )
+
+
+def routing_template_from_subscription(payload: Any) -> RoutingTemplate | None:
+    """``payload`` is a Remnawave Xray-JSON subscription (a list of full client configs, or a
+    single one). Rules sending traffic to a proxy outbound or balancer are retargeted at the
+    router's balancer; rules to freedom/blackhole outbounds keep going direct/block. Rules
+    keyed on ``inboundTag`` are dropped (client-app inbounds don't exist on a router), as are
+    rules to outbounds this config has no counterpart for (e.g. a ``dns-out``)."""
+    configs = payload if isinstance(payload, list) else [payload]
+    config = next((c for c in configs if isinstance(c, dict) and c.get("routing")), None)
+    if config is None or not isinstance(config["routing"], dict):
+        return None
+    routing: dict[str, Any] = config["routing"]
+
+    tag_map: dict[str, str] = {"direct": "direct", "block": "block"}
+    proxy_tags: set[str] = set()
+    for ob in config.get("outbounds") or []:
+        if not isinstance(ob, dict) or not ob.get("tag"):
+            continue
+        protocol = ob.get("protocol")
+        if protocol == "freedom":
+            tag_map[ob["tag"]] = "direct"
+        elif protocol == "blackhole":
+            tag_map[ob["tag"]] = "block"
+        elif protocol not in _NON_PROXY_PROTOCOLS:
+            proxy_tags.add(ob["tag"])
+
+    balancers = [b for b in routing.get("balancers") or [] if isinstance(b, dict)]
+    fallback = next((b.get("fallbackTag") for b in balancers if b.get("fallbackTag")), None)
+
+    rules: list[dict[str, Any]] = []
+    for rule in routing.get("rules") or []:
+        if not isinstance(rule, dict) or rule.get("inboundTag"):
+            continue
+        out_tag = rule.get("outboundTag")
+        base = {k: v for k, v in rule.items() if k not in ("outboundTag", "balancerTag")}
+        if rule.get("balancerTag") or out_tag in proxy_tags or str(out_tag).startswith("proxy"):
+            rules.append({**base, "balancerTag": _BALANCER_TAG})
+        elif out_tag in tag_map:
+            rules.append({**base, "outboundTag": tag_map[out_tag]})
+
+    dns = config.get("dns") if isinstance(config.get("dns"), dict) else None
+    return RoutingTemplate(
+        rules=tuple(rules),
+        fallback_tag=tag_map.get(fallback) if fallback else None,
+        domain_strategy=routing.get("domainStrategy"),
+        domain_matcher=routing.get("domainMatcher"),
+        dns=dns,
+    )
 
 
 def build_outbounds(
-    hosts: Sequence[PanelHost], *, vless_uuid: str, subscription_active: bool
+    hosts: Sequence[PanelHost],
+    *,
+    vless_uuid: str,
+    subscription_active: bool,
+    template: RoutingTemplate | None = None,
 ) -> dict[str, Any]:
     """``hosts`` must already be the small candidate set picked for ONE router (its primary +
     optional backup) — never a whole squad.
@@ -36,6 +123,9 @@ def build_outbounds(
     eligible-hosts allowlist is empty) both collapse to the same output: freedom-only, no proxy
     outbounds — so the customer keeps a working (if unprotected) connection instead of losing
     internet outright. Telling those two cases apart for alerting is the caller's job.
+
+    ``template`` carries the admin's split-tunnel rules (RU services direct); without one,
+    everything goes through the balancer.
     """
     proxies: list[dict[str, Any]] = []
     if subscription_active:
@@ -55,12 +145,26 @@ def build_outbounds(
             "probeUrl": "https://www.gstatic.com/generate_204",
             "probeInterval": "5m",
         }
-        config["routing"] = {
-            "balancers": [
-                {"tag": "balancer", "selector": ["proxy-"], "strategy": {"type": "leastPing"}}
-            ],
-            "rules": [{"type": "field", "network": "tcp,udp", "balancerTag": "balancer"}],
+        balancer: dict[str, Any] = {
+            "tag": _BALANCER_TAG,
+            "selector": ["proxy-"],
+            "strategy": {"type": "leastPing"},
         }
+        routing: dict[str, Any] = {"balancers": [balancer]}
+        rules: list[dict[str, Any]] = []
+        if template is not None:
+            rules.extend(template.rules)
+            if template.fallback_tag:
+                balancer["fallbackTag"] = template.fallback_tag
+            if template.domain_strategy:
+                routing["domainStrategy"] = template.domain_strategy
+            if template.domain_matcher:
+                routing["domainMatcher"] = template.domain_matcher
+            if template.dns:
+                config["dns"] = template.dns
+        rules.append({"type": "field", "network": "tcp,udp", "balancerTag": _BALANCER_TAG})
+        routing["rules"] = rules
+        config["routing"] = routing
     return config
 
 

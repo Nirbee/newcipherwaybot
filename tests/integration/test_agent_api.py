@@ -248,3 +248,68 @@ async def test_heartbeat_rate_limited_on_rapid_repeat(
     assert first.status_code == 204
     second = await http.post("/api/agent/heartbeat", headers=headers, json={})
     assert second.status_code == 429
+
+
+_HAPP_JSON = [
+    {
+        "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {"type": "field", "domain": ["domain:gosuslugi.ru"], "outboundTag": "direct"},
+                {"type": "field", "network": "tcp,udp", "balancerTag": "auto"},
+            ],
+            "balancers": [{"tag": "auto", "selector": ["proxy"], "fallbackTag": "direct"}],
+        },
+    }
+]
+
+
+async def test_config_includes_split_tunnel_rules_from_happ_subscription(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-a")]
+    container.remnawave_client.subscription_json = _HAPP_JSON
+    device_id, token = await _create_device(
+        http, container, telegram_id=20, host_uuids=["host-a"]
+    )
+
+    res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
+    rules = res.json()["routing"]["rules"]
+    assert rules[0] == {
+        "type": "field",
+        "domain": ["domain:gosuslugi.ru"],
+        "outboundTag": "direct",
+    }
+    assert rules[-1]["balancerTag"] == "balancer"
+    assert res.json()["routing"]["balancers"][0]["fallbackTag"] == "direct"
+
+    # Cached: the next poll doesn't hit the subscription page again.
+    container.redis.store.pop(f"agent:cfg:{device_id}", None)
+    await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    assert container.remnawave_client.subscription_json_fetches == 1
+
+
+async def test_config_falls_back_to_last_good_rules_when_fetch_fails(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-a")]
+    container.remnawave_client.subscription_json = _HAPP_JSON
+    device_id, token = await _create_device(
+        http, container, telegram_id=21, host_uuids=["host-a"]
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    first = await http.get("/api/agent/config", headers=headers)
+
+    store = container.redis.store
+    for key in [k for k in store if k.startswith("agent:rt:") and not k.endswith(":last")]:
+        store.pop(key)
+    container.redis.store.pop(f"agent:cfg:{device_id}", None)
+    container.remnawave_client.subscription_json = RuntimeError("sub page down")
+
+    second = await http.get("/api/agent/config", headers=headers)
+    assert second.status_code == 200
+    assert second.headers["ETag"] == first.headers["ETag"]

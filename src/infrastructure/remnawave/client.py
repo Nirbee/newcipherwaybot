@@ -687,6 +687,18 @@ class RemnawaveHttpClient:
             for n in items
         ]
 
+    async def fetch_subscription_json(self, subscription_url: str) -> Any:
+        """The Xray-JSON rendering of a subscription, exactly as Happ receives it (the
+        ``/json`` client-type suffix — the plain URL answers unrecognized clients with a stub
+        "App not supported" link). Absolute URL on the public subscription host, not the panel
+        API base, hence a one-off client rather than ``self._http``."""
+        url = subscription_url.rstrip("/") + "/json"
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
+            resp = await http.get(url, headers={"User-Agent": "Happ/3.7.0"})
+        if resp.status_code != 200:
+            raise RemnawaveError(f"subscription json fetch failed ({resp.status_code})")
+        return resp.json()
+
     async def get_hosts(self) -> list[PanelHost]:
         """Router-control-plane use only. Requires a Remnawave >=3.0 panel: the Reality/
         transport parameters live on a separate config-profile inbound resource there — a

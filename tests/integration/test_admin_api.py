@@ -76,6 +76,9 @@ class _FakeRedis:
         self.store[key] = value
         return True
 
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
     async def aclose(self) -> None: ...
 
 

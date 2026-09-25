@@ -11,7 +11,7 @@ the key its probed panel version understands.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from src.application.dto.panel import (
     PanelDevice,
@@ -64,3 +64,5 @@ class RemnawaveClient(Protocol):
     async def get_nodes(self) -> list[PanelNode]: ...
 
     async def get_hosts(self) -> list[PanelHost]: ...
+
+    async def fetch_subscription_json(self, subscription_url: str) -> Any: ...

@@ -16,12 +16,18 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
-from src.application.services.router_config import build_outbounds, config_etag
+from src.application.services.router_config import (
+    RoutingTemplate,
+    build_outbounds,
+    config_etag,
+    routing_template_from_subscription,
+)
 from src.core.enums import RouterDeviceStatus
 from src.core.logging import get_logger
 from src.infrastructure.database.models.router_device import RouterDevice
@@ -35,6 +41,7 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 # script or clock drift, never tight enough to bite a legitimately-timed poll.
 _RATE_LIMIT_SECONDS = 50
 _LAST_ERROR_MAX = 512
+_TEMPLATE_TTL_SECONDS = 600
 
 
 def _hash_token(token: str) -> str:
@@ -46,6 +53,51 @@ async def _rate_limit_ok(container: AppContainer, key: str) -> bool:
         return bool(await container.redis.set(key, "1", nx=True, ex=_RATE_LIMIT_SECONDS))
     except Exception:
         return True  # a redis hiccup must not block a legitimate poll
+
+
+async def _redis_get(container: AppContainer, key: str) -> str | None:
+    try:
+        value = await container.redis.get(key)
+    except Exception:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value
+
+
+async def _redis_set(container: AppContainer, key: str, value: str, ex: int | None) -> None:
+    try:
+        await container.redis.set(key, value, ex=ex)
+    except Exception:
+        log.warning("agent: redis write failed", key=key)
+
+
+async def _routing_template(
+    container: AppContainer, subscription_id: int, subscription_url: str | None
+) -> RoutingTemplate | None:
+    """The split-tunnel rules Happ gets for this subscription, cached per subscription (a
+    panel can hand different external squads different templates). A failed refresh falls
+    back to the last good copy so a subscription-page blip doesn't flip every router's
+    routing to all-proxy and back."""
+    fresh_key = f"agent:rt:{subscription_id}"
+    stale_key = f"agent:rt:{subscription_id}:last"
+    cached = await _redis_get(container, fresh_key)
+    if cached is not None:
+        return RoutingTemplate.from_dict(json.loads(cached)) if cached != "null" else None
+    if subscription_url:
+        try:
+            payload = await container.remnawave_client.fetch_subscription_json(subscription_url)
+            template = routing_template_from_subscription(payload)
+        except Exception as exc:
+            log.warning("agent: routing template fetch failed", error=str(exc))
+        else:
+            encoded = json.dumps(template.to_dict() if template else None)
+            await _redis_set(container, fresh_key, encoded, _TEMPLATE_TTL_SECONDS)
+            if template is not None:
+                await _redis_set(container, stale_key, encoded, None)
+            return template
+    stale = await _redis_get(container, stale_key)
+    return RoutingTemplate.from_dict(json.loads(stale)) if stale else None
 
 
 async def require_device(
@@ -85,6 +137,7 @@ async def get_config(
     panel_ref = sub.panel_ref
     vless_uuid = ""
     hosts: list[Any] = []
+    template: RoutingTemplate | None = None
     if panel_ref is not None:
         # Same telegram_id-attachment every other panel_ref caller needs (see client.py's
         # _v3_id): a uuid/short_id-only ref can't resolve on a v3 panel without it.
@@ -99,9 +152,15 @@ async def get_config(
             log.warning("agent config: panel unavailable", device_id=device.id, error=str(exc))
             raise HTTPException(503, "panel temporarily unavailable") from exc
         vless_uuid = (panel_user.vless_uuid if panel_user else None) or ""
+        template = await _routing_template(
+            container, sub.id, panel_user.subscription_url if panel_user else None
+        )
 
     config = build_outbounds(
-        hosts, vless_uuid=vless_uuid, subscription_active=sub.status.is_usable
+        hosts,
+        vless_uuid=vless_uuid,
+        subscription_active=sub.status.is_usable,
+        template=template,
     )
     etag = config_etag(config)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from typing import Any
 
 from src.application.dto.panel import (
     PanelDevice,
@@ -35,6 +36,8 @@ class FakeRemnawaveClient:
         self.devices: dict[uuid.UUID | None, list[PanelDevice]] = {}
         self.users_ips: dict[str, list[tuple[str, list[str]]]] = {}
         self.hosts: list[PanelHost] = []
+        self.subscription_json: Any = None
+        self.subscription_json_fetches = 0
 
     async def get_version(self) -> PanelVersion:
         maj, minr, pat = self._version
@@ -133,6 +136,12 @@ class FakeRemnawaveClient:
 
     async def get_hosts(self) -> list[PanelHost]:
         return list(self.hosts)
+
+    async def fetch_subscription_json(self, subscription_url: str) -> Any:
+        self.subscription_json_fetches += 1
+        if isinstance(self.subscription_json, Exception):
+            raise self.subscription_json
+        return self.subscription_json
 
     # not part of the protocol, but handy in assertions
     def created_count(self) -> int:
