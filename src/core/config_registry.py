@@ -184,6 +184,16 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "DEFAULT_DEVICE_LIMIT", C.SUBSCRIPTIONS, INT, 3, "Устройств по умолчанию", "Default devices"
     ),
     _p(
+        "ROUTER_TRIAL_DAYS",
+        C.SUBSCRIPTIONS,
+        INT,
+        3,
+        "Пробный период роутера (дней)",
+        "Router trial days",
+        "Сколько работает VPN на новом роутере до оплаты",
+        "How long a new router works before payment",
+    ),
+    _p(
         "AUTO_RENEWAL_ENABLED",
         C.SUBSCRIPTIONS,
         BOOL,

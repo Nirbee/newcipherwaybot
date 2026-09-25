@@ -63,3 +63,6 @@ class RouterDevice(IntPk, TimestampMixin, Base):
     diagnostics: Mapped[dict[str, Any] | None] = mapped_column(JsonB)
 
     note: Mapped[str | None] = mapped_column(String(512))
+    # One-time code in the customer's QR (t.me/<bot>?start=router_<code>); cleared once a
+    # Telegram account claims the router.
+    claim_code: Mapped[str | None] = mapped_column(String(32), unique=True, index=True)

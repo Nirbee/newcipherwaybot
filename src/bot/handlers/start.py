@@ -9,6 +9,7 @@ from aiogram import F, Router
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from src.application.services import router_onboarding as onboarding
 from src.bot.menu_render import send_main_menu
 from src.core.logging import get_logger
 from src.infrastructure.database.models.user import User
@@ -37,11 +38,106 @@ async def cmd_start(
     elif param.startswith("weblogin_"):
         await _weblogin_prompt(message, container, param.removeprefix("weblogin_"))
         return  # the confirm keyboard IS the answer; the menu would push it off-screen
+    elif param.startswith(onboarding.CLAIM_START_PREFIX):
+        await _router_claim(
+            message, container, db_user, param.removeprefix(onboarding.CLAIM_START_PREFIX)
+        )
+        return  # the plan offer IS the answer
+    elif param == onboarding.PLANS_START_PARAM:
+        await _router_offer(message, container, db_user)
+        return
     elif param:
         await _attribute(container, db_user, param, created=db_user_created)
     if gift_note:
         await message.answer(gift_note, parse_mode="HTML")
     await send_main_menu(message, container, db_user)
+
+
+async def _router_claim(
+    message: Message, container: AppContainer, db_user: User, code: str
+) -> None:
+    """t.me/<bot>?start=router_<CODE> — the QR a technician shows while installing a router.
+
+    Binds the router (and its trial) to this Telegram account, then shows the router plans.
+    No confirm step: unlike account links, the code only ever GIVES the scanner a router trial
+    on their own account — a forwarded QR can't take anything away from anyone.
+    """
+    from src.application.services.account_link import AccountLinkError
+    from src.core.exceptions import DomainError
+
+    async with container.uow() as uow:
+        user = await uow.users.get(db_user.id)
+        if user is None:
+            return
+        try:
+            device = await onboarding.claim(
+                uow,
+                subscriptions=container.subscriptions,
+                remnawave=container.remnawave,
+                user=user,
+                code=code.strip(),
+            )
+        except (onboarding.RouterOnboardingError, AccountLinkError) as exc:
+            await message.answer(f"📡 Не получилось подключить роутер: {exc}")
+            await send_main_menu(message, container, db_user)
+            return
+        except DomainError:
+            log.warning("router claim panel error", user=db_user.id)
+            await message.answer(
+                "📡 Панель VPN сейчас недоступна — отсканируй QR ещё раз через пару минут."
+            )
+            return
+        label = device.label
+        await uow.commit()
+    log.info("router claimed", user=db_user.id, device=device.id)
+    await _router_offer(
+        message,
+        container,
+        db_user,
+        header=f"📡 <b>Роутер «{_hesc(label)}» подключён к твоему аккаунту!</b>",
+    )
+
+
+async def _router_offer(
+    message: Message, container: AppContainer, db_user: User, *, header: str | None = None
+) -> None:
+    """Router plan picker: each family variant as a button into the regular buy flow."""
+    from src.bot.handlers.purchase import fmt_money
+
+    async with container.uow() as uow:
+        user = await uow.users.get(db_user.id)
+        sub = (
+            await uow.subscriptions.get(user.current_subscription_id)
+            if user is not None and user.current_subscription_id
+            else None
+        )
+        plans = await onboarding.router_plans(uow)
+    lines = [header or "📡 <b>VPN для роутера</b>", _hesc(onboarding.status_line(sub))]
+    rows: list[list[InlineKeyboardButton]] = []
+    if plans:
+        lines.append(
+            "Выбери тариф. Он зависит от того, сколько человек, кроме роутера, будут "
+            "пользоваться VPN на своих телефонах — в тариф входит нужное число устройств."
+        )
+        for p in plans:
+            devices = f"{p.device_limit} устр." if p.device_limit else "∞ устр."
+            cheapest = onboarding.cheapest_rub(p)
+            price = f" · от {fmt_money(cheapest)}" if cheapest is not None else ""
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{p.name} · {devices}{price}", callback_data=f"plan:{p.id}"
+                    )
+                ]
+            )
+    else:
+        lines.append("Тарифы для роутера скоро появятся — напиши в поддержку.")
+    rows.append([InlineKeyboardButton(text="‹ Меню", callback_data="nav:root")])
+    await message.answer(
+        "\n\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
 
 
 async def _weblogin_prompt(message: Message, container: AppContainer, code: str) -> None:

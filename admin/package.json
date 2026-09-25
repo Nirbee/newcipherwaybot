@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",
+    "@types/qrcode": "^1.5.5",
+    "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.3.0"

@@ -12,15 +12,25 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import secrets
-from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import func, select
 
-from src.core.enums import RouterDeviceMode, RouterDeviceStatus
+from src.application.dto.pricing import PurchaseRequest
+from src.application.services import router_onboarding as onboarding
+from src.core.enums import (
+    PaymentGatewayType,
+    PlanCategory,
+    RouterDeviceMode,
+    RouterDeviceStatus,
+    TransactionStatus,
+)
+from src.core.exceptions import DomainError, RemnawaveError
 from src.core.logging import get_logger
 from src.infrastructure.database.models.router_device import RouterDevice
+from src.infrastructure.database.models.user import User
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.di import AppContainer
 from src.web.deps import get_container
@@ -55,7 +65,28 @@ async def _subscription_label(uow: UnitOfWork, subscription_id: int) -> str | No
     user = await uow.users.get(sub.user_id)
     if user is None:
         return None
-    return f"@{user.username}" if user.username else f"id{user.telegram_id}"
+    if user.username:
+        return f"@{user.username}"
+    if user.telegram_id:
+        return f"id{user.telegram_id}"
+    return user.email or None
+
+
+async def _bot_username(container: AppContainer, uow: UnitOfWork) -> str:
+    return str(await container.bot_config.value(uow, "BOT_USERNAME") or "").lstrip("@")
+
+
+def _sub_summary(sub: Any) -> dict[str, Any] | None:
+    if sub is None:
+        return None
+    return {
+        "id": sub.id,
+        "status": sub.status.value,
+        "is_trial": sub.is_trial,
+        "expire_at": iso(sub.expire_at),
+        "plan_name": (sub.plan_snapshot or {}).get("name"),
+        "device_limit": sub.device_limit,
+    }
 
 
 def _row(device: RouterDevice, sub_label: str | None) -> dict[str, Any]:
@@ -64,6 +95,7 @@ def _row(device: RouterDevice, sub_label: str | None) -> dict[str, Any]:
         "label": device.label,
         "subscription_id": device.subscription_id,
         "subscription_label": sub_label,
+        "awaiting_claim": device.claim_code is not None,
         "mode": device.mode.value,
         "status": device.status.value,
         "is_online": _is_online(device),
@@ -107,31 +139,6 @@ async def _auto_assign_hosts(
     primary = ranked[0].uuid
     backup = ranked[1].uuid if len(ranked) > 1 else None
     return primary, backup
-
-
-async def _tag_subscription_as_router(container: AppContainer, uow: UnitOfWork, sub: Any) -> None:
-    """Best-effort: mark the shared subscription's panel user with tag=ROUTER, purely for staff
-    visibility when browsing Remnawave's own UI. Never blocks device creation on panel
-    availability — a failed tag write just means the panel user looks like any other."""
-    panel_ref = sub.panel_ref
-    if panel_ref is None:
-        return
-    user = await uow.users.get(sub.user_id)
-    panel_ref = replace(panel_ref, telegram_id=user.telegram_id if user else None)
-    spec = container.remnawave.build_spec(
-        short_id=sub.short_id,
-        telegram_id=user.telegram_id if user else None,
-        expire_at=sub.expire_at or dt.datetime.now(dt.UTC),
-        traffic_limit_bytes=sub.traffic_limit_bytes,
-        device_limit=sub.device_limit,
-        internal_squads=tuple(sub.internal_squads or ()),
-        external_squad=sub.external_squad,
-        tag="ROUTER",
-    )
-    try:
-        await container.remnawave.apply(panel_ref, spec)
-    except Exception as exc:
-        log.warning("router device: failed to tag subscription's panel user", sub_id=sub.id, error=str(exc))
 
 
 # --- eligible-hosts allowlist (registered BEFORE /{device_id} — literal routes must win) ------
@@ -191,18 +198,29 @@ async def list_devices(container: AppContainer = Depends(get_container)) -> dict
 
 
 class RouterCreateIn(BaseModel):
-    subscription_id: int
+    """No customer given -> a QR-onboarding router: a placeholder customer on a router trial,
+    claimed when the real customer scans the QR. ``user_id`` -> an existing customer (found by
+    @username). ``subscription_id`` -> attach to a known subscription as-is."""
+
     label: str = Field(..., min_length=1, max_length=128)
+    user_id: int | None = None
+    subscription_id: int | None = None
     mode: RouterDeviceMode = RouterDeviceMode.AUTO
     primary_host_uuid: str | None = None
     backup_host_uuid: str | None = None
     note: str | None = Field(None, max_length=512)
 
     @model_validator(mode="after")
-    def _force_needs_host(self) -> RouterCreateIn:
+    def _validate(self) -> RouterCreateIn:
         if self.mode is RouterDeviceMode.FORCE and not self.primary_host_uuid:
             raise ValueError("FORCE mode requires primary_host_uuid")
+        if self.user_id is not None and self.subscription_id is not None:
+            raise ValueError("pass user_id or subscription_id, not both")
         return self
+
+
+async def _trial_days(container: AppContainer, uow: UnitOfWork) -> int:
+    return int(await container.bot_config.value(uow, "ROUTER_TRIAL_DAYS") or 3)
 
 
 @router.post("")
@@ -212,10 +230,51 @@ async def create_device(
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
     """Returns the plain bearer token ONCE — only its sha256 is ever stored."""
+    notify: tuple[int, str] | None = None
+    claim_code: str | None = None
     async with container.uow() as uow:
-        sub = await uow.subscriptions.get(body.subscription_id)
-        if sub is None:
-            raise HTTPException(404, "subscription not found")
+        label = body.label.strip()
+        try:
+            if body.subscription_id is not None:
+                sub = await uow.subscriptions.get(body.subscription_id)
+                if sub is None:
+                    raise HTTPException(404, "subscription not found")
+            elif body.user_id is not None:
+                customer = await uow.users.get(body.user_id)
+                if customer is None:
+                    raise HTTPException(404, "user not found")
+                current = (
+                    await uow.subscriptions.get(customer.current_subscription_id)
+                    if customer.current_subscription_id
+                    else None
+                )
+                if current is not None and current.status.is_usable:
+                    sub = current
+                else:
+                    sub = await onboarding.start_trial(
+                        uow,
+                        container.subscriptions,
+                        user=customer,
+                        days=await _trial_days(container, uow),
+                    )
+                if customer.telegram_id:
+                    text = onboarding.attached_text(
+                        label, sub, await _bot_username(container, uow)
+                    )
+                    notify = (customer.telegram_id, text)
+            else:
+                placeholder = await onboarding.new_placeholder_customer(uow, label=label)
+                sub = await onboarding.start_trial(
+                    uow,
+                    container.subscriptions,
+                    user=placeholder,
+                    days=await _trial_days(container, uow),
+                )
+                claim_code = onboarding.new_claim_code()
+        except onboarding.RouterOnboardingError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RemnawaveError as exc:
+            raise HTTPException(502, f"panel error: {exc}") from exc
 
         if body.mode is RouterDeviceMode.AUTO:
             eligible = await _eligible_host_uuids(uow)
@@ -226,21 +285,31 @@ async def create_device(
         token = secrets.token_urlsafe(32)
         device = RouterDevice(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
-            label=body.label.strip(),
+            label=label,
             subscription_id=sub.id,
             mode=body.mode,
             primary_host_uuid=primary,
             backup_host_uuid=backup,
             note=(body.note or "").strip() or None,
+            claim_code=claim_code,
         )
         await uow.router_devices.add(device)
-        await _tag_subscription_as_router(container, uow, sub)
+        await onboarding.tag_router_subscription(container.remnawave, uow, sub)
         await audit(
-            uow, identity, "routers.create", f"router:{device.id}",
-            subscription_id=sub.id, mode=body.mode.value,
+            uow,
+            identity,
+            "routers.create",
+            f"router:{device.id}",
+            subscription_id=sub.id,
+            mode=body.mode.value,
+            qr=claim_code is not None,
         )
+        bot_username = await _bot_username(container, uow)
+        summary = _sub_summary(sub)
         await uow.commit()
 
+    if notify is not None:
+        await container.notifier.notify_user(*notify)
     warning = None
     if primary is None:
         warning = (
@@ -254,7 +323,142 @@ async def create_device(
         "primary_host_uuid": primary,
         "backup_host_uuid": backup,
         "warning": warning,
+        "claim_url": (
+            onboarding.claim_url(bot_username, claim_code) if claim_code and bot_username else None
+        ),
+        "subscription": summary,
     }
+
+
+# --- technician helpers (under /routers so a routers-only staff account can use them) --------
+
+
+@router.get("/customers")
+async def find_customers(
+    q: str = "", container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    """Exact @username lookup — deliberately not a browsable user list: a routers-only
+    technician should find the customer in front of them, not page through the customer base."""
+    name = q.strip().lstrip("@").lower()
+    if len(name) < 3:
+        return {"items": []}
+    async with container.uow() as uow:
+        users = (
+            await uow.session.scalars(
+                select(User).where(func.lower(User.username) == name).limit(5)
+            )
+        ).all()
+        items = []
+        for u in users:
+            sub = (
+                await uow.subscriptions.get(u.current_subscription_id)
+                if u.current_subscription_id
+                else None
+            )
+            items.append(
+                {
+                    "id": u.id,
+                    "username": u.username,
+                    "name": u.first_name,
+                    "subscription": _sub_summary(sub),
+                }
+            )
+    return {"items": items}
+
+
+@router.get("/plans")
+async def list_router_plans(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+    async with container.uow() as uow:
+        plans = await onboarding.router_plans(uow)
+        items = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "device_limit": p.device_limit,
+                "durations": [
+                    {"days": d.days, "price_minor": onboarding.duration_rub(p, d.days)}
+                    for d in sorted(p.durations, key=lambda d: d.days)
+                ],
+            }
+            for p in plans
+        ]
+    return {"items": items}
+
+
+class RouterPaidIn(BaseModel):
+    plan_id: int
+    days: int = Field(..., ge=1, le=3650)
+
+
+@router.post("/{device_id}/paid")
+async def mark_paid(
+    device_id: int,
+    body: RouterPaidIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """«Клиент оплатил на месте»: a real (cash) sale through the normal purchase pipeline — it
+    lands in sales/revenue like any payment and renews/switches the router's subscription
+    exactly as a bot purchase would."""
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+        if device is None:
+            raise HTTPException(404, "device not found")
+        sub = await uow.subscriptions.get(device.subscription_id)
+        owner = await uow.users.get(sub.user_id) if sub is not None else None
+        if owner is None:
+            raise HTTPException(400, "router has no customer")
+        plan = await uow.plans.get_with_durations(body.plan_id)
+        if plan is None or plan.category is not PlanCategory.ROUTER or not plan.is_active:
+            raise HTTPException(404, "router plan not found")
+        if onboarding.duration_rub(plan, body.days) is None:
+            raise HTTPException(400, "this plan has no such duration")
+        try:
+            ptype, sub_id = await container.purchase.resolve_purchase_type(uow, owner.id, plan.id)
+            req = PurchaseRequest(
+                user_id=owner.id,
+                plan_id=plan.id,
+                duration_days=body.days,
+                currency=owner.currency,
+                purchase_type=ptype,
+                subscription_id=sub_id,
+            )
+            txn, quote = await container.purchase.start(uow, req)
+            txn.gateway_type = PaymentGatewayType.MANUAL
+            txn.gateway_display_name = onboarding.CASH_DISPLAY_NAME
+            if txn.status is TransactionStatus.PENDING:
+                await container.payments.process(
+                    uow, payment_id=txn.payment_id, status=TransactionStatus.COMPLETED
+                )
+        except RemnawaveError as exc:
+            raise HTTPException(502, f"panel error: {exc}") from exc
+        except DomainError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await uow.flush()
+        # One subscription per customer: the purchase acted on the CURRENT subscription (the
+        # one the router rides on); keep the router pointed at it.
+        live_id = owner.current_subscription_id or device.subscription_id
+        device.subscription_id = live_id
+        live = await uow.subscriptions.get(live_id)
+        await audit(
+            uow,
+            identity,
+            "routers.paid",
+            f"router:{device.id}",
+            plan_id=plan.id,
+            days=body.days,
+            amount_minor=quote.final.amount_minor,
+        )
+        summary = _sub_summary(live)
+        notify = (
+            (owner.telegram_id, onboarding.paid_text(plan.name, live))
+            if owner.telegram_id
+            else None
+        )
+        await uow.commit()
+    if notify is not None:
+        await container.notifier.notify_user(*notify)
+    return {"ok": True, "subscription": summary, "amount_minor": quote.final.amount_minor}
 
 
 @router.get("/{device_id}")
@@ -266,6 +470,8 @@ async def get_device(
         if device is None:
             raise HTTPException(404, "device not found")
         label = await _subscription_label(uow, device.subscription_id)
+        summary = _sub_summary(await uow.subscriptions.get(device.subscription_id))
+        bot_username = await _bot_username(container, uow)
     try:
         hosts = await container.remnawave_client.get_hosts()
     except Exception:
@@ -273,6 +479,12 @@ async def get_device(
     detail = _row(device, label)
     detail["install_report"] = device.install_report
     detail["diagnostics"] = device.diagnostics
+    detail["subscription"] = summary
+    detail["claim_url"] = (
+        onboarding.claim_url(bot_username, device.claim_code)
+        if device.claim_code and bot_username
+        else None
+    )
     detail["available_hosts"] = [
         {"uuid": h.uuid, "remark": h.remark, "network": h.network, "is_disabled": h.is_disabled}
         for h in hosts

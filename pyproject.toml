@@ -74,6 +74,8 @@ ignore = ["B008"]  # FastAPI Depends() in defaults
 "src/web/app.py" = ["RUF001"]
 # RU lifecycle/notification messages DM'd to users (autopay, updates, reports…).
 "src/infrastructure/taskiq/tasks.py" = ["RUF001"]
+# RU router-onboarding messages shown to customers and technicians.
+"src/application/services/router_onboarding.py" = ["RUF001"]
 # The AI-support prompt + knowledge base are long RU text blocks by nature.
 "src/infrastructure/services/ai_support.py" = ["RUF001", "E501"]
 # The E-code catalog is RU prose (docs generate from it); tests assert on RU strings.

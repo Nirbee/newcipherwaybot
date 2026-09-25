@@ -2,7 +2,8 @@
    eligible-hosts allowlist + token rotate/revoke/delete. See src/web/routes/admin/routers.py. */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import QRCode from "qrcode";
+import { useEffect, useState } from "react";
 
 import { api, dtTime } from "../api/client";
 import { Drawer, Field, Modal, Seg, SecretInput } from "../components/ui";
@@ -16,6 +17,7 @@ type RouterDevice = {
   label: string;
   subscription_id: number;
   subscription_label: string | null;
+  awaiting_claim: boolean;
   mode: Mode;
   status: Status;
   is_online: boolean;
@@ -31,11 +33,40 @@ type RouterDevice = {
   created_at: string;
 };
 type AvailableHost = { uuid: string; remark: string; network: string; is_disabled: boolean };
+type SubSummary = {
+  id: number;
+  status: string;
+  is_trial: boolean;
+  expire_at: string | null;
+  plan_name: string | null;
+  device_limit: number | null;
+} | null;
 type RouterDetail = RouterDevice & {
   install_report: Record<string, unknown> | null;
   diagnostics: Record<string, string> | null;
   available_hosts: AvailableHost[];
+  subscription: SubSummary;
+  claim_url: string | null;
 };
+
+function QrImage({ text }: { text: string }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    QRCode.toDataURL(text, { margin: 1, width: 240 })
+      .then(setSrc)
+      .catch(() => setSrc(""));
+  }, [text]);
+  if (!src) return null;
+  return (
+    <img
+      src={src}
+      width={240}
+      height={240}
+      alt="QR"
+      style={{ background: "#fff", padding: 8, borderRadius: 8, alignSelf: "center" }}
+    />
+  );
+}
 
 function installCommand(token: string): string {
   const base = window.location.origin;
@@ -73,22 +104,26 @@ type CreateResp = {
   primary_host_uuid: string | null;
   backup_host_uuid: string | null;
   warning: string | null;
+  claim_url: string | null;
+  subscription: SubSummary;
 };
-type CustomerUser = {
+type CustomerHit = {
   id: number;
-  telegram_id: number | null;
   username: string | null;
   name: string | null;
-  status: string;
-  current_subscription_id: number | null;
+  subscription: SubSummary;
 };
-type Plan = {
+type RouterPlan = {
   id: number;
   name: string;
-  category: string;
-  is_active: boolean;
-  durations: { id: number; days: number }[];
+  device_limit: number | null;
+  durations: { days: number; price_minor: number | null }[];
 };
+
+function rub(minor: number | null | undefined): string {
+  if (minor == null) return "—";
+  return `${(minor / 100).toLocaleString("ru-RU")} ₽`;
+}
 
 function hostLabel(hosts: EligibleHost[] | AvailableHost[], uuid: string | null): string {
   if (!uuid) return "—";
@@ -110,29 +145,33 @@ export default function Routers() {
   });
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [customerMode, setCustomerMode] = useState<"find" | "new">("find");
+  const [customerMode, setCustomerMode] = useState<"qr" | "existing">("qr");
   const [searchQ, setSearchQ] = useState("");
-  const [searchResults, setSearchResults] = useState<CustomerUser[]>([]);
+  const [searchResults, setSearchResults] = useState<CustomerHit[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const [picked, setPicked] = useState<CustomerUser | null>(null);
-  const [newTelegramId, setNewTelegramId] = useState("");
-  const [newUsername, setNewUsername] = useState("");
-  const [newEmail, setNewEmail] = useState("");
-  const [grantPlanId, setGrantPlanId] = useState<number | "">("");
-  const [grantDays, setGrantDays] = useState(30);
+  const [picked, setPicked] = useState<CustomerHit | null>(null);
   const [label, setLabel] = useState("");
   const [mode, setMode] = useState<Mode>("auto");
   const [primaryHost, setPrimaryHost] = useState("");
   const [note, setNote] = useState("");
   const [creating, setCreating] = useState(false);
 
-  const plans = useQuery({
-    queryKey: ["plans-for-routers"],
-    queryFn: () => api.get<{ items: Plan[] }>("/api/admin/plans"),
-    enabled: createOpen,
+  const [paidFor, setPaidFor] = useState<number | null>(null);
+  const [paidPlanId, setPaidPlanId] = useState<number | "">("");
+  const [paidDays, setPaidDays] = useState<number | "">("");
+  const [paying, setPaying] = useState(false);
+  const routerPlans = useQuery({
+    queryKey: ["routers", "plans"],
+    queryFn: () => api.get<{ items: RouterPlan[] }>("/api/admin/routers/plans"),
+    enabled: paidFor !== null,
   });
 
-  const [tokenModal, setTokenModal] = useState<{ label: string; token: string; warning: string | null } | null>(null);
+  const [tokenModal, setTokenModal] = useState<{
+    label: string;
+    token: string;
+    warning: string | null;
+    claimUrl: string | null;
+  } | null>(null);
   const [hostsOpen, setHostsOpen] = useState(false);
   const [hostsChecked, setHostsChecked] = useState<Record<string, boolean>>({});
 
@@ -144,27 +183,22 @@ export default function Routers() {
   });
 
   function resetCreate() {
-    setCustomerMode("find");
+    setCustomerMode("qr");
     setSearchQ("");
-    setSearchResults([]);
+    setSearchResults(null);
     setPicked(null);
-    setNewTelegramId("");
-    setNewUsername("");
-    setNewEmail("");
-    setGrantPlanId("");
-    setGrantDays(30);
     setLabel("");
     setMode("auto");
     setPrimaryHost("");
     setNote("");
   }
 
-  async function searchUsers() {
+  async function searchCustomers() {
     if (!searchQ.trim()) return;
     setSearching(true);
     try {
-      const r = await api.get<{ items: CustomerUser[] }>(
-        `/api/admin/users?q=${encodeURIComponent(searchQ.trim())}&limit=8`,
+      const r = await api.get<{ items: CustomerHit[] }>(
+        `/api/admin/routers/customers?q=${encodeURIComponent(searchQ.trim())}`,
       );
       setSearchResults(r.items);
     } catch (e) {
@@ -174,26 +208,8 @@ export default function Routers() {
     }
   }
 
-  async function registerNew() {
-    if (!newTelegramId.trim() && !newEmail.trim()) {
-      toast(t.routersNeedIdentity);
-      return;
-    }
-    try {
-      const u = await api.post<CustomerUser>("/api/admin/users", {
-        telegram_id: newTelegramId.trim() ? Number(newTelegramId.trim()) : undefined,
-        username: newUsername.trim() || undefined,
-        email: newEmail.trim() || undefined,
-      });
-      setPicked(u);
-      toast("✓");
-    } catch (e) {
-      toast((e as Error).message);
-    }
-  }
-
   async function create() {
-    if (!picked) {
+    if (customerMode === "existing" && !picked) {
       toast(t.routersPickCustomer);
       return;
     }
@@ -208,28 +224,9 @@ export default function Routers() {
     const finalLabel = label.trim();
     setCreating(true);
     try {
-      let subId = picked.current_subscription_id;
-      if (!subId) {
-        if (!grantPlanId) {
-          toast(t.routersPickPlan);
-          setCreating(false);
-          return;
-        }
-        await api.post(`/api/admin/users/${picked.id}/grant`, {
-          plan_id: grantPlanId,
-          days: grantDays,
-        });
-        const fresh = await api.get<CustomerUser>(`/api/admin/users/${picked.id}`);
-        subId = fresh.current_subscription_id;
-        if (!subId) {
-          toast(t.routersGrantFailed);
-          setCreating(false);
-          return;
-        }
-      }
       const r = await api.post<CreateResp>("/api/admin/routers", {
-        subscription_id: subId,
         label: finalLabel,
+        user_id: customerMode === "existing" ? picked?.id : undefined,
         mode,
         primary_host_uuid: mode === "force" ? primaryHost : undefined,
         note: note.trim() || undefined,
@@ -237,7 +234,12 @@ export default function Routers() {
       setCreateOpen(false);
       resetCreate();
       void qc.invalidateQueries({ queryKey: ["routers"] });
-      setTokenModal({ label: finalLabel, token: r.token, warning: r.warning });
+      setTokenModal({
+        label: finalLabel,
+        token: r.token,
+        warning: r.warning,
+        claimUrl: r.claim_url,
+      });
     } catch (e) {
       toast((e as Error).message);
     } finally {
@@ -245,11 +247,42 @@ export default function Routers() {
     }
   }
 
+  function openPaid(deviceId: number) {
+    setPaidPlanId("");
+    setPaidDays("");
+    setPaidFor(deviceId);
+  }
+
+  async function confirmPaid() {
+    if (paidFor === null || !paidPlanId || !paidDays) return;
+    setPaying(true);
+    try {
+      await api.post(`/api/admin/routers/${paidFor}/paid`, {
+        plan_id: paidPlanId,
+        days: paidDays,
+      });
+      void qc.invalidateQueries({ queryKey: ["routers"] });
+      void qc.invalidateQueries({ queryKey: ["routers", paidFor] });
+      setPaidFor(null);
+      toast(t.routersPaidDone);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setPaying(false);
+    }
+  }
+
+  function subLine(s: SubSummary): string {
+    if (!s || !["active", "trial", "limited"].includes(s.status)) return t.routersSubInactive;
+    const until = s.expire_at ? new Date(s.expire_at).toLocaleDateString("ru-RU") : "—";
+    return `${s.is_trial ? t.routersSubTrial : t.routersSubActive} ${until}`;
+  }
+
   async function rotate(d: RouterDevice) {
     if (!(await confirm(t.routersRotateConfirm))) return;
     try {
       const r = await api.post<{ token: string }>(`/api/admin/routers/${d.id}/rotate`);
-      setTokenModal({ label: d.label, token: r.token, warning: null });
+      setTokenModal({ label: d.label, token: r.token, warning: null, claimUrl: null });
     } catch (e) {
       toast((e as Error).message);
     }
@@ -362,7 +395,9 @@ export default function Routers() {
                 </div>
               )}
             </span>
-            <span className="mono muted">{d.subscription_label ?? `#${d.subscription_id}`}</span>
+            <span className="mono muted">
+              {d.awaiting_claim ? t.routersAwaitingQr : (d.subscription_label ?? `#${d.subscription_id}`)}
+            </span>
             <span className={`st ${d.is_online ? "on" : d.status === "pending" ? "mid" : "off"}`}>
               {d.is_online && <span className="status-dot" />}
               {d.status === "pending"
@@ -409,16 +444,32 @@ export default function Routers() {
       {createOpen && (
         <Modal title={t.routersCreate} onClose={() => setCreateOpen(false)}>
           <div className="grid" style={{ gap: 12 }}>
-            {picked ? (
+            <Seg
+              value={customerMode}
+              options={[
+                { id: "qr" as const, label: t.routersCustomerQr },
+                { id: "existing" as const, label: t.routersCustomerExisting },
+              ]}
+              onChange={(v) => {
+                setCustomerMode(v);
+                setPicked(null);
+                setSearchResults(null);
+              }}
+            />
+            {customerMode === "qr" ? (
+              <div className="dim" style={{ fontSize: 12.5 }}>
+                {t.routersQrHint}
+              </div>
+            ) : picked ? (
               <div className="card" style={{ padding: 10 }}>
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span>
-                    <b>{picked.name ?? picked.username ?? `id${picked.telegram_id ?? picked.id}`}</b>
-                    {picked.username && <span className="dim"> @{picked.username}</span>}
+                    <b>{picked.name ?? `@${picked.username}`}</b>
+                    {picked.name && picked.username && (
+                      <span className="dim"> @{picked.username}</span>
+                    )}
                     <div className="dim" style={{ fontSize: 11.5 }}>
-                      {picked.current_subscription_id
-                        ? `${t.routersSubId} #${picked.current_subscription_id}`
-                        : t.routersNoSub}
+                      {subLine(picked.subscription)}
                     </div>
                   </span>
                   <button className="btn secondary sm" onClick={() => setPicked(null)}>
@@ -427,126 +478,52 @@ export default function Routers() {
                 </div>
               </div>
             ) : (
-              <>
-                <Seg
-                  value={customerMode}
-                  options={[
-                    { id: "find" as const, label: t.routersFindCustomer },
-                    { id: "new" as const, label: t.routersNewCustomer },
-                  ]}
-                  onChange={setCustomerMode}
-                />
-                {customerMode === "find" ? (
-                  <Field label={t.routersSearchPh}>
-                    <div className="row">
-                      <input
-                        className="input"
-                        style={{ flex: 1 }}
-                        value={searchQ}
-                        placeholder={t.routersSearchPh}
-                        onChange={(e) => setSearchQ(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && void searchUsers()}
-                      />
-                      <button className="btn secondary sm" disabled={searching} onClick={() => void searchUsers()}>
-                        {t.routersSearchBtn}
-                      </button>
-                    </div>
-                    {searchResults.length > 0 && (
-                      <div className="grid" style={{ gap: 2, marginTop: 6 }}>
-                        {searchResults.map((u) => (
-                          <button
-                            key={u.id}
-                            type="button"
-                            className="btn secondary sm"
-                            style={{ justifyContent: "space-between", textAlign: "left" }}
-                            onClick={() => setPicked(u)}
-                          >
-                            <span>
-                              {u.name ?? u.username ?? `id${u.telegram_id ?? u.id}`}
-                              {u.username && <span className="dim"> @{u.username}</span>}
-                            </span>
-                            <span className="dim">
-                              {u.current_subscription_id ? "✓ " + t.routersHasSub : t.routersNoSub}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </Field>
-                ) : (
-                  <div className="grid" style={{ gap: 10 }}>
-                    <Field label={t.routersNewTelegramId}>
-                      <input
-                        className="input mono"
-                        type="number"
-                        value={newTelegramId}
-                        onChange={(e) => setNewTelegramId(e.target.value)}
-                      />
-                    </Field>
-                    <Field label={t.routersNewUsername}>
-                      <input
-                        className="input"
-                        value={newUsername}
-                        placeholder="@username"
-                        onChange={(e) => setNewUsername(e.target.value)}
-                      />
-                    </Field>
-                    <Field label={t.routersNewEmail}>
-                      <input
-                        className="input"
-                        type="email"
-                        value={newEmail}
-                        onChange={(e) => setNewEmail(e.target.value)}
-                      />
-                    </Field>
-                    <span className="dim" style={{ fontSize: 11 }}>
-                      {t.routersNewHint}
-                    </span>
-                    <button className="btn secondary" onClick={() => void registerNew()}>
-                      {t.routersRegister}
-                    </button>
+              <Field label={t.routersSearchPh}>
+                <div className="row">
+                  <input
+                    className="input"
+                    style={{ flex: 1 }}
+                    value={searchQ}
+                    placeholder="@username"
+                    onChange={(e) => setSearchQ(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && void searchCustomers()}
+                  />
+                  <button
+                    className="btn secondary sm"
+                    disabled={searching}
+                    onClick={() => void searchCustomers()}
+                  >
+                    {t.routersSearchBtn}
+                  </button>
+                </div>
+                <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
+                  {t.routersExistingHint}
+                </div>
+                {searchResults && searchResults.length === 0 && (
+                  <div style={{ color: "var(--warn, #e0a800)", fontSize: 12, marginTop: 6 }}>
+                    {t.routersNotFound}
                   </div>
                 )}
-              </>
-            )}
-
-            {picked && !picked.current_subscription_id && (
-              <div className="card" style={{ padding: 10 }}>
-                <div className="caps" style={{ marginBottom: 8 }}>
-                  {t.routersGrantTitle}
-                </div>
-                <div className="grid" style={{ gap: 10 }}>
-                  <Field label={t.routersPlan}>
-                    <select
-                      className="input"
-                      value={grantPlanId}
-                      onChange={(e) => {
-                        const id = e.target.value ? Number(e.target.value) : "";
-                        setGrantPlanId(id);
-                        const p = plans.data?.items.find((x) => x.id === id);
-                        if (p?.durations[0]) setGrantDays(p.durations[0].days);
-                      }}
-                    >
-                      <option value="">{t.routersPlanPh}</option>
-                      {(plans.data?.items ?? [])
-                        .filter((p) => p.is_active)
-                        .map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}
-                          </option>
-                        ))}
-                    </select>
-                  </Field>
-                  <Field label={t.routersDays}>
-                    <input
-                      className="input num"
-                      type="number"
-                      value={grantDays}
-                      onChange={(e) => setGrantDays(Number(e.target.value) || 0)}
-                    />
-                  </Field>
-                </div>
-              </div>
+                {searchResults && searchResults.length > 0 && (
+                  <div className="grid" style={{ gap: 2, marginTop: 6 }}>
+                    {searchResults.map((u) => (
+                      <button
+                        key={u.id}
+                        type="button"
+                        className="btn secondary sm"
+                        style={{ justifyContent: "space-between", textAlign: "left" }}
+                        onClick={() => setPicked(u)}
+                      >
+                        <span>
+                          {u.name ?? `@${u.username}`}
+                          {u.name && u.username && <span className="dim"> @{u.username}</span>}
+                        </span>
+                        <span className="dim">{subLine(u.subscription)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </Field>
             )}
 
             <Field label={t.routersLabel}>
@@ -592,6 +569,30 @@ export default function Routers() {
       {tokenModal && (
         <Modal title={t.routersTokenTitle} onClose={() => setTokenModal(null)}>
           <div className="grid" style={{ gap: 12 }}>
+            {tokenModal.claimUrl && (
+              <Field label={t.routersClaimTitle}>
+                <div className="grid" style={{ gap: 8 }}>
+                  <QrImage text={tokenModal.claimUrl} />
+                  <div className="dim" style={{ fontSize: 12 }}>
+                    {t.routersClaimHint}
+                  </div>
+                  <div className="row">
+                    <input
+                      className="input mono"
+                      readOnly
+                      style={{ flex: 1, fontSize: 11.5 }}
+                      value={tokenModal.claimUrl}
+                    />
+                    <button
+                      className="btn secondary sm"
+                      onClick={() => void copy(tokenModal.claimUrl ?? "")}
+                    >
+                      {t.copy}
+                    </button>
+                  </div>
+                </div>
+              </Field>
+            )}
             <div className="dim" style={{ fontSize: 12.5 }}>
               {t.routersTokenHint}
             </div>
@@ -631,6 +632,74 @@ export default function Routers() {
             <div className="row" style={{ justifyContent: "flex-end" }}>
               <button className="btn primary" onClick={() => setTokenModal(null)}>
                 {t.close}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {paidFor !== null && (
+        <Modal title={t.routersPaidTitle} onClose={() => setPaidFor(null)}>
+          <div className="grid" style={{ gap: 12 }}>
+            {routerPlans.data && routerPlans.data.items.length === 0 && (
+              <div style={{ color: "var(--warn, #e0a800)", fontSize: 12.5 }}>
+                {t.routersNoRouterPlans}
+              </div>
+            )}
+            <Field label={t.routersPaidPlan}>
+              <select
+                className="input"
+                value={paidPlanId}
+                onChange={(e) => {
+                  const id = e.target.value ? Number(e.target.value) : "";
+                  setPaidPlanId(id);
+                  const p = routerPlans.data?.items.find((x) => x.id === id);
+                  setPaidDays(p?.durations[0]?.days ?? "");
+                }}
+              >
+                <option value="">—</option>
+                {(routerPlans.data?.items ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {p.device_limit ? ` · ${p.device_limit} ${t.routersDevicesShort}` : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {paidPlanId !== "" && (
+              <Field label={t.routersPaidDuration}>
+                <select
+                  className="input"
+                  value={paidDays}
+                  onChange={(e) => setPaidDays(e.target.value ? Number(e.target.value) : "")}
+                >
+                  {(routerPlans.data?.items.find((p) => p.id === paidPlanId)?.durations ?? []).map(
+                    (d) => (
+                      <option key={d.days} value={d.days}>
+                        {d.days} {t.routersPaidDays} · {rub(d.price_minor)}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </Field>
+            )}
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn secondary" onClick={() => setPaidFor(null)}>
+                {t.cancel}
+              </button>
+              <button
+                className="btn primary"
+                disabled={paying || !paidPlanId || !paidDays}
+                onClick={() => void confirmPaid()}
+              >
+                {t.routersPaidConfirm}
+                {paidPlanId && paidDays
+                  ? ` · ${rub(
+                      routerPlans.data?.items
+                        .find((p) => p.id === paidPlanId)
+                        ?.durations.find((d) => d.days === paidDays)?.price_minor,
+                    )}`
+                  : ""}
               </button>
             </div>
           </div>
@@ -680,6 +749,36 @@ export default function Routers() {
               <div className="h1" style={{ fontSize: 18 }}>
                 {detail.data.label}
               </div>
+              <Field label={t.routersSub}>
+                <div className="grid" style={{ gap: 6, fontSize: 13 }}>
+                  <div>{subLine(detail.data.subscription)}</div>
+                  {detail.data.subscription?.plan_name && (
+                    <div className="dim" style={{ fontSize: 12 }}>
+                      {detail.data.subscription.plan_name}
+                      {detail.data.subscription.device_limit
+                        ? ` · ${detail.data.subscription.device_limit} ${t.routersDevicesShort}`
+                        : ""}
+                    </div>
+                  )}
+                  <button
+                    className="btn primary sm"
+                    style={{ justifySelf: "start" }}
+                    onClick={() => openPaid(detail.data!.id)}
+                  >
+                    {t.routersPaidBtn}
+                  </button>
+                </div>
+              </Field>
+              {detail.data.claim_url && (
+                <Field label={t.routersClaimTitle}>
+                  <div className="grid" style={{ gap: 8 }}>
+                    <QrImage text={detail.data.claim_url} />
+                    <div className="dim" style={{ fontSize: 12 }}>
+                      {t.routersClaimHint}
+                    </div>
+                  </div>
+                </Field>
+              )}
               <Field label={t.routersNote}>
                 <input
                   className="input"
