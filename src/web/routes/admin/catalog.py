@@ -107,6 +107,7 @@ async def create_plan(
         code = body.name.lower().replace(" ", "-")[:64]
         if await uow.plans.find_one(public_code=code):
             raise HTTPException(409, "plan with this name already exists")
+        last = await uow.session.scalar(select(func.max(Plan.order_index)))
         plan = Plan(
             public_code=code,
             name=body.name,
@@ -116,6 +117,7 @@ async def create_plan(
             category=body.category,
             internal_squads=list(body.internal_squads),
             is_active=body.is_active,
+            order_index=(last or 0) + 1,  # new plans go to the end of the storefront
         )
         await uow.plans.add(plan)
         for i, d in enumerate(body.durations):
@@ -196,6 +198,28 @@ async def patch_plan(
             f"plan:{plan.name}",
             **{k: v for k, v in data.items() if k != "durations"},
         )
+        await uow.commit()
+    return OkOut()
+
+
+class PlanOrderIn(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=500)
+
+
+@router.put("/plans/order", response_model=OkOut)
+async def reorder_plans(
+    body: PlanOrderIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> OkOut:
+    """Storefront order as dragged in the admin (bot list, mini-app, cabinet). The first router
+    plan is also the one a new router's trial runs on."""
+    async with container.uow() as uow:
+        for i, plan_id in enumerate(body.ids):
+            plan = await uow.plans.get(plan_id)
+            if plan is not None:
+                plan.order_index = i
+        await audit(uow, identity, "plan.reorder", "plans", ids=body.ids)
         await uow.commit()
     return OkOut()
 

@@ -317,3 +317,34 @@ async def test_bot_start_with_router_code_claims_and_offers_router_plans(
         device = await uow.router_devices.get(body["id"])
         sub = await uow.subscriptions.get(device.subscription_id)
     assert sub.user_id == customer.id and device.claim_code is None
+
+
+async def test_plans_are_appended_in_order_and_can_be_reordered(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+    ids = []
+    for name in ("Router +2", "Router +10", "Router +5"):
+        res = await http.post(
+            "/api/admin/plans",
+            headers=auth,
+            json={
+                "name": name,
+                "category": "router",
+                "durations": [{"days": 30, "price_minor": 49000}],
+            },
+        )
+        assert res.status_code == 200, res.text
+        ids.append(res.json()["id"])
+
+    listed = [p["id"] for p in (await http.get("/api/admin/plans", headers=auth)).json()["items"]]
+    assert listed == ids  # new plans land at the end, in creation order
+
+    wanted = [ids[0], ids[2], ids[1]]
+    res = await http.put("/api/admin/plans/order", headers=auth, json={"ids": wanted})
+    assert res.status_code == 200
+    listed = [p["id"] for p in (await http.get("/api/admin/plans", headers=auth)).json()["items"]]
+    assert listed == wanted
+    async with container.uow() as uow:
+        assert [p.id for p in await onboarding.router_plans(uow)] == wanted

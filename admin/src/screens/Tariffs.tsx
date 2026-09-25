@@ -62,11 +62,32 @@ export default function Tariffs() {
   const [draft, setDraft] = useState<PlanDraft | null>(null);
   const [ctor, setCtor] = useState<Constructor | null>(null);
   const [ctorDirty, setCtorDirty] = useState(false);
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [overId, setOverId] = useState<number | null>(null);
 
   const plans = useQuery({
     queryKey: ["plans"],
     queryFn: () => api.get<PlansResp>("/api/admin/plans"),
   });
+
+  async function movePlan(fromId: number, toId: number) {
+    if (fromId === toId || !plans.data) return;
+    const items = [...plans.data.items];
+    const from = items.findIndex((p) => p.id === fromId);
+    const to = items.findIndex((p) => p.id === toId);
+    if (from < 0 || to < 0) return;
+    const [moved] = items.splice(from, 1);
+    items.splice(to, 0, moved);
+    qc.setQueryData<PlansResp>(["plans"], { ...plans.data, items });
+    try {
+      await api.put("/api/admin/plans/order", { ids: items.map((p) => p.id) });
+      toast(t.saved);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      void qc.invalidateQueries({ queryKey: ["plans"] });
+    }
+  }
   const constructor = useQuery({
     queryKey: ["constructor"],
     queryFn: () => api.get<Constructor>("/api/admin/constructor"),
@@ -228,13 +249,49 @@ export default function Tariffs() {
               onChange={setCatFilter}
             />
           </div>
+          <div className="dim" style={{ fontSize: 12, margin: "4px 0 10px" }}>
+            {t.plansDragHint}
+          </div>
           <div className="kpis" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
             {(plans.data?.items ?? [])
               .filter((p) => catFilter === "all" || p.category === catFilter)
               .map((p) => (
-                <div key={p.id} className="card">
+                <div
+                  key={p.id}
+                  className="card"
+                  draggable
+                  onDragStart={(e) => {
+                    setDragId(p.id);
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDragOver={(e) => {
+                    if (dragId === null) return;
+                    e.preventDefault();
+                    if (overId !== p.id) setOverId(p.id);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (dragId !== null) void movePlan(dragId, p.id);
+                    setDragId(null);
+                    setOverId(null);
+                  }}
+                  onDragEnd={() => {
+                    setDragId(null);
+                    setOverId(null);
+                  }}
+                  style={{
+                    cursor: "grab",
+                    opacity: dragId === p.id ? 0.45 : 1,
+                    outline:
+                      overId === p.id && dragId !== p.id ? "2px dashed var(--accent, #888)" : undefined,
+                    outlineOffset: 2,
+                  }}
+                >
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <span className="row" style={{ gap: 6 }}>
+                      <span className="dim" aria-hidden style={{ userSelect: "none" }}>
+                        ⠿
+                      </span>
                       <b>{p.name}</b>
                       {p.category === "router" && <span className="cap-pill">{t.catRouter}</span>}
                     </span>
