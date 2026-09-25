@@ -42,6 +42,18 @@ type PlanDraft = {
 };
 type Squad = { id: number; name: string; uuid: string };
 
+const PERIOD_LADDER = [30, 90, 180, 360];
+
+// Next period after the last one on the ladder (then doubling), priced at the previous
+// period's per-day rate, rounded to whole rubles — a starting point the admin can edit.
+function nextDuration(durations: PlanDraft["durations"]): PlanDraft["durations"][number] {
+  const last = durations[durations.length - 1];
+  if (!last) return { days: 30, price_minor: 19900 };
+  const days = PERIOD_LADDER.find((d) => d > last.days) ?? last.days * 2;
+  const perDay = last.price_minor / Math.max(last.days, 1);
+  return { days, price_minor: Math.round((perDay * days) / 100) * 100 };
+}
+
 export default function Tariffs() {
   const { t, toast, confirm } = useApp();
   const qc = useQueryClient();
@@ -568,7 +580,7 @@ export default function Tariffs() {
               onClick={() =>
                 setDraft({
                   ...draft,
-                  durations: [...draft.durations, { days: 90, price_minor: 49900 }],
+                  durations: [...draft.durations, nextDuration(draft.durations)],
                 })
               }
             >
