@@ -30,7 +30,7 @@ from src.infrastructure.di import AppContainer
 _UA = "Happ/3.7.0"
 _TEMPLATE_PATHS = ("/api/subscription-templates", "/api/subscription-templates/XRAY_JSON")
 _SUB_SUFFIXES = ("/json", "/v2ray-json", "/xray-json")
-_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
 def _dump(title: str, value: Any) -> None:
