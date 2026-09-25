@@ -272,6 +272,7 @@ async def get_device(
         hosts = []
     detail = _row(device, label)
     detail["install_report"] = device.install_report
+    detail["diagnostics"] = device.diagnostics
     detail["available_hosts"] = [
         {"uuid": h.uuid, "remark": h.remark, "network": h.network, "is_disabled": h.is_disabled}
         for h in hosts

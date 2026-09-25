@@ -33,8 +33,31 @@ type RouterDevice = {
 type AvailableHost = { uuid: string; remark: string; network: string; is_disabled: boolean };
 type RouterDetail = RouterDevice & {
   install_report: Record<string, unknown> | null;
+  diagnostics: Record<string, string> | null;
   available_hosts: AvailableHost[];
 };
+
+function installCommand(token: string): string {
+  const base = window.location.origin;
+  return (
+    `opkg update && opkg install curl && curl -fsSL ${base}/api/agent/install.sh ` +
+    `-o /tmp/cw-install.sh && sh /tmp/cw-install.sh ${token} ${base}`
+  );
+}
+
+function DiagRow({ label, value, warn }: { label: string; value: string; warn?: string | null }) {
+  return (
+    <div className="grid" style={{ gap: 2 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
+        <span className="muted">{label}</span>
+        <span className="mono" style={{ fontSize: 12, textAlign: "right", wordBreak: "break-all" }}>
+          {value || "—"}
+        </span>
+      </div>
+      {warn && <div style={{ color: "var(--warn, #e0a800)", fontSize: 11.5 }}>⚠️ {warn}</div>}
+    </div>
+  );
+}
 type EligibleHost = {
   uuid: string;
   remark: string;
@@ -572,6 +595,26 @@ export default function Routers() {
             <div className="dim" style={{ fontSize: 12.5 }}>
               {t.routersTokenHint}
             </div>
+            <Field label={t.routersInstallCmd}>
+              <div className="grid" style={{ gap: 6 }}>
+                <textarea
+                  className="input mono"
+                  readOnly
+                  rows={4}
+                  style={{ fontSize: 11.5, resize: "none" }}
+                  value={installCommand(tokenModal.token)}
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <div className="row" style={{ justifyContent: "flex-end" }}>
+                  <button
+                    className="btn secondary sm"
+                    onClick={() => void copy(installCommand(tokenModal.token))}
+                  >
+                    {t.copy}
+                  </button>
+                </div>
+              </div>
+            </Field>
             <Field label={t.routersToken}>
               <div className="row">
                 <SecretInput value={tokenModal.token} onChange={() => {}} className="input mono" />
@@ -719,6 +762,50 @@ export default function Routers() {
                   ⚠️ {detail.data.last_error}
                 </div>
               )}
+              <Field label={t.routersDiagnostics}>
+                {detail.data.diagnostics ? (
+                  <div className="grid" style={{ gap: 6, fontSize: 13 }}>
+                    {(() => {
+                      const d = detail.data.diagnostics;
+                      const dnsMismatch =
+                        d.dns_router && d.dns_1111 && d.dns_router !== d.dns_1111
+                          ? t.routersDiagDnsMismatch
+                          : null;
+                      return (
+                        <>
+                          <DiagRow label={t.routersDiagAgent} value={d.agent_version} />
+                          <DiagRow label={t.routersDiagXkeen} value={d.xkeen_version} />
+                          <DiagRow label={t.routersDiagRouter} value={d.router} />
+                          <DiagRow
+                            label={t.routersDiagRouteOnly}
+                            value={d.route_only}
+                            warn={d.route_only?.includes("true") ? "routeOnly=true" : null}
+                          />
+                          <DiagRow
+                            label={t.routersDiagPorts}
+                            value={d.ports_proxied || t.routersDiagPortsAll}
+                          />
+                          <DiagRow label={t.routersDiagPortsExcluded} value={d.ports_excluded} />
+                          <DiagRow label={t.routersDiagCron} value={d.cron} />
+                          <DiagRow
+                            label={`${t.routersDiagDns} (${d.dns_probe ?? ""})`}
+                            value={d.dns_router}
+                            warn={dnsMismatch}
+                          />
+                          <DiagRow label={t.routersDiagDns1111} value={d.dns_1111} />
+                          <DiagRow label={t.routersDiagFree} value={d.opt_free} />
+                          <DiagRow label={t.routersDiagFiles} value={d.confdir_files} />
+                          <DiagRow label={t.routersDiagXrayTest} value={d.xray_test} />
+                        </>
+                      );
+                    })()}
+                  </div>
+                ) : (
+                  <span className="dim" style={{ fontSize: 12.5 }}>
+                    {t.routersDiagNone}
+                  </span>
+                )}
+              </Field>
               {detail.data.install_report && (
                 <Field label={t.routersInstallReport}>
                   <pre

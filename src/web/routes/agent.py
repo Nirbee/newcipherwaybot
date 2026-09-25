@@ -17,10 +17,13 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi.responses import PlainTextResponse
 
 from src.application.services.router_config import (
     RoutingTemplate,
@@ -42,6 +45,26 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 _RATE_LIMIT_SECONDS = 50
 _LAST_ERROR_MAX = 512
 _TEMPLATE_TTL_SECONDS = 600
+_DIAGNOSTICS_MAX = 16_384
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "router-agent"
+
+
+def _read_script(name: str) -> str:
+    return (_SCRIPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _agent_version() -> str:
+    try:
+        match = re.search(r'^AGENT_VERSION="([^"]+)"', _read_script("agent.sh"), re.M)
+    except OSError:
+        return ""
+    return match.group(1) if match else ""
+
+
+# Advertised on every /config reply; an agent seeing a different value fetches /agent.sh and
+# replaces itself — so a fix ships to the whole fleet with a deploy, no SSH to any router.
+_AGENT_VERSION = _agent_version()
 
 
 def _hash_token(token: str) -> str:
@@ -118,6 +141,35 @@ async def require_device(
     return device
 
 
+@router.get("/agent.sh", response_class=PlainTextResponse)
+async def agent_script() -> str:
+    """Public: the script holds no secrets — the token lives only in the router's agent.conf."""
+    return _read_script("agent.sh")
+
+
+@router.get("/install.sh", response_class=PlainTextResponse)
+async def install_script() -> str:
+    return _read_script("install.sh")
+
+
+@router.get("/whoami")
+async def whoami(
+    device: RouterDevice = Depends(require_device),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Token check for the installer — no rate limit, so it doesn't eat the agent's first
+    /config poll; tells the technician which customer this router is being set up for."""
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(device.subscription_id)
+        owner = await uow.users.get(sub.user_id) if sub else None
+    client = None
+    if owner is not None:
+        client = (
+            f"@{owner.username}" if owner.username else owner.first_name or owner.email
+        ) or (str(owner.telegram_id) if owner.telegram_id else None)
+    return {"id": device.id, "label": device.label, "client": client}
+
+
 @router.get("/config")
 async def get_config(
     response: Response,
@@ -165,7 +217,7 @@ async def get_config(
     etag = config_etag(config)
 
     if if_none_match and if_none_match.strip('"') == etag:
-        return Response(status_code=304)
+        return Response(status_code=304, headers={"X-Agent-Version": _AGENT_VERSION})
 
     async with container.uow() as uow:
         fresh = await uow.router_devices.get(device.id)
@@ -174,6 +226,7 @@ async def get_config(
             await uow.commit()
 
     response.headers["ETag"] = f'"{etag}"'
+    response.headers["X-Agent-Version"] = _AGENT_VERSION
     return config
 
 
@@ -207,6 +260,9 @@ async def heartbeat(
             fresh.external_ip = str(body["external_ip"])[:45]
         last_error = body.get("last_error")
         fresh.last_error = str(last_error)[:_LAST_ERROR_MAX] if last_error else None
+        diagnostics = body.get("diagnostics")
+        if isinstance(diagnostics, dict) and len(json.dumps(diagnostics)) <= _DIAGNOSTICS_MAX:
+            fresh.diagnostics = diagnostics
         await uow.commit()
 
 

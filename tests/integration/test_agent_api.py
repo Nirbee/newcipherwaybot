@@ -313,3 +313,67 @@ async def test_config_falls_back_to_last_good_rules_when_fetch_fails(
     second = await http.get("/api/agent/config", headers=headers)
     assert second.status_code == 200
     assert second.headers["ETag"] == first.headers["ETag"]
+
+
+async def test_heartbeat_stores_diagnostics_shown_in_admin_detail(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=30)
+    diag = {"agent_version": "2", "route_only": "false", "ports_proxied": "", "cron": "ok"}
+    res = await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"xray_running": True, "diagnostics": diag},
+    )
+    assert res.status_code == 204
+
+    detail = await http.get(f"/api/admin/routers/{device_id}", headers=await _login(http))
+    assert detail.json()["diagnostics"] == diag
+
+
+async def test_heartbeat_ignores_oversized_diagnostics(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=31)
+    await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"xray_running": True, "diagnostics": {"blob": "x" * 50_000}},
+    )
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+    assert device.diagnostics is None
+
+
+async def test_whoami_names_router_and_client(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=32)
+    res = await http.get("/api/agent/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["id"] == device_id
+    assert body["label"] == "router-32"
+    assert body["client"]
+
+    bad = await http.get("/api/agent/whoami", headers={"Authorization": "Bearer nope"})
+    assert bad.status_code == 401
+
+
+async def test_scripts_are_served_and_config_advertises_agent_version(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    agent = await http.get("/api/agent/agent.sh")
+    installer = await http.get("/api/agent/install.sh")
+    assert agent.status_code == 200 and agent.text.startswith("#!/bin/sh")
+    assert installer.status_code == 200 and "cipherway-agent" in installer.text
+    version = agent.text.split('AGENT_VERSION="', 1)[1].split('"', 1)[0]
+
+    container.remnawave_client.hosts = [_host("host-a")]
+    _, token = await _create_device(http, container, telegram_id=33, host_uuids=["host-a"])
+    res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    assert res.headers["X-Agent-Version"] == version

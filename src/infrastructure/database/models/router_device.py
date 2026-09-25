@@ -59,5 +59,7 @@ class RouterDevice(IntPk, TimestampMixin, Base):
     external_ip: Mapped[str | None] = mapped_column(String(45))  # IPv6-max length
     last_error: Mapped[str | None] = mapped_column(String(512))
     install_report: Mapped[dict[str, Any] | None] = mapped_column(JsonB)
+    # Latest self-report from the agent's heartbeat (XKeen ports, routeOnly, DNS probe, cron).
+    diagnostics: Mapped[dict[str, Any] | None] = mapped_column(JsonB)
 
     note: Mapped[str | None] = mapped_column(String(512))
