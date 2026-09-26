@@ -6,6 +6,8 @@ routers. The bot dispatcher and cabinet API mount here later.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -59,6 +61,42 @@ class NoCacheHTMLStatic(StaticFiles):
         response = await super().get_response(path, scope)
         if path.endswith(".html") or path in ("", "/", "."):
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
+_ASSET_REF = re.compile(r'(src|href)="([\w.-]+\.(?:js|css))"')
+
+
+class VersionedStatic(NoCacheHTMLStatic):
+    """For the un-hashed static apps (mini-app, web cabinet): their ``app.js``/``app.css``
+    keep fixed names, so Telegram's WebView kept serving a stale copy after every deploy
+    (no new buttons, no chat polling). The HTML entry now references each local asset as
+    ``name?v=<content hash>`` — a changed file is a new URL, so even a client holding the old
+    copy fetches the new one — and the assets themselves must be revalidated on each load."""
+
+    def _versioned_html(self, html_path: Path) -> str:
+        base = html_path.parent
+
+        def stamp(m: re.Match[str]) -> str:
+            asset = base / m.group(2)
+            if not asset.is_file():
+                return m.group(0)
+            digest = hashlib.sha256(asset.read_bytes()).hexdigest()[:10]
+            return f'{m.group(1)}="{m.group(2)}?v={digest}"'
+
+        return _ASSET_REF.sub(stamp, html_path.read_text(encoding="utf-8"))
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        if path.endswith(".html") or path in ("", "/", "."):
+            full, _ = self.lookup_path("index.html" if path in ("", "/", ".") else path)
+            if full:
+                return HTMLResponse(
+                    self._versioned_html(Path(full)),
+                    headers={"Cache-Control": "no-cache, must-revalidate"},
+                )
+        response = await super().get_response(path, scope)
+        if path.endswith((".js", ".css")):
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
 
@@ -196,9 +234,9 @@ def create_app() -> FastAPI:
     if _ADMIN_DIST.is_dir():
         app.mount("/admin", NoCacheHTMLStatic(directory=_ADMIN_DIST, html=True), name="admin-spa")
     if _MINIAPP_DIR.is_dir():
-        app.mount("/app", NoCacheHTMLStatic(directory=_MINIAPP_DIR, html=True), name="miniapp")
+        app.mount("/app", VersionedStatic(directory=_MINIAPP_DIR, html=True), name="miniapp")
     if _WEB_DIR.is_dir():
-        app.mount("/web", NoCacheHTMLStatic(directory=_WEB_DIR, html=True), name="web-cabinet")
+        app.mount("/web", VersionedStatic(directory=_WEB_DIR, html=True), name="web-cabinet")
     _UPLOADS_DIR.mkdir(exist_ok=True)
     app.mount("/uploads", StaticFiles(directory=_UPLOADS_DIR), name="uploads")
     # The public site is a catch-all at "/", so it MUST mount last — after every API

@@ -1212,7 +1212,7 @@
             render();
           }
         } catch {}
-      }, 25000);
+      }, 10000);
     }
     const supMsgs = state.support.messages || [];
     const supInp = el("input", { class: "inp", placeholder: T.supportPh, maxlength: 1000 });

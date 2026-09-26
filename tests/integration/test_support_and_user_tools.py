@@ -222,3 +222,82 @@ async def test_saving_report_group_normalizes_and_runs_the_delivery_check(
     async with container.uow() as uow:
         stored = await container.bot_config.value(uow, "REPORT_GROUP_ID")
     assert stored == "-1003914340224"
+
+
+async def test_miniapp_assets_are_versioned_and_revalidated(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import re
+
+    http, _ = client
+    page = await http.get("/app/")
+    assert page.status_code == 200
+    assert page.headers["cache-control"].startswith("no-cache")
+    m = re.search(r'src="app\.js\?v=([0-9a-f]{10})"', page.text)
+    assert m, "app.js must carry a content-hash version"
+    assert re.search(r'href="app\.css\?v=[0-9a-f]{10}"', page.text)
+    js = await http.get(f"/app/app.js?v={m.group(1)}")
+    assert js.status_code == 200 and js.headers["cache-control"] == "no-cache"
+    web = await http.get("/web/")
+    assert re.search(r'src="app\.js\?v=[0-9a-f]{10}"', web.text)
+
+
+async def test_bot_reply_joins_open_ticket_in_miniapp_mode(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from src.bot.handlers import tickets
+
+    class _Msg:
+        def __init__(self, text: str) -> None:
+            self.text = text
+            self.answers: list[str] = []
+            self.bot = None
+
+        async def answer(self, text: str, **kwargs: object) -> None:
+            self.answers.append(text)
+
+    class _State:
+        async def get_state(self) -> None:
+            return None
+
+    http, container = client
+    async with container.uow() as uow:
+        await container.bot_config.set_values(uow, {"SUPPORT_MODE": "miniapp"})
+        user = await make_user(uow, telegram_id=7712345)
+        t = Ticket(user_id=user.id, subject="не грузит", status=TicketStatus.WAITING)
+        await uow.tickets.add(t)
+        await uow.commit()
+        ticket_id = t.id
+
+    await tickets.user_message(_Msg("да, перезагрузил — не помогло"), container, user, _State())  # type: ignore[arg-type]
+
+    async with container.uow() as uow:
+        msgs = await uow.ticket_messages.list(ticket_id=ticket_id)
+        ticket = await uow.tickets.get(ticket_id)
+    assert [m.text for m in msgs] == ["да, перезагрузил — не помогло"]
+    assert ticket.status is TicketStatus.OPEN
+
+
+async def test_bot_ignores_free_text_in_miniapp_mode_without_open_ticket(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from src.bot.handlers import tickets
+
+    class _Msg:
+        text = "привет"
+        bot = None
+
+        async def answer(self, text: str, **kwargs: object) -> None: ...
+
+    class _State:
+        async def get_state(self) -> None:
+            return None
+
+    http, container = client
+    async with container.uow() as uow:
+        await container.bot_config.set_values(uow, {"SUPPORT_MODE": "miniapp"})
+        user = await make_user(uow, telegram_id=7712346)
+        await uow.commit()
+    await tickets.user_message(_Msg(), container, user, _State())  # type: ignore[arg-type]
+    async with container.uow() as uow:
+        assert await uow.tickets.list(user_id=user.id) == []

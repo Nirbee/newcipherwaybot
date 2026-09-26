@@ -80,10 +80,12 @@ async def _append_ticket_message(
         return active.id, created, active.is_premium
 
 
-async def _has_premium_ticket(container: AppContainer, user_id: int) -> bool:
-    """A premium request keeps its conversation in the bot whatever SUPPORT_MODE says."""
+async def _has_open_ticket(container: AppContainer, user_id: int) -> bool:
+    """An ongoing conversation continues in the bot whatever SUPPORT_MODE says: staff replies
+    arrive as bot messages, so customers answer right there (text or a screenshot) — under
+    the mini-app mode those answers used to be silently dropped."""
     async with container.uow() as uow:
-        return await premium.active_ticket(uow, user_id, premium_only=True) is not None
+        return await premium.active_ticket(uow, user_id, premium_only=False) is not None
 
 
 class TicketForm(StatesGroup):
@@ -151,7 +153,7 @@ async def user_message(
         cfg = container.bot_config
         mode = str(await cfg.value(uow, "SUPPORT_MODE"))
         support_chat = str(await cfg.value(uow, "SUPPORT_CHAT_ID") or "")
-    if mode != "tickets" and not await _has_premium_ticket(container, db_user.id):
+    if mode != "tickets" and not await _has_open_ticket(container, db_user.id):
         # Only the in-bot ticket mode consumes free text. Under bot/miniapp/redirect
         # act_support pointed the user elsewhere; creating a DB ticket nobody is watching
         # would silently orphan the message and contradict what we told them.
@@ -236,7 +238,7 @@ async def user_media(
         cfg = container.bot_config
         mode = str(await cfg.value(uow, "SUPPORT_MODE"))
         support_chat = str(await cfg.value(uow, "SUPPORT_CHAT_ID") or "")
-    if mode != "tickets" and not await _has_premium_ticket(container, db_user.id):
+    if mode != "tickets" and not await _has_open_ticket(container, db_user.id):
         return
 
     attachment: tuple[str, str] | None = None
