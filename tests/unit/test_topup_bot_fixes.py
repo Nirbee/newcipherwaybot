@@ -95,6 +95,19 @@ def _container(uow: UnitOfWork, *, bot_config: BotConfigService | None = None) -
     )
 
 
+async def _seed_stars(uow: UnitOfWork) -> None:
+    """Stars are offered only while their provider is switched on in «Платежи»."""
+    uow.session.add(
+        PaymentGateway(
+            type=PaymentGatewayType.TELEGRAM_STARS,
+            is_active=True,
+            currency=Currency.RUB,
+            display_name="Telegram Stars",
+            settings={},
+        )
+    )
+
+
 async def _seed_yookassa(uow: UnitOfWork) -> None:
     uow.session.add(
         PaymentGateway(
@@ -141,6 +154,7 @@ async def _deposits(uow: UnitOfWork, user_id: int) -> list[Any]:
 async def test_topup_pay_stars_sends_invoice_with_star_amount_from_rate(uow: UnitOfWork) -> None:
     async with uow:
         user = await make_user(uow)
+        await _seed_stars(uow)
         await uow.commit()
         user_id = user.id
 
@@ -167,6 +181,7 @@ async def test_topup_pay_stars_uses_the_configured_rate(uow: UnitOfWork) -> None
     cfg = BotConfigService()
     async with uow:
         user = await make_user(uow)
+        await _seed_stars(uow)
         await cfg.set_values(uow, {"STARS_RATE_RUB": 100})  # 1 star == 1 ₽
         await uow.commit()
 
@@ -180,6 +195,7 @@ async def test_topup_pay_stars_uses_the_configured_rate(uow: UnitOfWork) -> None
 async def test_topup_pay_stars_cancels_pending_txn_on_invoice_failure(uow: UnitOfWork) -> None:
     async with uow:
         user = await make_user(uow)
+        await _seed_stars(uow)
         await uow.commit()
         user_id = user.id
 
@@ -385,6 +401,7 @@ async def test_topup_pay_accepts_a_method_the_screen_actually_offered(uow: UnitO
     """Sanity check the allow-list isn't overzealous: "stars" (always offered) still works."""
     async with uow:
         user = await make_user(uow)
+        await _seed_stars(uow)
         await uow.commit()
         user_id = user.id
 

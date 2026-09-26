@@ -62,6 +62,19 @@ def _container(uow: UnitOfWork, *, bot_config: BotConfigService | None = None) -
     )
 
 
+async def _seed_stars(uow: UnitOfWork) -> None:
+    """Stars are offered only while their provider is switched on in «Платежи»."""
+    uow.session.add(
+        PaymentGateway(
+            type=PaymentGatewayType.TELEGRAM_STARS,
+            is_active=True,
+            currency=Currency.RUB,
+            display_name="Telegram Stars",
+            settings={},
+        )
+    )
+
+
 async def _seed_yookassa(uow: UnitOfWork) -> None:
     uow.session.add(
         PaymentGateway(
@@ -91,6 +104,7 @@ async def test_topup_methods_never_offer_balance(uow: UnitOfWork) -> None:
     container = _container(uow)
     async with uow:
         user = await make_user(uow, balance_minor=100000)
+        await _seed_stars(uow)
         await _seed_yookassa(uow)
         await uow.commit()
         topup_methods = await purchase._payment_methods(
@@ -119,6 +133,7 @@ async def test_topup_amount_screen_excludes_balance_button(
     monkeypatch.setattr(purchase, "render_screen", _fake_render_screen)
     async with uow:
         user = await make_user(uow)
+        await _seed_stars(uow)
         await _seed_yookassa(uow)
         await uow.commit()
 
@@ -268,3 +283,24 @@ async def test_topup_pay_rejects_when_balance_disabled(uow: UnitOfWork) -> None:
     assert "отключен" in (cb.answers[0][0] or "")
     async with uow:
         assert await uow.transactions.list(user_id=user_id) == []
+
+
+async def test_stars_hidden_while_switched_off_in_payments(uow: UnitOfWork) -> None:
+    """Stars follow the «Telegram Stars» switch in «Платежи»: off (or never configured) means
+    no Stars button, however the operator orders the methods."""
+    container = _container(uow)
+    async with uow:
+        user = await make_user(uow, balance_minor=100000)
+        await _seed_yookassa(uow)
+        await uow.commit()
+        methods = await purchase._payment_methods(uow, container, user, 50000)
+        codes = [code for _label, code in methods]
+    assert "stars" not in codes
+    assert "yookassa" in codes
+
+    async with uow:
+        await _seed_stars(uow)
+        await uow.commit()
+        methods = await purchase._payment_methods(uow, container, user, 50000)
+        codes = [code for _label, code in methods]
+    assert "stars" in codes

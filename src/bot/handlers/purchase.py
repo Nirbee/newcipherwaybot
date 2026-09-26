@@ -28,6 +28,7 @@ from src.bot.screen import ack, show_screen
 from src.core.constants import MAX_DEPOSIT_AMOUNT_MINOR
 from src.core.enums import (
     Currency,
+    PaymentGatewayType,
     PlanCategory,
     PurchaseType,
     TransactionStatus,
@@ -179,6 +180,11 @@ async def render_durations(
     await ack(cb)
 
 
+async def stars_enabled(uow: UnitOfWork) -> bool:
+    """Telegram Stars is offered only while its provider row is active in «Платежи»."""
+    return await uow.payment_gateways.get_active(PaymentGatewayType.TELEGRAM_STARS) is not None
+
+
 async def _payment_methods(
     uow: UnitOfWork,
     container: AppContainer,
@@ -210,8 +216,11 @@ async def _payment_methods(
     if balance_enabled and include_balance:
         ok = "✅" if db_user.balance_minor >= price_minor else "❌"
         entries.append((f"{ok} {bal_label} ({fmt_money(db_user.balance_minor)})", "bal", "balance"))
-    stars = max(1, math.ceil(price_minor / max(1, stars_rate)))
-    entries.append((f"⭐ {stars_label} · {stars} ★", "stars", "stars"))
+    # Stars follow the «Telegram Stars» switch in «Платежи» like every other provider —
+    # previously they were appended unconditionally, so turning them off did nothing.
+    if await stars_enabled(uow):
+        stars = max(1, math.ceil(price_minor / max(1, stars_rate)))
+        entries.append((f"⭐ {stars_label} · {stars} ★", "stars", "stars"))
     from src.application.services.pay_forms import gateway_form_options
 
     for g in await uow.payment_gateways.list():
@@ -347,6 +356,9 @@ async def _start_payment_locked(
 
     # Stars: create the pending transaction, then send an XTR invoice.
     async with container.uow() as uow:
+        if not await stars_enabled(uow):
+            await cb.answer("Оплата звёздами сейчас отключена", show_alert=True)
+            return
         try:
             txn, quote = await container.purchase.start(uow, req)
         except DomainError as exc:
@@ -744,6 +756,7 @@ async def traffic_pack_pay(cb: CallbackQuery, container: AppContainer, db_user: 
         )
         balance_enabled = bool(await container.bot_config.value(uow, "BALANCE_ENABLED"))
         stars_rate = int(await container.bot_config.value(uow, "STARS_RATE_RUB"))
+        stars_on = await stars_enabled(uow)
         online_gateways = [
             (g.type.value, g.display_name or g.type.value)
             for g in await uow.payment_gateways.list()
@@ -775,7 +788,8 @@ async def traffic_pack_pay(cb: CallbackQuery, container: AppContainer, db_user: 
     if balance_enabled:
         ok = "✅" if db_user.balance_minor >= price else "❌"
         rows.append((f"{ok} С баланса ({fmt_money(db_user.balance_minor)})", f"tpay:{pack_id}:bal"))
-    rows.append((f"⭐ Telegram Stars · {stars} ★", f"tpay:{pack_id}:stars"))
+    if stars_on:
+        rows.append((f"⭐ Telegram Stars · {stars} ★", f"tpay:{pack_id}:stars"))
     for gtype, label in online_gateways:
         rows.append((f"💳 {label}", f"tpay:{pack_id}:{gtype}"))
     rows.append(("‹ Назад", "traffic:menu"))
@@ -1062,6 +1076,9 @@ async def _topup_with_stars(
     cb: CallbackQuery, container: AppContainer, db_user: User, amount_minor: int
 ) -> None:
     async with container.uow() as uow:
+        if not await stars_enabled(uow):
+            await cb.answer("Оплата звёздами сейчас отключена", show_alert=True)
+            return
         stars_rate = int(await container.bot_config.value(uow, "STARS_RATE_RUB"))
         txn = Transaction(
             user_id=db_user.id,

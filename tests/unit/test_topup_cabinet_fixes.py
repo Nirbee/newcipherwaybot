@@ -245,6 +245,7 @@ async def test_topup_stars_invoice_failure_cancels_pending_transaction(
     client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     http, container = client
+    await _seed_active_gateway(container, PaymentGatewayType.TELEGRAM_STARS, display_name="Stars")
     tma = _tma_headers(910000001)
     await http.get("/api/cabinet/me", headers=tma)
 
@@ -275,6 +276,7 @@ async def test_topup_stars_success_returns_invoice_link(
     client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     http, container = client
+    await _seed_active_gateway(container, PaymentGatewayType.TELEGRAM_STARS, display_name="Stars")
     tma = _tma_headers(910000002)
     await http.get("/api/cabinet/me", headers=tma)
 
@@ -303,6 +305,7 @@ async def test_purchase_stars_invoice_failure_cancels_pending_transaction(
 ) -> None:
     """The same orphan-PENDING-transaction hazard, symmetrically fixed on /purchase (#1)."""
     http, container = client
+    await _seed_active_gateway(container, PaymentGatewayType.TELEGRAM_STARS, display_name="Stars")
     tma = _tma_headers(910000003)
     await http.get("/api/cabinet/me", headers=tma)
     async with container.uow() as uow:

@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { api, dtTime, getToken } from "../api/client";
-import { Field, Modal, Toggle } from "../components/ui";
+import { Field, Modal, Seg, Toggle } from "../components/ui";
 import { useApp } from "../state/app";
 
 type TicketRow = {
@@ -19,6 +19,13 @@ type TicketRow = {
   messages: number;
   updated_at: string | null;
 };
+type TicketList = {
+  items: TicketRow[];
+  open_count: number;
+  open_regular: number;
+  open_premium: number;
+};
+type Section = "all" | "premium" | "regular";
 type TicketDetail = {
   id: number;
   subject: string;
@@ -103,6 +110,24 @@ export default function Tickets() {
   const [redirect, setRedirect] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferDraft | null>(null);
   const [sendingOffer, setSendingOffer] = useState(false);
+  // Premium conversations live in their own section; the choice survives a reload.
+  const [section, setSection] = useState<Section>(() => {
+    try {
+      const v = localStorage.getItem("tickets_section");
+      if (v === "all" || v === "premium" || v === "regular") return v;
+    } catch {
+      /* storage blocked — default below */
+    }
+    return "all";
+  });
+  function pickSection(v: Section) {
+    setSection(v);
+    try {
+      localStorage.setItem("tickets_section", v);
+    } catch {
+      /* ignore */
+    }
+  }
   const servers = useQuery({
     queryKey: ["servers"],
     queryFn: () => api.get<{ squads: Squad[] }>("/api/admin/servers"),
@@ -113,15 +138,21 @@ export default function Tickets() {
     queryKey: ["support-channels"],
     queryFn: () => api.get<Channels>("/api/admin/support-channels"),
   });
+  // Live chat: the list and the open conversation poll on their own (paused while the tab is
+  // hidden), so a customer's reply shows up without reloading the page.
   const tickets = useQuery({
-    queryKey: ["tickets"],
-    queryFn: () => api.get<{ items: TicketRow[]; open_count: number }>("/api/admin/tickets"),
-    refetchInterval: 30_000,
+    queryKey: ["tickets", section],
+    queryFn: () =>
+      api.get<TicketList>(
+        section === "all" ? "/api/admin/tickets" : `/api/admin/tickets?premium=${section === "premium"}`,
+      ),
+    refetchInterval: 8_000,
   });
   const detail = useQuery({
     queryKey: ["ticket", selId],
     queryFn: () => api.get<TicketDetail>(`/api/admin/tickets/${selId}`),
     enabled: selId !== null,
+    refetchInterval: 4_000,
   });
 
   const sendReply = useMutation({
@@ -140,10 +171,17 @@ export default function Tickets() {
     onError: (e) => toast(e.message),
   });
 
+  // Jump to the newest message when a chat opens, and follow new ones — unless the admin has
+  // scrolled up to read history (then a poll must not yank the view away).
+  const lastSel = useRef<number | null>(null);
   useEffect(() => {
     const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [detail.data?.messages.length, selId]);
+    if (!el) return;
+    const switched = lastSel.current !== selId;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    if (switched || nearBottom) el.scrollTop = el.scrollHeight;
+    if (detail.data) lastSel.current = selId;
+  }, [detail.data?.messages.length, selId, detail.data]);
 
   async function uploadShot(f: File) {
     setUploading(true);
@@ -278,12 +316,32 @@ export default function Tickets() {
       <div className="cols">
         {/* ticket list */}
         <div className="card" style={{ flex: "1 1 300px", padding: 0, overflow: "hidden" }}>
+          <div className="tk-sections">
+            <Seg<Section>
+              value={section}
+              onChange={pickSection}
+              options={[
+                {
+                  id: "all",
+                  label: "Все",
+                  count: (tickets.data?.open_regular ?? 0) + (tickets.data?.open_premium ?? 0) || undefined,
+                },
+                { id: "premium", label: "💎 Премиум", count: tickets.data?.open_premium || undefined },
+                { id: "regular", label: "Обычные", count: tickets.data?.open_regular || undefined },
+              ]}
+            />
+            {section !== "premium" && (tickets.data?.open_premium ?? 0) > 0 && (
+              <button className="tk-premium-alert" onClick={() => pickSection("premium")}>
+                💎 Открытых премиум-обращений: {tickets.data?.open_premium}
+              </button>
+            )}
+          </div>
           {(tickets.data?.items ?? []).map((tk) => {
             const [g, cls] = ST[tk.status] ?? ["○", "off"];
             return (
               <div
                 key={tk.id}
-                className="tr click"
+                className={`tr click${tk.is_premium ? " tk-premium" : ""}${tk.id === selId ? " tk-sel" : ""}`}
                 style={{ gridTemplateColumns: "auto 1fr auto" }}
                 onClick={() => setSelId(tk.id)}
               >
@@ -321,7 +379,9 @@ export default function Tickets() {
             );
           })}
           {tickets.data && tickets.data.items.length === 0 && (
-            <div className="tr dim">—</div>
+            <div className="tr dim">
+              {section === "premium" ? "Премиум-обращений пока нет" : "Обращений нет"}
+            </div>
           )}
         </div>
 

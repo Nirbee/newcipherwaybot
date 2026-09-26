@@ -26,6 +26,8 @@ body[data-theme="dark"] {
   --bad: #d03b3b;
   --bad-ink: #ff6b6b;
   --warn: #fab219;
+  --premium: #b99cff;
+  --premium-soft: rgba(185, 156, 255, 0.1);
 
   --chart-accent: #c98500;
   --series-1: #3987e5;
@@ -63,6 +65,8 @@ body[data-theme="light"] {
   --bad: #d03b3b;
   --bad-ink: #c62828;
   --warn: #c98500;
+  --premium: #6f42e8;
+  --premium-soft: rgba(111, 66, 232, 0.07);
 
   --chart-accent: #b87400;
   --series-1: #2a78d6;
@@ -1289,4 +1293,50 @@ hr.sep {
 }
 .drawer .seg > button {
   flex: 1;
+}
+
+/* support: premium section */
+.tk-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+.tk-sections .seg {
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.tk-premium-alert {
+  border: 1px solid var(--premium);
+  background: var(--premium-soft);
+  color: var(--premium);
+  font: 600 12px/1.2 "Golos Text", sans-serif;
+  border-radius: 8px;
+  padding: 7px 10px;
+  text-align: left;
+  cursor: pointer;
+  animation: tk-pulse 2.4s ease-in-out infinite;
+}
+@keyframes tk-pulse {
+  50% {
+    box-shadow: 0 0 0 3px var(--premium-soft);
+  }
+}
+.tr.tk-premium {
+  background: var(--premium-soft);
+  box-shadow: inset 3px 0 0 var(--premium);
+}
+.tr.tk-sel {
+  background: var(--hover);
+}
+.tr.tk-premium.tk-sel {
+  box-shadow: inset 3px 0 0 var(--premium), inset 0 0 0 1px var(--premium-soft);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tk-premium-alert {
+    animation: none;
+  }
 }

@@ -105,9 +105,18 @@ async def test_admin_queue_puts_open_premium_tickets_first(
         await uow.tickets.add(Ticket(user_id=other.id, subject="обычный", status=TicketStatus.OPEN))
         await uow.commit()
 
-    items = (await http.get("/api/admin/tickets", headers=await _login(http))).json()["items"]
+    auth = await _login(http)
+    body = (await http.get("/api/admin/tickets", headers=auth)).json()
+    items = body["items"]
     assert items[0]["is_premium"] is True
     assert items[1]["is_premium"] is False
+    assert (body["open_premium"], body["open_regular"]) == (1, 1)
+
+    # The «💎 Премиум» section and the regular one each see only their own conversations.
+    prem = (await http.get("/api/admin/tickets?premium=true", headers=auth)).json()["items"]
+    assert [t["is_premium"] for t in prem] == [True]
+    reg = (await http.get("/api/admin/tickets?premium=false", headers=auth)).json()["items"]
+    assert [t["subject"] for t in reg] == ["обычный"]
 
 
 async def test_invoice_creates_private_plan_and_sends_pay_link(

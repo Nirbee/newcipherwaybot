@@ -148,6 +148,18 @@ async def client(
     get_settings.cache_clear()
 
 
+async def _stars_on(container: ApiTestContainer) -> None:
+    """Stars are offered only while their provider is switched on in «Платежи»."""
+    from src.core.enums import PaymentGatewayType
+    from src.infrastructure.database.models.payment_gateway import PaymentGateway
+
+    async with container.uow() as uow:
+        await uow.payment_gateways.add(
+            PaymentGateway(type=PaymentGatewayType.TELEGRAM_STARS, is_active=True, settings={})
+        )
+        await uow.commit()
+
+
 def _tma_headers(tg_id: int) -> dict[str, str]:
     user = {"id": tg_id, "first_name": "Тест", "username": "topup_neterr", "language_code": "ru"}
     pairs = {
@@ -188,6 +200,7 @@ async def test_topup_network_error_cancels_pending_and_returns_clean_error(
     client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     http, container = client
+    await _stars_on(container)
     tma = _tma_headers(920000001)
     await http.get("/api/cabinet/me", headers=tma)
 
@@ -222,6 +235,7 @@ async def test_topup_retry_after_cancels_pending_transaction(
 ) -> None:
     """Flood control (TelegramRetryAfter) — a live risk under any burst of top-up taps."""
     http, container = client
+    await _stars_on(container)
     tma = _tma_headers(920000002)
     await http.get("/api/cabinet/me", headers=tma)
 
@@ -248,6 +262,7 @@ async def test_topup_unauthorized_bot_cancels_pending_transaction(
 ) -> None:
     """A revoked/invalid bot token (TelegramUnauthorizedError) must not strand the txn either."""
     http, container = client
+    await _stars_on(container)
     tma = _tma_headers(920000003)
     await http.get("/api/cabinet/me", headers=tma)
 
@@ -276,6 +291,7 @@ async def test_purchase_network_error_cancels_pending_and_returns_clean_error(
     client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     http, container = client
+    await _stars_on(container)
     tma = _tma_headers(920000004)
     await http.get("/api/cabinet/me", headers=tma)
     async with container.uow() as uow:

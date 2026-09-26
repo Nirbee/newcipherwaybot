@@ -58,7 +58,12 @@ def effective_priority(manual: int, waiting_min: int | None, is_premium: bool) -
 
 
 @router.get("/tickets")
-async def list_tickets(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+async def list_tickets(
+    premium: bool | None = None, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    """``premium=true`` -> only premium conversations (their own «💎 Премиум» section),
+    ``false`` -> only regular ones, omitted -> everything. Filtered in SQL, so an older
+    premium chat never falls off behind the 200 most recent regular tickets."""
     from sqlalchemy import func, select
 
     from src.infrastructure.database.models.ticket import Ticket
@@ -78,18 +83,24 @@ async def list_tickets(container: AppContainer = Depends(get_container)) -> dict
             .order_by(Ticket.updated_at.desc())
             .limit(200)
         )
+        if premium is not None:
+            stmt = stmt.where(Ticket.is_premium.is_(premium))
         tickets = (await uow.session.execute(stmt)).all()
         ids = [t.id for t, _u, _c in tickets]
         last_ids = select(func.max(TicketMessage.id)).where(TicketMessage.ticket_id.in_(ids))
         last_ids = last_ids.group_by(TicketMessage.ticket_id)
-        last_msgs = {
-            m.ticket_id: m
-            for m in (
-                await uow.session.scalars(
-                    select(TicketMessage).where(TicketMessage.id.in_(last_ids))
-                )
-            ).all()
-        } if ids else {}
+        last_msgs = (
+            {
+                m.ticket_id: m
+                for m in (
+                    await uow.session.scalars(
+                        select(TicketMessage).where(TicketMessage.id.in_(last_ids))
+                    )
+                ).all()
+            }
+            if ids
+            else {}
+        )
 
         rows = []
         for t, username, cnt in tickets:
@@ -125,7 +136,22 @@ async def list_tickets(container: AppContainer = Depends(get_container)) -> dict
             )
         )
         open_count = await uow.tickets.open_count()
-    return {"items": rows[:100], "open_count": open_count}
+        by_kind = dict(
+            (
+                await uow.session.execute(
+                    select(Ticket.is_premium, func.count())
+                    .where(Ticket.status != TicketStatus.CLOSED)
+                    .group_by(Ticket.is_premium)
+                )
+            ).all()
+        )
+    return {
+        "items": rows[:100],
+        "open_count": open_count,
+        # Open conversations per section — the tab badges.
+        "open_regular": int(by_kind.get(False, 0)),
+        "open_premium": int(by_kind.get(True, 0)),
+    }
 
 
 @router.get("/tickets/{ticket_id}")
@@ -347,8 +373,12 @@ async def premium_offer(
         t.status = TicketStatus.WAITING
         t.updated_at = utcnow()
         await audit(
-            uow, identity, "ticket.premium_offer", f"ticket:{ticket_id}",
-            plan_id=plan.id, durations=durations,
+            uow,
+            identity,
+            "ticket.premium_offer",
+            f"ticket:{ticket_id}",
+            plan_id=plan.id,
+            durations=durations,
         )
         await uow.commit()
         plan_id, telegram_id = plan.id, customer.telegram_id

@@ -196,10 +196,13 @@ async def me(
         pay_balance_label = str(await cfg.value(uow, "PAYMENT_BALANCE_LABEL") or "").strip()
         pay_stars_label = str(await cfg.value(uow, "PAYMENT_STARS_LABEL") or "").strip()
         rank = order_rank(str(await cfg.value(uow, "PAYMENT_METHOD_ORDER") or ""))
-        # Stars dropped from the mini-app's payment chips on request — the /topup and
-        # /purchase "stars" method still exists server-side (untouched), this only hides
-        # the chip so the mini-app storefront no longer offers it.
+        # Stars appear only while «Telegram Stars» is switched on in «Платежи» — the same
+        # switch the bot obeys, so the two storefronts can't disagree.
+        from src.bot.handlers.purchase import stars_enabled
+
         payment_order = ["balance"] if balance_on else []
+        if await stars_enabled(uow):
+            payment_order.append("stars")
         payment_order += [g["id"] for g in gateways]
         payment_order.sort(key=rank)  # stable — unlisted methods keep default order
         if sub is not None and sub.status.is_usable:
@@ -516,6 +519,10 @@ async def purchase(
 
     # Stars: pending tx + invoice link opened via Telegram.WebApp.openInvoice.
     async with container.uow() as uow:
+        from src.bot.handlers.purchase import stars_enabled
+
+        if not await stars_enabled(uow):
+            raise HTTPException(400, "оплата звёздами отключена")
         try:
             txn, quote = await container.purchase.start(uow, req)
         except RemnawaveError as exc:
@@ -674,6 +681,11 @@ async def topup(
             raise HTTPException(400, "balance top-ups are disabled")
         min_dep = int(await container.bot_config.value(uow, "MIN_DEPOSIT_AMOUNT"))
         stars_rate = int(await container.bot_config.value(uow, "STARS_RATE_RUB"))
+        if body.method == "stars":
+            from src.bot.handlers.purchase import stars_enabled
+
+            if not await stars_enabled(uow):
+                raise HTTPException(400, "оплата звёздами отключена")
 
     # amount_minor is client-supplied and forgeable — re-validate the floor AND ceiling
     # server-side, never trust the UI preset the request claims to have used. Both bounds
