@@ -1,5 +1,5 @@
-/* App shell: sidebar (14 items, groups, badges, statuses) + topbar (crumbs,
-   panel badge, theme/lang segments, avatar). */
+/* App shell: sidebar (groups, badges, live statuses; off-canvas on phones) + topbar
+   (crumbs, live panel badge, theme toggle, avatar). */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -7,11 +7,17 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 
 import { api, setToken } from "../api/client";
 import { useApp } from "../state/app";
-import { Seg } from "./ui";
 
 type Me = { user_id: number; username: string; role: string; allowed_screens: string[] | null };
 type Counters = { all: number };
 type TicketsResp = { open_count: number };
+type SystemInfo = { redis: string; panel: { status: string; version?: string } };
+
+const ROLE_RU: Record<string, string> = {
+  OWNER: "Владелец",
+  ADMIN: "Администратор",
+  MODERATOR: "Модератор",
+};
 
 /* Live build version, bottom-right. Polls /api/version; when the server ships a newer
    build than the one this page loaded with, it offers a one-click reload (index.html is
@@ -99,7 +105,8 @@ export function BrandLogo({ size = 15 }: { size?: number }) {
 }
 
 export default function Layout() {
-  const { t, theme, setTheme, lang, setLang } = useApp();
+  const { t, theme, setTheme } = useApp();
+  const [navOpen, setNavOpen] = useState(false);
   const qc = useQueryClient();
   const loc = useLocation();
   const nav = useNavigate();
@@ -115,6 +122,18 @@ export default function Layout() {
     queryFn: () => api.get<TicketsResp>("/api/admin/tickets"),
     refetchInterval: 60_000,
   });
+  const sys = useQuery({
+    queryKey: ["system"],
+    queryFn: () => api.get<SystemInfo>("/api/admin/dashboard/system"),
+    refetchInterval: 60_000,
+    retry: false,
+  });
+  const panelOk = sys.data ? sys.data.panel.status === "ok" : null;
+  const redisOk = sys.data ? sys.data.redis === "ok" : null;
+  const apiOk = sys.isError ? false : sys.data ? true : null;
+  const dotCls = (ok: boolean | null) => `status-dot ${ok === null ? "" : ok ? "ok" : "err"}`;
+
+  useEffect(() => setNavOpen(false), [loc.pathname]);
 
   const items: {
     group?: string;
@@ -191,11 +210,12 @@ export default function Layout() {
 
   return (
     <div className="shell">
-      <aside className="sidebar">
+      <div className={`nav-scrim${navOpen ? " open" : ""}`} onClick={() => setNavOpen(false)} />
+      <aside className={`sidebar${navOpen ? " open" : ""}`}>
         <div className="side-logo">
           <div className="row" style={{ gap: 8 }}>
             <BrandLogo size={16} />
-            <span className="caps" style={{ letterSpacing: "0.12em" }}>CABINET</span>
+            <span className="caps">кабинет</span>
           </div>
           <div style={{ position: "relative", marginTop: 12 }}>
             <span className="dim" style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 13 }}>⌕</span>
@@ -254,48 +274,59 @@ export default function Layout() {
           ))}
         </nav>
         <div className="side-footer">
-          <span className="caps">
-            <span className="status-dot" />
-            API · ONLINE
+          <span className="muted">
+            <span className={dotCls(apiOk)} />
+            Сервер бота {apiOk === false ? "— нет связи" : ""}
           </span>
-          <span className="caps">
-            <span className="status-dot" />
-            REMNAWAVE · SYNC
+          <span className="muted">
+            <span className={dotCls(panelOk)} />
+            Remnawave {sys.data?.panel.version ? `· ${sys.data.panel.version}` : ""}
+          </span>
+          <span className="muted">
+            <span className={dotCls(redisOk)} />
+            Redis
           </span>
         </div>
       </aside>
 
       <div className="main">
         <header className="topbar">
-          <span className="crumbs">ADMIN / {current?.label ?? ""}</span>
+          <button
+            className="icon-btn menu-btn"
+            aria-label="Меню"
+            onClick={() => setNavOpen((o) => !o)}
+          >
+            ☰
+          </button>
+          <span className="crumbs">
+            <span className="hide-sm">Панель / </span>
+            <b>{current?.label ?? ""}</b>
+          </span>
           <span className="spacer" />
-          <span className="cap-pill">● REMNAWAVE · OK</span>
-          <Seg
-            value={theme}
-            options={[
-              { id: "dark" as const, label: "DARK" },
-              { id: "light" as const, label: "LIGHT" },
-            ]}
-            onChange={setTheme}
-          />
-          <Seg
-            value={lang}
-            options={[
-              { id: "ru" as const, label: "RU" },
-              { id: "en" as const, label: "EN" },
-            ]}
-            onChange={setLang}
-          />
+          <span className={`cap-pill hide-sm${panelOk === false ? "" : " accent"}`}>
+            <span className={dotCls(panelOk)} />
+            Remnawave · {panelOk === null ? "…" : panelOk ? "OK" : "ошибка"}
+          </span>
+          <button
+            className="icon-btn"
+            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            aria-label="Сменить тему"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? "☀️" : "🌙"}
+          </button>
           <div className="row" style={{ gap: 8 }}>
             <div className="avatar-sq">
               {(me.data?.username ?? "??").slice(0, 2).toUpperCase()}
             </div>
-            <div style={{ lineHeight: 1.2 }}>
-              <div style={{ fontSize: 12.5 }}>@{me.data?.username}</div>
-              <div className="caps">{me.data?.role}</div>
+            <div className="hide-sm" style={{ lineHeight: 1.25 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 500 }}>@{me.data?.username}</div>
+              <div className="dim" style={{ fontSize: 11 }}>
+                {ROLE_RU[me.data?.role ?? ""] ?? me.data?.role}
+              </div>
             </div>
             <button
-              className="btn secondary sm"
+              className="icon-btn"
               title={t.logout}
               onClick={() => {
                 setToken(null);
@@ -308,7 +339,7 @@ export default function Layout() {
           </div>
         </header>
         <main className="content">
-          <div className="content-inner">
+          <div className="content-inner page-enter" key={loc.pathname}>
             <Outlet />
           </div>
         </main>

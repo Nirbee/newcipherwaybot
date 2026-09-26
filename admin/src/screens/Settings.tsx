@@ -21,22 +21,22 @@ type Param = {
 };
 type Resp = { categories: { id: string; name: string }[]; params: Param[]; total: number };
 
-const CAT_META: Record<string, { icon: string; ru: string; en: string }> = {
-  main: { icon: "⚙️", ru: "Приветствие, язык, техработы, админы", en: "Greeting, language, maintenance, admins" },
-  subs: { icon: "📦", ru: "Триал, автопродление, лимиты устройств", en: "Trial, auto-renewal, device limits" },
-  pay: { icon: "💳", ru: "Пополнения, налог, чеки, курс Stars", en: "Deposits, tax, receipts, Stars rate" },
-  notif: { icon: "🔔", ru: "Алерты, отчёты, напоминания", en: "Alerts, reports, reminders" },
-  ref: { icon: "🎁", ru: "Бонусы и проценты за приглашения", en: "Referral bonuses and percents" },
-  sec: { icon: "🛡️", ru: "Чёрный список, обязательный канал, HWID", en: "Blacklist, required channel, HWID" },
-  backup: { icon: "💾", ru: "Расписание и хранение бэкапов", en: "Backup schedule and retention" },
-  ui: { icon: "🤖", ru: "Кнопки бота, прокси, поддержка", en: "Bot buttons, proxy, support" },
-  support: { icon: "💬", ru: "ИИ-поддержка: модель и база знаний", en: "AI support: model and knowledge base" },
+const CAT_META: Record<string, { icon: string; ru: string }> = {
+  main: { icon: "⚙️", ru: "Приветствие, язык, техработы, админы" },
+  subs: { icon: "📦", ru: "Триал, автопродление, лимиты устройств" },
+  pay: { icon: "💳", ru: "Пополнения, налог, чеки, курс Stars" },
+  notif: { icon: "🔔", ru: "Алерты, отчёты, напоминания" },
+  ref: { icon: "🎁", ru: "Бонусы и проценты за приглашения" },
+  sec: { icon: "🛡️", ru: "Чёрный список, обязательный канал, HWID" },
+  backup: { icon: "💾", ru: "Расписание и хранение бэкапов" },
+  ui: { icon: "🤖", ru: "Кнопки бота, прокси, поддержка" },
+  support: { icon: "💬", ru: "ИИ-поддержка: модель и база знаний" },
 };
 
 type Me = { role: string };
 
 export default function Settings() {
-  const { t, lang, toast } = useApp();
+  const { t, toast } = useApp();
   const nav = useNavigate();
   const me = useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/admin/auth/me") });
   const qc = useQueryClient();
@@ -63,8 +63,8 @@ export default function Settings() {
   const [dirty, setDirty] = useState<Record<string, unknown>>({});
 
   const data = useQuery({
-    queryKey: ["settings", lang],
-    queryFn: () => api.get<Resp>(`/api/admin/settings?lang=${lang}`),
+    queryKey: ["settings"],
+    queryFn: () => api.get<Resp>("/api/admin/settings?lang=ru"),
   });
 
   const all = data.data?.params ?? [];
@@ -191,7 +191,7 @@ export default function Settings() {
             )}
           </h1>
           {cat && !searching && (
-            <div className="caps sub">{lang === "ru" ? CAT_META[cat]?.ru : CAT_META[cat]?.en}</div>
+            <div className="caps sub">{CAT_META[cat]?.ru}</div>
           )}
         </div>
         <div className="actions">
@@ -300,7 +300,7 @@ export default function Settings() {
                 </div>
                 <div style={{ fontSize: 15, fontWeight: 600, margin: "10px 0 4px" }}>{c.name}</div>
                 <div className="muted" style={{ fontSize: 12.5, minHeight: 34 }}>
-                  {lang === "ru" ? CAT_META[c.id]?.ru : CAT_META[c.id]?.en}
+                  {CAT_META[c.id]?.ru}
                 </div>
                 <div className="caps" style={{ marginTop: 8 }}>
                   {overridden > 0 ? `● ${t.changed}: ${overridden}` : "—"}

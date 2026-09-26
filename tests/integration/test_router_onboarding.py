@@ -348,3 +348,49 @@ async def test_plans_are_appended_in_order_and_can_be_reordered(
     assert listed == wanted
     async with container.uow() as uow:
         assert [p.id for p in await onboarding.router_plans(uow)] == wanted
+
+
+async def test_dashboard_period_revenue_split_and_delta(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import datetime as dt
+
+    from src.core.enums import PurchaseType, TransactionType
+    from src.infrastructure.database.models.transaction import Transaction
+
+    http, container = client
+    base_id, _ = await _router_plans(container)
+    now = dt.datetime.now(dt.UTC)
+    async with container.uow() as uow:
+        buyer = await make_user(uow, telegram_id=5559001)
+        rows = [
+            # current period: a router sale by card + a balance top-up
+            (TransactionType.SUBSCRIPTION_PAYMENT, 50000, now, {"plan_id": base_id}),
+            (TransactionType.DEPOSIT, 20000, now - dt.timedelta(days=1), None),
+            # previous period (8-13 days ago for days=7)
+            (TransactionType.DEPOSIT, 10000, now - dt.timedelta(days=10), None),
+        ]
+        for ttype, amount, at, snapshot in rows:
+            await uow.transactions.add(
+                Transaction(
+                    user_id=buyer.id,
+                    type=ttype,
+                    status=TransactionStatus.COMPLETED,
+                    amount_minor=amount,
+                    currency=Currency.RUB,
+                    gateway_type=PaymentGatewayType.MANUAL,
+                    purchase_type=PurchaseType.NEW if snapshot else None,
+                    plan_snapshot=snapshot,
+                    completed_at=at,
+                )
+            )
+        await uow.commit()
+
+    body = (await http.get("/api/admin/dashboard?days=7", headers=await _login(http))).json()
+    rev = body["revenue"]
+    assert body["days"] == 7 and len(rev["series"]) == 7
+    assert rev["current_minor"] == 70000 and rev["previous_minor"] == 10000
+    assert rev["by_product"]["router"] == 50000 and rev["by_product"]["topup"] == 20000
+    assert rev["orders"] == 2 and rev["payers"] == 1 and rev["avg_check_minor"] == 35000
+    assert rev["series"][-1]["amount_minor"] == 50000
+    assert body["routers"] == {"total": 0, "online": 0, "offline": 0, "pending": 0}

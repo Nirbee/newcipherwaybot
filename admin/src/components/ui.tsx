@@ -1,6 +1,8 @@
-/* Shared primitives: Toggle, Segmented, KPI, Bars, Modal, Drawer, Prog, SecretInput. */
+/* Shared primitives: Toggle, Segmented, KPI/Stat, Delta, Bars, Modal, Drawer, Prog, SecretInput. */
 
 import { type CSSProperties, type ReactNode, useState } from "react";
+
+import { Sparkline, useCountUp } from "./charts";
 
 /* A credential/secret input that (1) does NOT use type="password", so the browser never
    autofills a saved login password into it, and (2) shows its value by default with a 👁
@@ -198,5 +200,82 @@ export function Field({
       <span className="caps">{label}</span>
       {children}
     </label>
+  );
+}
+
+/* Signed change vs a named period. Color = direction x whether up is good; the arrow and
+   the text carry it too, so it never relies on color alone. */
+export function Delta({
+  pct,
+  goodWhenUp = true,
+  label,
+}: {
+  pct: number | null;
+  goodWhenUp?: boolean;
+  label?: string;
+}) {
+  if (pct === null || !Number.isFinite(pct)) return null;
+  const rounded = Math.round(pct);
+  const cls = rounded === 0 ? "flat" : (rounded > 0) === goodWhenUp ? "up" : "down";
+  const arrow = rounded === 0 ? "→" : rounded > 0 ? "▲" : "▼";
+  return (
+    <span className={`delta ${cls}`}>
+      {arrow} {rounded > 0 ? "+" : ""}
+      {rounded}%{label && <span className="dim" style={{ fontWeight: 400 }}>&nbsp;{label}</span>}
+    </span>
+  );
+}
+
+export function pctChange(current: number, previous: number): number | null {
+  if (previous <= 0) return current > 0 ? null : 0;
+  return ((current - previous) / previous) * 100;
+}
+
+/* Stat tile: label, count-up value, optional delta / note / sparkline. */
+export function Stat({
+  icon,
+  label,
+  value,
+  format = (n) => Math.round(n).toLocaleString("ru-RU"),
+  delta = null,
+  goodWhenUp = true,
+  deltaLabel,
+  note,
+  spark,
+  onClick,
+}: {
+  icon?: string;
+  label: string;
+  value: number | null;
+  format?: (n: number) => string;
+  delta?: number | null;
+  goodWhenUp?: boolean;
+  deltaLabel?: string;
+  note?: ReactNode;
+  spark?: number[];
+  onClick?: () => void;
+}) {
+  const shown = useCountUp(value ?? 0);
+  return (
+    <div
+      className={`kpi${onClick ? " link" : ""}`}
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => e.key === "Enter" && onClick() : undefined}
+    >
+      <div className="kpi-top">
+        {icon && <span className="kpi-ico">{icon}</span>}
+        <span className="caps">{label}</span>
+      </div>
+      <div className="val">{value === null ? <span className="sk" style={{ width: 90 }} /> : format(shown)}</div>
+      {(delta !== null || note) && (
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <Delta pct={delta} goodWhenUp={goodWhenUp} label={deltaLabel} />
+          {note && <span className="note">{note}</span>}
+        </div>
+      )}
+      {spark && spark.length > 1 && <Sparkline values={spark} />}
+    </div>
   );
 }

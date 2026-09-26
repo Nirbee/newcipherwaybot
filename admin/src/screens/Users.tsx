@@ -289,7 +289,7 @@ export default function Users() {
 
       {selId !== null && (
         <Drawer onClose={() => setSelId(null)}>
-          <div style={{ padding: 20 }}>
+          <div>
             {d ? (
               <>
                 <div className="row" style={{ marginBottom: 4 }}>

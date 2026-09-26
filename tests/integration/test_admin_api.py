@@ -228,9 +228,13 @@ async def test_stats_user_and_subscription_breakdowns(
     assert body["users"]["with_sub"] >= 1
     assert body["users"]["blocked"] >= 1
     assert body["users"]["bot_blocked"] >= 1
-    assert len(body["users"]["chart"]) == 14
+    assert len(body["users"]["chart"]) == 30  # default period
     assert body["subs"]["active"] >= 1
     assert body["subs"]["unlimited_traffic"] >= 1
+    for days, expected in ((7, 7), (90, 90), (13, 30)):  # an unknown period falls back to 30
+        res = await http.get(f"/api/admin/stats?days={days}", headers=auth)
+        assert len(res.json()["users"]["chart"]) == expected
+        assert len(res.json()["sales"]["chart"]) == expected
 
 
 async def test_delete_user_cascades_and_protects_staff(

@@ -1,4 +1,4 @@
-/* App-wide UI state: theme, language, toasts, confirm dialog. */
+/* App-wide UI state: theme, toasts, confirm dialog. The admin is Russian-only. */
 
 import {
   createContext,
@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { DICTS, type Dict, type Lang } from "../i18n";
+import { DICTS, type Dict } from "../i18n";
 
 type Confirm = { text: string; resolve: (ok: boolean) => void };
 type ToastAction = { label: string; onClick: () => void };
@@ -20,8 +20,6 @@ type ToastItem = { id: number; msg: string; action?: ToastAction };
 interface AppState {
   theme: "dark" | "light";
   setTheme: (t: "dark" | "light") => void;
-  lang: Lang;
-  setLang: (l: Lang) => void;
   t: Dict;
   toast: (msg: string, action?: ToastAction) => void;
   confirm: (text: string) => Promise<boolean>;
@@ -33,7 +31,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeRaw] = useState<"dark" | "light">(
     (localStorage.getItem("theme") as "dark" | "light") || "dark",
   );
-  const [lang, setLangRaw] = useState<Lang>((localStorage.getItem("lang") as Lang) || "ru");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [confirmState, setConfirmState] = useState<Confirm | null>(null);
   const idRef = useRef(1);
@@ -45,10 +42,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setTheme = useCallback((t: "dark" | "light") => {
     localStorage.setItem("theme", t);
     setThemeRaw(t);
-  }, []);
-  const setLang = useCallback((l: Lang) => {
-    localStorage.setItem("lang", l);
-    setLangRaw(l);
   }, []);
 
   const toast = useCallback((msg: string, action?: ToastAction) => {
@@ -66,11 +59,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ theme, setTheme, lang, setLang, t: DICTS[lang], toast, confirm }),
-    [theme, setTheme, lang, setLang, toast, confirm],
+    () => ({ theme, setTheme, t: DICTS.ru, toast, confirm }),
+    [theme, setTheme, toast, confirm],
   );
 
-  const t = DICTS[lang];
+  const t = DICTS.ru;
 
   return (
     <Ctx.Provider value={value}>

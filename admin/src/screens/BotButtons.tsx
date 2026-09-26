@@ -164,7 +164,7 @@ function CustomRows({
 
 let cabSeq = 0;
 function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  const { t, lang, toast, confirm } = useApp();
+  const { t, toast, confirm } = useApp();
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["cabinet-buttons"],
@@ -207,7 +207,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
   const actionLabel = (code: string) => {
     const a = actions.find((x) => x.code === code);
     if (!a) return code;
-    return lang === "ru" ? a.label_ru : a.label_en;
+    return a.label_ru;
   };
 
   const [items, setItems] = useState<CabBtn[] | null>(null);
@@ -418,9 +418,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
     if (!d) return;
     if (
       !(await confirm(
-        lang === "ru"
-          ? "Вернуть стандартные кнопки кабинета? Текущие заменятся."
-          : "Restore the default cabinet buttons? Current ones will be replaced.",
+        "Вернуть стандартные кнопки кабинета? Текущие заменятся.",
       ))
     )
       return;
@@ -469,7 +467,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
           onClick={onToggle}
         >
           {open ? "▾" : "▸"}{" "}
-          {lang === "ru" ? "Личный кабинет" : "Cabinet"}
+          {"Личный кабинет"}
         </h1>
       </div>
 
@@ -477,13 +475,13 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
       <>
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="caps" style={{ marginBottom: 10 }}>
-          {lang === "ru" ? "Текст экрана" : "Screen text"}
+          {"Текст экрана"}
         </div>
         <div className="cols" style={{ alignItems: "stretch" }}>
           {/* editor */}
           <div style={{ flex: "1 1 320px", minWidth: 0 }}>
             <div className="dim" style={{ fontSize: 12, marginBottom: 6 }}>
-              {lang === "ru" ? "Текст:" : "Text:"}
+              {"Текст:"}
             </div>
             <textarea
               ref={textRef}
@@ -491,9 +489,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
               rows={9}
               value={caption}
               placeholder={
-                lang === "ru"
-                  ? "Пусто — стандартный текст кабинета. Можно вставить метки ниже."
-                  : "Empty = default cabinet text. Insert the tokens below."
+                "Пусто — стандартный текст кабинета. Можно вставить метки ниже."
               }
               onChange={(e) => setText(e.target.value)}
               style={{ fontFamily: "inherit", resize: "vertical", width: "100%" }}
@@ -501,9 +497,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
             {placeholders.length > 0 && (
               <>
                 <div className="dim" style={{ fontSize: 12, margin: "10px 0 6px" }}>
-                  {lang === "ru"
-                    ? "Метки (клик — вставить в текст): живые данные подставятся у каждого пользователя."
-                    : "Tokens (click to insert): live data is filled in per user."}
+                  {"Метки (клик — вставить в текст): живые данные подставятся у каждого пользователя."}
                 </div>
                 <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
                   {placeholders.map((ph) => (
@@ -521,7 +515,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
               </>
             )}
             <div className="dim" style={{ fontSize: 12, margin: "12px 0 6px" }}>
-              {lang === "ru" ? "Кастом-эмодзи в тексте:" : "Custom emoji in text:"}
+              {"Кастом-эмодзи в тексте:"}
             </div>
             <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               <input
@@ -546,21 +540,17 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                   )
                 }
               >
-                {lang === "ru" ? "＋ эмодзи" : "＋ emoji"}
+                {"＋ эмодзи"}
               </button>
             </div>
             <div className="dim" style={{ fontSize: 11, marginTop: 4 }}>
-              {lang === "ru"
-                ? "ID премиум-эмодзи + запасной символ (виден, если эмодзи недоступно)."
-                : "Premium emoji id + fallback char (shown if the emoji is unavailable)."}
+              {"ID премиум-эмодзи + запасной символ (виден, если эмодзи недоступно)."}
             </div>
           </div>
           {/* live preview */}
           <div style={{ flex: "1 1 300px", minWidth: 0 }}>
             <div className="dim" style={{ fontSize: 12, marginBottom: 6 }}>
-              {lang === "ru"
-                ? "Превью (пример данных — у каждого свои):"
-                : "Preview (sample data — real per user):"}
+              {"Превью (пример данных — у каждого свои):"}
             </div>
             <div
               style={{
@@ -579,16 +569,12 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
               <button
                 className="btn secondary"
                 title={
-                  lang === "ru"
-                    ? "Вернуть стандартный текст кабинета"
-                    : "Restore the stock cabinet text"
+                  "Вернуть стандартный текст кабинета"
                 }
                 onClick={async () => {
                   if (
                     !(await confirm(
-                      lang === "ru"
-                        ? "Сбросить текст кабинета к стандартному?"
-                        : "Reset cabinet text to default?",
+                      "Сбросить текст кабинета к стандартному?",
                     ))
                   )
                     return;
@@ -596,7 +582,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                 }}
                 style={{ fontSize: 15, padding: "10px 18px" }}
               >
-                {lang === "ru" ? "↺ Сбросить к стандартному" : "↺ Reset to default"}
+                {"↺ Сбросить к стандартному"}
               </button>
             </div>
           </div>
@@ -609,20 +595,18 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
           style={{ marginBottom: openSub ? 4 : 0, cursor: "pointer", userSelect: "none" }}
         >
           {openSub ? "▾" : "▸"}{" "}
-          {lang === "ru" ? "Текст блока {подписка}" : "{подписка} block text"}
+          {"Текст блока {подписка}"}
         </div>
         {openSub && (
         <>
         <div className="dim" style={{ fontSize: 12, marginBottom: 10 }}>
-          {lang === "ru"
-            ? "Подставляется вместо метки {подписка} — отдельно когда подписка активна и когда её нет."
-            : "Replaces the {подписка} token — separately for an active subscription and for none."}
+          {"Подставляется вместо метки {подписка} — отдельно когда подписка активна и когда её нет."}
         </div>
         <div className="cols" style={{ alignItems: "stretch" }}>
           {[
             {
               key: "active",
-              title: lang === "ru" ? "С подпиской (активна):" : "With subscription (active):",
+              title: "С подпиской (активна):",
               ref: subActiveRef,
               val: subActiveVal,
               set: setSubActive,
@@ -632,7 +616,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
             },
             {
               key: "inactive",
-              title: lang === "ru" ? "Без подписки:" : "No subscription:",
+              title: "Без подписки:",
               ref: subInactiveRef,
               val: subInactiveVal,
               set: setSubInactive,
@@ -651,7 +635,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                 rows={ed.rows}
                 value={ed.val}
                 placeholder={
-                  lang === "ru" ? "Пусто — стандартный текст" : "Empty = default text"
+                  "Пусто — стандартный текст"
                 }
                 onChange={(e) => ed.set(e.target.value)}
                 style={{ fontFamily: "inherit", resize: "vertical", width: "100%" }}
@@ -679,9 +663,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                   className="btn secondary sm"
                   disabled={!emojiId}
                   title={
-                    lang === "ru"
-                      ? "Вставить кастом-эмодзи (ID из поля выше)"
-                      : "Insert custom emoji (id from the field above)"
+                    "Вставить кастом-эмодзи (ID из поля выше)"
                   }
                   onClick={() =>
                     insertInto(
@@ -692,23 +674,21 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                     )
                   }
                 >
-                  {lang === "ru" ? "＋ эмодзи" : "＋ emoji"}
+                  {"＋ эмодзи"}
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вернуть стандартный текст" : "Restore default text"}
+                  title={"Вернуть стандартный текст"}
                   onClick={() => ed.set(ed.def)}
                 >
-                  {lang === "ru" ? "↺ Сбросить" : "↺ Reset"}
+                  {"↺ Сбросить"}
                 </button>
               </div>
             </div>
           ))}
         </div>
         <div className="dim" style={{ fontSize: 11, marginTop: 8 }}>
-          {lang === "ru"
-            ? "Кастом-эмодзи берёт ID из поля выше."
-            : "Custom emoji uses the id field above."}
+          {"Кастом-эмодзи берёт ID из поля выше."}
         </div>
         </>
         )}
@@ -786,28 +766,28 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
               <div className="row" style={{ gap: 4 }}>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Влево" : "Left"}
+                  title={"Влево"}
                   onClick={() => moveFlat(-1)}
                 >
                   ←
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вправо" : "Right"}
+                  title={"Вправо"}
                   onClick={() => moveFlat(1)}
                 >
                   →
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вверх (на ряд)" : "Up a row"}
+                  title={"Вверх (на ряд)"}
                   onClick={() => moveVert(-1)}
                 >
                   ↑
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вниз (на ряд)" : "Down a row"}
+                  title={"Вниз (на ряд)"}
                   onClick={() => moveVert(1)}
                 >
                   ↓
@@ -822,7 +802,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                   </button>
                 )}
               </div>
-              <Field label={lang === "ru" ? "Показывать" : "Show"}>
+              <Field label={"Показывать"}>
                 <Toggle on={sel.enabled} onChange={(v) => patchSel({ enabled: v })} />
               </Field>
               <Field label={t.buttonText}>
@@ -840,9 +820,9 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                     options={(["screen", "action", "link"] as const).map((k) => ({
                       id: k,
                       label: {
-                        screen: lang === "ru" ? "Подменю" : "Submenu",
-                        action: lang === "ru" ? "Действие" : "Action",
-                        link: lang === "ru" ? "Ссылка" : "Link",
+                        screen: "Подменю",
+                        action: "Действие",
+                        link: "Ссылка",
                       }[k],
                     }))}
                     onChange={(btype) => patchSel({ btype })}
@@ -886,7 +866,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                           )
                           .map((a) => (
                             <option key={a.code} value={a.code}>
-                              {lang === "ru" ? a.label_ru : a.label_en}
+                              {a.label_ru}
                             </option>
                           ))}
                       </select>
@@ -909,7 +889,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                   return null; // opens the global mini-app automatically; no field needed
                 }
                 return (
-                  <Field label={lang === "ru" ? "Текст подменю" : "Submenu text"}>
+                  <Field label={"Текст подменю"}>
                     <textarea
                       className="input"
                       rows={4}
@@ -1001,14 +981,12 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                   style={{ padding: "6px 14px", fontWeight: 700 }}
                   onClick={enterCustom}
                 >
-                  {lang === "ru" ? "Свои" : "Custom"}
+                  {"Свои"}
                 </button>
               </div>
               <span className="dim" style={{ fontSize: 12, flexBasis: "100%" }}>
                 {mode === "custom"
-                  ? lang === "ru"
-                    ? "Перетаскивай кнопки: на другую — в её ряд, в пустое место — новый ряд."
-                    : "Drag a button onto another to join its row, or into a gap for a new row."
+                  ? "Перетаскивай кнопки: на другую — в её ряд, в пустое место — новый ряд."
                   : t.perRowHint}
               </span>
             </div>
@@ -1034,9 +1012,7 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
                 onSelect={setSelKey}
                 onCommit={commitRows}
                 hint={
-                  lang === "ru"
-                    ? "До 3 кнопок в ряд — как в Telegram."
-                    : "Up to 3 buttons per row — matches Telegram."
+                  "До 3 кнопок в ряд — как в Telegram."
                 }
               />
             ) : (
@@ -1079,16 +1055,14 @@ function CabinetButtonsCard({ open, onToggle }: { open: boolean; onToggle: () =>
         <button
           className="btn secondary"
           title={
-            lang === "ru"
-              ? "Вернуть стандартный набор кнопок кабинета"
-              : "Restore the stock cabinet button set"
+            "Вернуть стандартный набор кнопок кабинета"
           }
           onClick={resetButtons}
         >
-          {lang === "ru" ? "↺ Сбросить кнопки" : "↺ Reset buttons"}
+          {"↺ Сбросить кнопки"}
         </button>
         <button className="btn primary" onClick={save}>
-          {lang === "ru" ? "Сохранить" : "Save"}
+          {"Сохранить"}
         </button>
       </div>
       </>
@@ -1159,7 +1133,7 @@ function ScreenCard({
   open: boolean;
   onToggle: () => void;
 }) {
-  const { t, lang, toast, confirm } = useApp();
+  const { t, toast, confirm } = useApp();
   const qc = useQueryClient();
 
   const [workState, setWorkState] = useState<ScrWork | null>(null);
@@ -1220,9 +1194,7 @@ function ScreenCard({
   async function resetButtons() {
     if (
       !(await confirm(
-        lang === "ru"
-          ? "Вернуть стандартные кнопки этого экрана? Текущие заменятся."
-          : "Restore this screen's default buttons? Current ones will be replaced.",
+        "Вернуть стандартные кнопки этого экрана? Текущие заменятся.",
       ))
     )
       return;
@@ -1351,8 +1323,8 @@ function ScreenCard({
   }
   async function save() {
     for (const b of list) {
-      if (b.custom && !b.label.trim()) return toast(lang === "ru" ? "У своей кнопки нужен текст" : "Custom button needs a label");
-      if (b.custom && !b.action) return toast(lang === "ru" ? "У своей кнопки нужно действие" : "Custom button needs an action");
+      if (b.custom && !b.label.trim()) return toast("У своей кнопки нужен текст");
+      if (b.custom && !b.action) return toast("У своей кнопки нужно действие");
     }
     // One action per screen: two buttons pointing at the same action would collide in the bot.
     const seenAct = new Set<string>();
@@ -1362,9 +1334,7 @@ function ScreenCard({
       if (!code) continue;
       if (seenAct.has(code))
         return toast(
-          lang === "ru"
-            ? `Действие «${actionLabel(code)}» уже используется другой кнопкой`
-            : `Action “${actionLabel(code)}” is already used by another button`,
+          `Действие «${actionLabel(code)}» уже используется другой кнопкой`,
         );
       seenAct.add(code);
     }
@@ -1403,7 +1373,7 @@ function ScreenCard({
           style={{ cursor: "pointer", userSelect: "none" }}
           onClick={onToggle}
         >
-          {open ? "▾" : "▸"} {lang === "ru" ? screen.title_ru : screen.title_en}
+          {open ? "▾" : "▸"} {screen.title_ru}
           {dirty && <span style={{ color: "#3b82f6" }}> •</span>}
         </h1>
       </div>
@@ -1415,21 +1385,19 @@ function ScreenCard({
             style={{ marginBottom: 14, justifyContent: "space-between", alignItems: "center", gap: 8 }}
           >
             <span className="dim" style={{ fontSize: 12 }}>
-              {lang === "ru"
-                ? "Правь встроенные кнопки экрана: текст, цвет, порядок, видимость — или добавь свои."
-                : "Edit this screen's built-in buttons — text, color, order, visibility — or add your own."}
+              {"Правь встроенные кнопки экрана: текст, цвет, порядок, видимость — или добавь свои."}
             </span>
           </div>
 
           <div className="card" style={{ marginBottom: 14 }}>
             <div className="caps" style={{ marginBottom: 10 }}>
-              {lang === "ru" ? "Текст экрана" : "Screen text"}
+              {"Текст экрана"}
             </div>
             <div className="cols" style={{ alignItems: "stretch" }}>
               {/* editor */}
               <div style={{ flex: "1 1 320px", minWidth: 0 }}>
                 <div className="dim" style={{ fontSize: 12, marginBottom: 6 }}>
-                  {lang === "ru" ? "Текст:" : "Text:"}
+                  {"Текст:"}
                 </div>
                 <textarea
                   ref={textRef}
@@ -1437,9 +1405,7 @@ function ScreenCard({
                   rows={7}
                   value={caption}
                   placeholder={
-                    lang === "ru"
-                      ? "Пусто — бот показывает свой обычный текст этого экрана. Заполни, чтобы заменить его целиком."
-                      : "Empty = the bot keeps its own text for this screen. Fill it in to replace it wholesale."
+                    "Пусто — бот показывает свой обычный текст этого экрана. Заполни, чтобы заменить его целиком."
                   }
                   onChange={(e) => setTextState(e.target.value)}
                   style={{ fontFamily: "inherit", resize: "vertical", width: "100%" }}
@@ -1447,9 +1413,7 @@ function ScreenCard({
                 {placeholders.length > 0 && (
                   <>
                     <div className="dim" style={{ fontSize: 12, margin: "10px 0 6px" }}>
-                      {lang === "ru"
-                        ? "Метки (клик — вставить в текст):"
-                        : "Tokens (click to insert):"}
+                      {"Метки (клик — вставить в текст):"}
                     </div>
                     <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
                       {placeholders.map((ph) => (
@@ -1467,7 +1431,7 @@ function ScreenCard({
                   </>
                 )}
                 <div className="dim" style={{ fontSize: 12, margin: "12px 0 6px" }}>
-                  {lang === "ru" ? "Кастом-эмодзи в тексте:" : "Custom emoji in text:"}
+                  {"Кастом-эмодзи в тексте:"}
                 </div>
                 <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                   <input
@@ -1492,19 +1456,17 @@ function ScreenCard({
                       )
                     }
                   >
-                    {lang === "ru" ? "＋ эмодзи" : "＋ emoji"}
+                    {"＋ эмодзи"}
                   </button>
                 </div>
                 <div className="dim" style={{ fontSize: 11, marginTop: 4 }}>
-                  {lang === "ru"
-                    ? "ID премиум-эмодзи + запасной символ (виден, если эмодзи недоступно)."
-                    : "Premium emoji id + fallback char (shown if the emoji is unavailable)."}
+                  {"ID премиум-эмодзи + запасной символ (виден, если эмодзи недоступно)."}
                 </div>
               </div>
               {/* live preview */}
               <div style={{ flex: "1 1 300px", minWidth: 0 }}>
                 <div className="dim" style={{ fontSize: 12, marginBottom: 6 }}>
-                  {lang === "ru" ? "Превью:" : "Preview:"}
+                  {"Превью:"}
                 </div>
                 <div
                   style={{
@@ -1523,16 +1485,12 @@ function ScreenCard({
                   <button
                     className="btn secondary"
                     title={
-                      lang === "ru"
-                        ? "Вернуть стандартный текст экрана"
-                        : "Restore the stock screen text"
+                      "Вернуть стандартный текст экрана"
                     }
                     onClick={async () => {
                       if (
                         !(await confirm(
-                          lang === "ru"
-                            ? "Сбросить текст экрана к стандартному?"
-                            : "Reset screen text to default?",
+                          "Сбросить текст экрана к стандартному?",
                         ))
                       )
                         return;
@@ -1540,15 +1498,13 @@ function ScreenCard({
                     }}
                     style={{ fontSize: 15, padding: "10px 18px" }}
                   >
-                    {lang === "ru" ? "↺ Сбросить к стандартному" : "↺ Reset to default"}
+                    {"↺ Сбросить к стандартному"}
                   </button>
                 </div>
               </div>
             </div>
             <div className="dim" style={{ fontSize: 12, marginTop: 10 }}>
-              {lang === "ru"
-                ? "⚠️ У экранов с живыми данными (подписка, оплата, трафик, устройства) заполненный текст заменит эти данные — оставь пусто, если не уверен."
-                : "⚠️ On screens with live data (subscription, payment, traffic, devices) a filled text replaces that data — leave empty if unsure."}
+              {"⚠️ У экранов с живыми данными (подписка, оплата, трафик, устройства) заполненный текст заменит эти данные — оставь пусто, если не уверен."}
             </div>
           </div>
 
@@ -1607,15 +1563,13 @@ function ScreenCard({
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {b.label || b.default_label || (lang === "ru" ? "Кнопка" : "Button")}
+                      {b.label || b.default_label || ("Кнопка")}
                     </span>
                     {b.icon && <span className="dim">◈</span>}
                     <span className="cap-pill dim" style={{ marginLeft: "auto" }}>
                       {b.custom
                         ? actionLabel(b.action ?? "")
-                        : lang === "ru"
-                        ? "встроенная"
-                        : "built-in"}
+                        : "встроенная"}
                     </span>
                   </div>
                 ))}
@@ -1626,7 +1580,7 @@ function ScreenCard({
                 onClick={addCustom}
                 disabled={!actions.length}
               >
-                + {lang === "ru" ? "Своя кнопка" : "Custom button"}
+                + {"Своя кнопка"}
               </button>
             </div>
 
@@ -1637,28 +1591,28 @@ function ScreenCard({
                   <div className="row" style={{ gap: 4 }}>
                     <button
                       className="btn secondary sm"
-                      title={lang === "ru" ? "Влево" : "Left"}
+                      title={"Влево"}
                       onClick={() => moveFlat(-1)}
                     >
                       ←
                     </button>
                     <button
                       className="btn secondary sm"
-                      title={lang === "ru" ? "Вправо" : "Right"}
+                      title={"Вправо"}
                       onClick={() => moveFlat(1)}
                     >
                       →
                     </button>
                     <button
                       className="btn secondary sm"
-                      title={lang === "ru" ? "Вверх (на ряд)" : "Up a row"}
+                      title={"Вверх (на ряд)"}
                       onClick={() => moveVert(-1)}
                     >
                       ↑
                     </button>
                     <button
                       className="btn secondary sm"
-                      title={lang === "ru" ? "Вниз (на ряд)" : "Down a row"}
+                      title={"Вниз (на ряд)"}
                       onClick={() => moveVert(1)}
                     >
                       ↓
@@ -1673,14 +1627,14 @@ function ScreenCard({
                       </button>
                     )}
                   </div>
-                  <Field label={lang === "ru" ? "Показывать" : "Show"}>
+                  <Field label={"Показывать"}>
                     <Toggle on={sel.enabled} onChange={(v) => patchSel({ enabled: v })} />
                   </Field>
                   <Field label={t.buttonText}>
                     <input
                       className="input"
                       value={sel.label}
-                      placeholder={sel.default_label ?? (lang === "ru" ? "Текст" : "Label")}
+                      placeholder={sel.default_label ?? ("Текст")}
                       onChange={(e) => patchSel({ label: e.target.value })}
                     />
                   </Field>
@@ -1704,7 +1658,7 @@ function ScreenCard({
                           )
                           .map((a) => (
                             <option key={a.code} value={a.code}>
-                              {lang === "ru" ? a.label_ru : a.label_en}
+                              {a.label_ru}
                             </option>
                           ))}
                       </select>
@@ -1712,7 +1666,7 @@ function ScreenCard({
                   ) : (
                     <Field label={t.cabinetBtnAction}>
                       <span className="cap-pill dim">
-                        {lang === "ru" ? "встроенная кнопка" : "built-in button"}
+                        {"встроенная кнопка"}
                       </span>
                     </Field>
                   )}
@@ -1797,14 +1751,12 @@ function ScreenCard({
                       style={{ padding: "6px 14px", fontWeight: 700 }}
                       onClick={enterCustom}
                     >
-                      {lang === "ru" ? "Свои" : "Custom"}
+                      {"Свои"}
                     </button>
                   </div>
                   <span className="dim" style={{ fontSize: 12, flexBasis: "100%" }}>
                     {mode === "custom"
-                      ? lang === "ru"
-                        ? "Перетаскивай кнопки: на другую — в её ряд, в пустое место — новый ряд."
-                        : "Drag a button onto another to join its row, or into a gap for a new row."
+                      ? "Перетаскивай кнопки: на другую — в её ряд, в пустое место — новый ряд."
                       : t.perRowHint}
                   </span>
                 </div>
@@ -1830,9 +1782,7 @@ function ScreenCard({
                     onSelect={setSelKey}
                     onCommit={commitRows}
                     hint={
-                      lang === "ru"
-                        ? "До 3 кнопок в ряд — как в Telegram."
-                        : "Up to 3 buttons per row — matches Telegram."
+                      "До 3 кнопок в ряд — как в Telegram."
                     }
                   />
                 ) : (
@@ -1877,16 +1827,14 @@ function ScreenCard({
             <button
               className="btn secondary"
               title={
-                lang === "ru"
-                  ? "Вернуть стандартный набор кнопок экрана"
-                  : "Restore the screen's stock button set"
+                "Вернуть стандартный набор кнопок экрана"
               }
               onClick={resetButtons}
             >
-              {lang === "ru" ? "↺ Сбросить кнопки" : "↺ Reset buttons"}
+              {"↺ Сбросить кнопки"}
             </button>
             <button className="btn primary" onClick={save} disabled={!dirty}>
-              {lang === "ru" ? "Сохранить" : "Save"}
+              {"Сохранить"}
             </button>
           </div>
         </>
@@ -1902,7 +1850,6 @@ function ScreenButtonsCard({
   openKey: string | null;
   setOpenKey: Dispatch<SetStateAction<string | null>>;
 }) {
-  const { lang } = useApp();
   const q = useQuery({
     queryKey: ["screen-buttons"],
     queryFn: () => api.get<{ screens: Screen[] }>("/api/admin/bot-menu/screens"),
@@ -1915,7 +1862,7 @@ function ScreenButtonsCard({
   const actionLabel = (code: string) => {
     const a = actions.find((x) => x.code === code);
     if (!a) return code;
-    return lang === "ru" ? a.label_ru : a.label_en;
+    return a.label_ru;
   };
   const screens = q.data?.screens ?? [];
   return (
@@ -1939,7 +1886,7 @@ function genId(): string {
 }
 
 export default function BotButtons() {
-  const { t, lang, toast, confirm } = useApp();
+  const { t, toast, confirm } = useApp();
   const qc = useQueryClient();
   const [nodes, setNodes] = useState<Node[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
@@ -1993,9 +1940,9 @@ export default function BotButtons() {
       a.click();
       URL.revokeObjectURL(url);
       toast(
-        (lang === "ru" ? "Сохранено: кнопок " : "Saved: buttons ") +
+        ("Сохранено: кнопок ") +
           dump.nodes.length +
-          (lang === "ru" ? " + настройки кабинета" : " + cabinet settings"),
+          (" + настройки кабинета"),
       );
     } catch (e) {
       toast((e as Error).message);
@@ -2008,16 +1955,14 @@ export default function BotButtons() {
       const hasNodes = Array.isArray(parsed?.nodes);
       const hasCfg = parsed?.config && typeof parsed.config === "object";
       if (!hasNodes && !hasCfg) {
-        throw new Error(lang === "ru" ? "Не похоже на файл меню" : "Not a bot-menu file");
+        throw new Error("Не похоже на файл меню");
       }
       const parts: string[] = [];
       if (hasNodes)
-        parts.push((lang === "ru" ? "кнопок: " : "buttons: ") + parsed.nodes.length);
-      if (hasCfg) parts.push(lang === "ru" ? "тексты меню и кабинета" : "menu + cabinet texts");
+        parts.push(("кнопок: ") + parsed.nodes.length);
+      if (hasCfg) parts.push("тексты меню и кабинета");
       const ok = await confirm(
-        (lang === "ru"
-          ? "Импортировать меню? Текущее будет заменено — "
-          : "Import menu? Current will be replaced — ") + parts.join(", "),
+        ("Импортировать меню? Текущее будет заменено — ") + parts.join(", "),
       );
       if (!ok) return;
       const res = await api.post<{ nodes: number; applied: string[] }>(
@@ -2028,11 +1973,9 @@ export default function BotButtons() {
       setLoaded(false);
       await qc.invalidateQueries();
       toast(
-        (lang === "ru" ? "Загружено ✔️ кнопок " : "Loaded ✔️ buttons ") +
+        ("Загружено ✔️ кнопок ") +
           res.nodes +
-          (lang === "ru"
-            ? `, настроек ${res.applied.length}`
-            : `, settings ${res.applied.length}`),
+          (`, настроек ${res.applied.length}`),
       );
     } catch (e) {
       toast((e as Error).message);
@@ -2240,9 +2183,7 @@ export default function BotButtons() {
   async function resetMenuButtons() {
     if (
       !(await confirm(
-        lang === "ru"
-          ? "Вернуть стандартное меню бота? Текущие кнопки заменятся."
-          : "Restore the default bot menu? Current buttons will be replaced.",
+        "Вернуть стандартное меню бота? Текущие кнопки заменятся.",
       ))
     )
       return;
@@ -2381,10 +2322,10 @@ export default function BotButtons() {
           }}
         />
         <button className="btn secondary" onClick={() => void exportMenu()}>
-          {lang === "ru" ? "💾 Сохранить" : "💾 Save"}
+          {"💾 Сохранить"}
         </button>
         <button className="btn secondary" onClick={() => ioRef.current?.click()}>
-          {lang === "ru" ? "📂 Загрузить" : "📂 Load"}
+          {"📂 Загрузить"}
         </button>
       </div>
       <div ref={menuCardRef} style={{ border: "1px solid var(--line, #2b2d33)", borderRadius: 14, padding: "6px 18px 18px" }}>
@@ -2402,25 +2343,25 @@ export default function BotButtons() {
       <>
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="caps" style={{ marginBottom: 10 }}>
-          {lang === "ru" ? "Текст меню (приветствие /start)" : "Menu text (/start greeting)"}
+          {"Текст меню (приветствие /start)"}
         </div>
         <div className="cols" style={{ alignItems: "stretch" }}>
           {/* editor */}
           <div style={{ flex: "1 1 320px", minWidth: 0 }}>
             <div className="dim" style={{ fontSize: 12, marginBottom: 6 }}>
-              {lang === "ru" ? "Текст:" : "Text:"}
+              {"Текст:"}
             </div>
             <textarea
               ref={menuTextRef}
               className="input"
               rows={7}
               value={menuCaption}
-              placeholder={lang === "ru" ? "Текст под баннером меню" : "Caption under the menu banner"}
+              placeholder={"Текст под баннером меню"}
               onChange={(e) => setMenuText(e.target.value)}
               style={{ fontFamily: "inherit", resize: "vertical", width: "100%" }}
             />
             <div className="dim" style={{ fontSize: 12, margin: "12px 0 6px" }}>
-              {lang === "ru" ? "Кастом-эмодзи в тексте:" : "Custom emoji in text:"}
+              {"Кастом-эмодзи в тексте:"}
             </div>
             <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               <input
@@ -2445,19 +2386,17 @@ export default function BotButtons() {
                   )
                 }
               >
-                {lang === "ru" ? "＋ эмодзи" : "＋ emoji"}
+                {"＋ эмодзи"}
               </button>
             </div>
             <div className="dim" style={{ fontSize: 11, marginTop: 4 }}>
-              {lang === "ru"
-                ? "ID премиум-эмодзи + запасной символ (виден, если эмодзи недоступно)."
-                : "Premium emoji id + fallback char (shown if the emoji is unavailable)."}
+              {"ID премиум-эмодзи + запасной символ (виден, если эмодзи недоступно)."}
             </div>
           </div>
           {/* live preview */}
           <div style={{ flex: "1 1 300px", minWidth: 0 }}>
             <div className="dim" style={{ fontSize: 12, marginBottom: 6 }}>
-              {lang === "ru" ? "Превью:" : "Preview:"}
+              {"Превью:"}
             </div>
             <div
               style={{
@@ -2475,13 +2414,11 @@ export default function BotButtons() {
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 8 }}>
               <button
                 className="btn secondary"
-                title={lang === "ru" ? "Вернуть стандартное приветствие" : "Restore the stock greeting"}
+                title={"Вернуть стандартное приветствие"}
                 onClick={async () => {
                   if (
                     !(await confirm(
-                      lang === "ru"
-                        ? "Сбросить приветствие к стандартному?"
-                        : "Reset greeting to default?",
+                      "Сбросить приветствие к стандартному?",
                     ))
                   )
                     return;
@@ -2489,7 +2426,7 @@ export default function BotButtons() {
                 }}
                 style={{ fontSize: 15, padding: "10px 18px" }}
               >
-                {lang === "ru" ? "↺ Сбросить к стандартному" : "↺ Reset to default"}
+                {"↺ Сбросить к стандартному"}
               </button>
             </div>
           </div>
@@ -2518,28 +2455,28 @@ export default function BotButtons() {
               <div className="row" style={{ gap: 4 }}>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Влево" : "Left"}
+                  title={"Влево"}
                   onClick={() => moveFlat(-1)}
                 >
                   ←
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вправо" : "Right"}
+                  title={"Вправо"}
                   onClick={() => moveFlat(1)}
                 >
                   →
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вверх (на ряд)" : "Up a row"}
+                  title={"Вверх (на ряд)"}
                   onClick={() => moveVert(-1)}
                 >
                   ↑
                 </button>
                 <button
                   className="btn secondary sm"
-                  title={lang === "ru" ? "Вниз (на ряд)" : "Down a row"}
+                  title={"Вниз (на ряд)"}
                   onClick={() => moveVert(1)}
                 >
                   ↓
@@ -2607,7 +2544,7 @@ export default function BotButtons() {
                       )
                       .map((a) => (
                         <option key={a.code} value={a.code}>
-                          {lang === "ru" ? a.label_ru : a.label_en}
+                          {a.label_ru}
                         </option>
                       ))}
                   </select>
@@ -2736,14 +2673,12 @@ export default function BotButtons() {
                   style={{ padding: "6px 14px", fontWeight: 700 }}
                   onClick={() => setMenuCustom(true)}
                 >
-                  {lang === "ru" ? "Свои" : "Custom"}
+                  {"Свои"}
                 </button>
               </div>
               <span className="dim" style={{ fontSize: 12, flexBasis: "100%" }}>
                 {customActive
-                  ? lang === "ru"
-                    ? "Перетаскивай кнопки: на другую — в её ряд, в пустое место — новый ряд."
-                    : "Drag a button onto another to join its row, or into a gap for a new row."
+                  ? "Перетаскивай кнопки: на другую — в её ряд, в пустое место — новый ряд."
                   : t.perRowHint}
               </span>
             </div>
@@ -2764,9 +2699,7 @@ export default function BotButtons() {
                 onSelect={setSelId}
                 onCommit={commitMenuRows}
                 hint={
-                  lang === "ru"
-                    ? "До 3 кнопок в ряд — как в Telegram."
-                    : "Up to 3 buttons per row — matches Telegram."
+                  "До 3 кнопок в ряд — как в Telegram."
                 }
               />
             ) : (
@@ -2808,13 +2741,13 @@ export default function BotButtons() {
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 12, gap: 8 }}>
         <button
           className="btn secondary"
-          title={lang === "ru" ? "Вернуть стандартный набор кнопок меню" : "Restore the stock menu buttons"}
+          title={"Вернуть стандартный набор кнопок меню"}
           onClick={resetMenuButtons}
         >
-          {lang === "ru" ? "↺ Сбросить кнопки" : "↺ Reset buttons"}
+          {"↺ Сбросить кнопки"}
         </button>
         <button className="btn primary" onClick={save}>
-          {lang === "ru" ? "Сохранить" : "Save"}
+          {"Сохранить"}
         </button>
       </div>
       </>
