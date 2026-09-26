@@ -843,7 +843,17 @@ export default function Routers() {
                 </div>
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span className="muted">{t.routersActiveOutbound}</span>
-                  <span className="mono">{detail.data.active_outbound ?? "—"}</span>
+                  {/* The agent doesn't report which candidate the router's leastPing balancer
+                      picked, so show the servers it balances between (primary + backup). */}
+                  <span className="mono" style={{ textAlign: "right" }}>
+                    {detail.data.active_outbound ??
+                      (detail.data.primary_host_uuid
+                        ? hostLabel(hostOptions, detail.data.primary_host_uuid) +
+                          (detail.data.backup_host_uuid
+                            ? ` / резерв: ${hostLabel(hostOptions, detail.data.backup_host_uuid)}`
+                            : "")
+                        : "не назначен — без VPN")}
+                  </span>
                 </div>
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span className="muted">{t.routersExternalIp}</span>

@@ -509,7 +509,7 @@ const ru = {
   routersDiagNone: "Агент ещё не присылал диагностику (нужна версия агента 2+)",
   routersToken: "Токен",
   routersXrayVer: "Версия Xray",
-  routersActiveOutbound: "Активный сервер",
+  routersActiveOutbound: "Серверы роутера",
   routersExternalIp: "IP провайдера",
   routersConfigEtag: "ETag конфига",
   routersInstallReport: "Отчёт установки",
