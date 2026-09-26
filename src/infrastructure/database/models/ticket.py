@@ -30,6 +30,9 @@ class Ticket(IntPk, TimestampMixin, Base):
     # A premium-server request, or a ticket from a customer on a premium plan: human-only
     # (no AI auto-reply) and pinned to the top of the admin queue.
     is_premium: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Manual priority set by staff: 0 low, 1 normal, 2 high, 3 urgent. The admin queue also
+    # escalates automatically by how long the customer has been waiting (see admin/tickets.py).
+    priority: Mapped[int] = mapped_column(default=1, server_default="1")
 
     messages: Mapped[list[TicketMessage]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan", order_by="TicketMessage.id"

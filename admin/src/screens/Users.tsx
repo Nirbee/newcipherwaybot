@@ -2,9 +2,10 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router";
 
 import { api, bytesFmt, dt, dtTime, money } from "../api/client";
-import { Drawer, Seg } from "../components/ui";
+import { Drawer, Prog, Seg } from "../components/ui";
 import { useApp } from "../state/app";
 
 type Row = {
@@ -46,6 +47,23 @@ type Detail = Row & {
 };
 
 type Counters = { all: number; active: number; trial: number; expired: number; blocked: number };
+type TicketRow = { id: number; user_id: number; subject: string; status: string };
+
+// label + sign as seen from the customer's balance/wallet
+const TX_LABEL: Record<string, [string, string]> = {
+  deposit: ["Пополнение баланса", "+"],
+  gift: ["Начисление от администратора", "+"],
+  referral_reward: ["Реферальное вознаграждение", "+"],
+  refund: ["Возврат", "+"],
+  withdrawal: ["Списание", "−"],
+  subscription_payment: ["Оплата подписки", ""],
+};
+const TX_STATUS: Record<string, string> = {
+  pending: "ожидает оплаты",
+  canceled: "отменена",
+  failed: "не прошла",
+  refunded: "возвращена",
+};
 
 const ST_GLYPH: Record<string, [string, string]> = {
   active: ["●", "on"],
@@ -81,7 +99,10 @@ export default function Users() {
   const [qDebounced, setQDebounced] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "trial" | "expired" | "blocked">("all");
   const [selId, setSelId] = useState<number | null>(null);
-  const [tab, setTab] = useState<"overview" | "finance" | "tickets" | "actions">("overview");
+  const [tab, setTab] = useState<"overview" | "finance" | "sub" | "tickets" | "actions">("overview");
+  const [hwidInput, setHwidInput] = useState("");
+  const [balAmount, setBalAmount] = useState("");
+  const nav = useNavigate();
   const [extDays, setExtDays] = useState(""); // custom "+N days"
   const [extUntil, setExtUntil] = useState(""); // absolute expiry date (YYYY-MM-DD)
   const [grantPlan, setGrantPlan] = useState("");
@@ -118,6 +139,13 @@ export default function Users() {
     enabled: selId !== null,
   });
 
+  const ticketsQ = useQuery({
+    queryKey: ["tickets"],
+    queryFn: () => api.get<{ items: TicketRow[] }>("/api/admin/tickets"),
+    enabled: selId !== null && tab === "tickets",
+  });
+  const userTickets = (ticketsQ.data?.items ?? []).filter((x) => x.user_id === selId);
+
   function invalidate() {
     void qc.invalidateQueries({ queryKey: ["users"] });
     void qc.invalidateQueries({ queryKey: ["user", selId] });
@@ -134,16 +162,28 @@ export default function Users() {
     onError: (e) => toast(e.message),
   });
 
-  async function adjustBalance(amount_minor: number) {
+  async function changeBalance(sign: 1 | -1) {
+    const rub = Number(balAmount);
+    if (!(rub > 0)) return;
+    const amount_minor = Math.round(rub * 100) * sign;
+    if (sign < 0 && !(await confirm(`Списать ${money(-amount_minor)} с баланса клиента?`))) return;
     try {
       await act.mutateAsync({ path: "/balance", body: { amount_minor } });
-      toast(t.okDone, {
+      setBalAmount("");
+      toast(sign > 0 ? `Пополнено на ${money(amount_minor)}` : `Списано ${money(-amount_minor)}`, {
         label: t.undo,
         onClick: () => act.mutate({ path: "/balance", body: { amount_minor: -amount_minor } }),
       });
     } catch {
       /* act.onError already surfaced the message */
     }
+  }
+
+  function saveHwid() {
+    const value = Number(hwidInput);
+    if (!(value >= 1)) return;
+    act.mutate({ path: "/hwid", body: { value } });
+    setHwidInput("");
   }
 
   async function deleteUser() {
@@ -289,195 +329,292 @@ export default function Users() {
 
       {selId !== null && (
         <Drawer onClose={() => setSelId(null)}>
-          <div>
-            {d ? (
-              <>
-                <div className="row" style={{ marginBottom: 4 }}>
-                  <div className="avatar-sq" style={{ width: 40, height: 40, fontSize: 14 }}>
-                    {(d.name ?? d.username ?? "?").slice(0, 2).toUpperCase()}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="row" style={{ gap: 8 }}>
-                      <b>{d.username ? `@${d.username}` : `id${d.id}`}</b>
-                      <StatusCell status={d.status} t={t as unknown as Record<string, string>} />
-                    </div>
-                    <div className="dim" style={{ fontSize: 12 }}>
-                      {d.name ?? "—"} · {d.telegram_id ?? "—"}
-                    </div>
-                  </div>
-                  {d.username && (
-                    <a
-                      className="btn secondary sm"
-                      href={`https://t.me/${d.username}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      ↗
-                    </a>
-                  )}
-                  <button className="btn secondary sm" onClick={() => setSelId(null)}>
-                    ✕
-                  </button>
+          {d ? (
+            <div className="grid" style={{ gap: 14 }}>
+              {/* header */}
+              <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+                <div className="avatar-sq" style={{ width: 46, height: 46, fontSize: 15, borderRadius: 12 }}>
+                  {(d.name ?? d.username ?? "?").slice(0, 2).toUpperCase()}
                 </div>
-                <hr className="sep" />
-                <Seg
-                  value={tab}
-                  options={[
-                    { id: "overview" as const, label: t.overviewTab },
-                    { id: "finance" as const, label: t.financeTab },
-                    { id: "tickets" as const, label: t.ticketsTab },
-                    { id: "actions" as const, label: t.actionsTab },
-                  ]}
-                  onChange={setTab}
-                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 17, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {d.username ? `@${d.username}` : d.name ?? `id${d.id}`}
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 2, flexWrap: "wrap" }}>
+                    <StatusCell status={d.status} t={t as unknown as Record<string, string>} />
+                    {d.telegram_id && (
+                      <button
+                        className="cap-pill"
+                        style={{ cursor: "pointer" }}
+                        title="Скопировать Telegram ID"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(String(d.telegram_id));
+                          toast(t.copied);
+                        }}
+                      >
+                        TG {d.telegram_id}
+                      </button>
+                    )}
+                    {d.name && d.username && <span className="dim" style={{ fontSize: 12 }}>{d.name}</span>}
+                  </div>
+                </div>
+                {d.username && (
+                  <a
+                    className="icon-btn"
+                    href={`https://t.me/${d.username}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Открыть в Telegram"
+                    style={{ textDecoration: "none" }}
+                  >
+                    ↗
+                  </a>
+                )}
+                <button className="icon-btn" onClick={() => setSelId(null)} aria-label="Закрыть">
+                  ✕
+                </button>
+              </div>
 
-                {tab === "overview" && (
-                  <div className="grid" style={{ gap: 10, marginTop: 16, fontSize: 13 }}>
-                    {(
-                      [
-                        [t.colSub, d.plan_name ?? "—"],
-                        [t.till, d.expire_at ? dt(d.expire_at) : "—"],
-                        [
-                          t.colTraffic,
-                          `${bytesFmt(d.traffic_used_bytes)} / ${d.traffic_limit_bytes ? bytesFmt(d.traffic_limit_bytes) : "∞"}`,
-                        ],
-                        [t.devices, d.subscription?.device_limit ?? "—"],
-                        [t.regDate, dt(d.created_at)],
-                        [t.balance, money(d.balance_minor)],
-                      ] as [string, string | number][]
-                    ).map(([k, v]) => (
-                      <div key={k} className="row" style={{ justifyContent: "space-between" }}>
-                        <span className="muted">{k}</span>
-                        <span className="mono">{v}</span>
+              {/* summary tiles */}
+              <div className="ud-stats">
+                <div>
+                  <span className="dim">Подписка</span>
+                  <b>{d.plan_name ?? "нет"}</b>
+                  <span className="dim">{d.expire_at ? `до ${dt(d.expire_at)}` : "—"}</span>
+                </div>
+                <div>
+                  <span className="dim">Баланс</span>
+                  <b>{money(d.balance_minor)}</b>
+                  <span className="dim">{d.personal_discount_pct ? `скидка ${d.personal_discount_pct}%` : " "}</span>
+                </div>
+                <div>
+                  <span className="dim">Устройства</span>
+                  <b>{d.subscription?.device_limit ?? "—"}</b>
+                  <span className="dim">лимит HWID</span>
+                </div>
+              </div>
+
+              <Seg
+                value={tab}
+                options={[
+                  { id: "overview" as const, label: "Обзор" },
+                  { id: "finance" as const, label: "Финансы" },
+                  { id: "sub" as const, label: "Подписка" },
+                  { id: "tickets" as const, label: "Тикеты" },
+                  { id: "actions" as const, label: "Действия" },
+                ]}
+                onChange={setTab}
+              />
+
+              {tab === "overview" && (
+                <div className="grid" style={{ gap: 12 }}>
+                  <div className="ud-section">
+                    <div className="ud-title">Подписка</div>
+                    <div className="kv">
+                      <div>
+                        <span className="muted">Тариф</span>
+                        <span>{d.plan_name ?? "—"}</span>
                       </div>
-                    ))}
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span className="muted">HWID</span>
-                      <span className="row" style={{ gap: 8 }}>
-                        <span className="mono">{d.subscription?.device_limit ?? "—"}</span>
+                      <div>
+                        <span className="muted">Действует до</span>
+                        <span>{d.expire_at ? dt(d.expire_at) : "—"}</span>
+                      </div>
+                      <div>
+                        <span className="muted">Трафик</span>
+                        <span>
+                          {bytesFmt(d.traffic_used_bytes)} /{" "}
+                          {d.traffic_limit_bytes ? bytesFmt(d.traffic_limit_bytes) : "∞"}
+                        </span>
+                      </div>
+                    </div>
+                    {d.traffic_limit_bytes > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <Prog pct={(d.traffic_used_bytes / d.traffic_limit_bytes) * 100} />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="ud-section">
+                    <div className="ud-title">Устройства (HWID)</div>
+                    {d.subscription ? (
+                      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                         <button
                           className="btn secondary sm"
+                          disabled={act.isPending}
                           onClick={() => act.mutate({ path: "/hwid", body: { delta: -1 } })}
                         >
-                          {t.minus1}
+                          −1
                         </button>
+                        <input
+                          className="input num"
+                          type="number"
+                          min={1}
+                          max={100}
+                          style={{ width: 80 }}
+                          value={hwidInput}
+                          placeholder={String(d.subscription.device_limit ?? "")}
+                          onChange={(e) => setHwidInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && Number(hwidInput) >= 1) saveHwid();
+                          }}
+                        />
                         <button
                           className="btn secondary sm"
+                          disabled={act.isPending}
                           onClick={() => act.mutate({ path: "/hwid", body: { delta: 1 } })}
                         >
                           +1
                         </button>
-                      </span>
-                    </div>
-                    <hr className="sep" />
-                    <div className="caps">{t.refBlock}</div>
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span className="muted">{t.invited}</span>
-                      <span className="mono">{d.referral_invited}</span>
-                    </div>
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span className="muted">{t.earned}</span>
-                      <span className="mono">{money(d.referral_earned_minor)}</span>
+                        <button
+                          className="btn primary sm"
+                          disabled={!(Number(hwidInput) >= 1) || act.isPending}
+                          onClick={saveHwid}
+                        >
+                          Сохранить
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="dim">Нет подписки</span>
+                    )}
+                  </div>
+
+                  <div className="ud-section">
+                    <div className="ud-title">Аккаунт</div>
+                    <div className="kv">
+                      <div>
+                        <span className="muted">Регистрация</span>
+                        <span>{dt(d.created_at)}</span>
+                      </div>
+                      <div>
+                        <span className="muted">Последняя активность</span>
+                        <span>{dtTime(d.last_seen_at)}</span>
+                      </div>
+                      <div>
+                        <span className="muted">Пробный период</span>
+                        <span>{d.is_trial_available ? "доступен" : "использован"}</span>
+                      </div>
+                      <div>
+                        <span className="muted">Пригласил друзей</span>
+                        <span>{d.referral_invited}</span>
+                      </div>
+                      <div>
+                        <span className="muted">Заработал на рефералах</span>
+                        <span>{money(d.referral_earned_minor)}</span>
+                      </div>
                     </div>
                     <button
                       className="btn secondary sm"
+                      style={{ marginTop: 10 }}
                       onClick={() => {
                         void navigator.clipboard.writeText(`ref_${d.referral_code}`);
                         toast(t.copied);
                       }}
                     >
-                      COPY LINK
+                      Скопировать реф-код
                     </button>
                   </div>
-                )}
+                </div>
+              )}
 
-                {tab === "finance" && (
-                  <div className="grid" style={{ gap: 12, marginTop: 16 }}>
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span className="muted">{t.balance}</span>
-                      <b className="mono">{money(d.balance_minor)}</b>
+              {tab === "finance" && (
+                <div className="grid" style={{ gap: 12 }}>
+                  <div className="ud-section">
+                    <div className="ud-title">Баланс</div>
+                    <div className="hero" style={{ fontSize: 30, marginBottom: 12 }}>
+                      {money(d.balance_minor)}
                     </div>
-                    <div className="row">
-                      <button
-                        className="btn secondary sm"
-                        onClick={() => void adjustBalance(10000)}
-                      >
-                        +100 ₽
-                      </button>
-                      <button
-                        className="btn secondary sm"
-                        onClick={() => void adjustBalance(50000)}
-                      >
-                        +500 ₽
-                      </button>
-                    </div>
-                    <div className="caps">{t.actMore}</div>
-                    <div className="row" style={{ marginBottom: 6 }}>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                       <input
-                        className="inp sm"
-                        placeholder={t.actMsgPh}
-                        value={msgText}
-                        style={{ flex: 1, minWidth: 150 }}
-                        onChange={(e) => setMsgText(e.target.value)}
-                      />
-                      <button
-                        className="btn secondary sm"
-                        disabled={!msgText.trim() || act.isPending}
-                        onClick={() => {
-                          act.mutate({ path: "/message", body: { text: msgText } });
-                          setMsgText("");
-                        }}
-                      >
-                        {t.actMsgSend}
-                      </button>
-                    </div>
-                    <div className="row" style={{ marginBottom: 8 }}>
-                      <input
-                        className="inp sm"
+                        className="input num"
                         type="number"
-                        min={0}
-                        max={100}
-                        placeholder="%"
-                        value={discount}
-                        style={{ width: 70 }}
-                        onChange={(e) => setDiscount(e.target.value)}
+                        min={1}
+                        placeholder="Сумма, ₽"
+                        value={balAmount}
+                        style={{ width: 130 }}
+                        onChange={(e) => setBalAmount(e.target.value)}
                       />
                       <button
-                        className="btn secondary sm"
-                        disabled={discount === "" || act.isPending}
-                        onClick={() =>
-                          act.mutate({ path: "/discount", body: { percent: Number(discount) } })
-                        }
+                        className="btn primary sm"
+                        disabled={!(Number(balAmount) > 0) || act.isPending}
+                        onClick={() => void changeBalance(1)}
                       >
-                        {t.actDiscount}
+                        + Пополнить
                       </button>
                       <button
-                        className="btn secondary sm"
-                        onClick={() =>
-                          act.mutate({
-                            path: "/trial",
-                            body: { available: !d.is_trial_available },
-                          })
-                        }
+                        className="btn danger sm"
+                        disabled={!(Number(balAmount) > 0) || act.isPending}
+                        onClick={() => void changeBalance(-1)}
                       >
-                        {d.is_trial_available ? t.actTrialOff : t.actTrialOn}
-                      </button>
-                      <button
-                        className="btn secondary sm"
-                        onClick={() => act.mutate({ path: "/sync" })}
-                      >
-                        {t.actSync}
+                        − Списать
                       </button>
                     </div>
-                    <div className="caps">{t.grantSub}</div>
-                    <div className="row" style={{ marginBottom: 8 }}>
+                    <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                      {[100, 500, 1000].map((v) => (
+                        <button key={v} className="cap-pill" style={{ cursor: "pointer" }} onClick={() => setBalAmount(String(v))}>
+                          {v} ₽
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="ud-section">
+                    <div className="ud-title">Последние операции</div>
+                    <div className="grid" style={{ gap: 0 }}>
+                      {d.transactions.map((tx) => {
+                        const [label, sign] = TX_LABEL[tx.type] ?? [tx.type, ""];
+                        return (
+                          <div
+                            key={tx.id}
+                            className="row"
+                            style={{
+                              justifyContent: "space-between",
+                              padding: "8px 0",
+                              borderBottom: "1px solid var(--border)",
+                              fontSize: 13,
+                            }}
+                          >
+                            <span style={{ minWidth: 0 }}>
+                              <div>{label}</div>
+                              <div className="dim" style={{ fontSize: 11.5 }}>
+                                {dtTime(tx.created_at)}
+                                {tx.status !== "completed" ? ` · ${TX_STATUS[tx.status] ?? tx.status}` : ""}
+                              </div>
+                            </span>
+                            <b
+                              style={{
+                                fontWeight: 600,
+                                color:
+                                  tx.status !== "completed"
+                                    ? "var(--dim)"
+                                    : sign === "+"
+                                      ? "var(--good-ink)"
+                                      : undefined,
+                              }}
+                            >
+                              {sign}
+                              {money(tx.amount_minor)}
+                            </b>
+                          </div>
+                        );
+                      })}
+                      {d.transactions.length === 0 && <span className="dim">Операций пока не было</span>}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {tab === "sub" && (
+                <div className="grid" style={{ gap: 12 }}>
+                  <div className="ud-section">
+                    <div className="ud-title">Выдать подписку по тарифу</div>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                       <select
-                        className="inp sm"
+                        className="input"
                         value={grantPlan}
-                        style={{ maxWidth: 190 }}
+                        style={{ flex: "1 1 170px" }}
                         onChange={(e) => setGrantPlan(e.target.value)}
                       >
-                        <option value="">{t.grantPlanPh}</option>
+                        <option value="">Выберите тариф…</option>
                         {(plans.data?.items ?? [])
                           .filter((p) => !p.is_trial)
                           .map((p) => (
@@ -487,17 +624,17 @@ export default function Users() {
                           ))}
                       </select>
                       <input
-                        className="inp sm"
+                        className="input num"
                         type="number"
                         min={1}
                         max={3650}
-                        placeholder={t.extendDaysPh}
                         value={grantDays}
                         style={{ width: 80 }}
                         onChange={(e) => setGrantDays(e.target.value)}
                       />
+                      <span className="dim">дн.</span>
                       <button
-                        className="btn sm"
+                        className="btn primary sm"
                         disabled={!grantPlan || !Number(grantDays) || act.isPending}
                         onClick={() =>
                           act.mutate({
@@ -506,43 +643,33 @@ export default function Users() {
                           })
                         }
                       >
-                        {t.grantGive}
+                        Выдать
                       </button>
                     </div>
-                    <div className="caps">{t.giveDays}</div>
-                    <div className="row">
-                      <button
-                        className="btn secondary sm"
-                        onClick={() => act.mutate({ path: "/extend", body: { days: 7 } })}
-                      >
-                        +7
-                      </button>
-                      <button
-                        className="btn secondary sm"
-                        onClick={() => act.mutate({ path: "/extend", body: { days: 30 } })}
-                      >
-                        +30
-                      </button>
-                      <button
-                        className="btn secondary sm"
-                        onClick={() => act.mutate({ path: "/extend", body: { days: 90 } })}
-                      >
-                        +90
-                      </button>
-                    </div>
-                    <div className="caps" style={{ marginTop: 6 }}>{t.takeDays}</div>
-                    <div className="row">
+                  </div>
+
+                  <div className="ud-section">
+                    <div className="ud-title">Срок подписки</div>
+                    <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                       {[7, 30, 90].map((n) => (
                         <button
-                          key={n}
+                          key={`+${n}`}
                           className="btn secondary sm"
-                          disabled={!d.expire_at}
+                          disabled={act.isPending}
+                          onClick={() => act.mutate({ path: "/extend", body: { days: n } })}
+                        >
+                          +{n} дн.
+                        </button>
+                      ))}
+                      {[7, 30, 90].map((n) => (
+                        <button
+                          key={`-${n}`}
+                          className="btn danger sm"
+                          disabled={!d.expire_at || act.isPending}
                           title={!d.expire_at ? t.noExpiry : undefined}
                           onClick={() => {
-                            // Same /extend endpoint, absolute-date path (it already handles a
-                            // past date correctly, unlike the relative `days` path which is
-                            // meant for real renewals only) — undoes an accidental +N misclick
-                            // without needing to compute/type a calendar date by hand.
+                            // The absolute-date path of /extend handles a past date correctly
+                            // (the relative `days` path is for real renewals only).
                             const target = new Date(d.expire_at!);
                             target.setUTCDate(target.getUTCDate() - n);
                             act.mutate({
@@ -555,13 +682,13 @@ export default function Users() {
                         </button>
                       ))}
                     </div>
-                    <div className="row" style={{ marginTop: 6 }}>
+                    <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                       <input
-                        className="inp sm"
+                        className="input num"
                         type="number"
                         min={1}
                         max={3650}
-                        placeholder={t.extendDaysPh}
+                        placeholder="дней"
                         value={extDays}
                         style={{ width: 90 }}
                         onChange={(e) => setExtDays(e.target.value)}
@@ -574,12 +701,10 @@ export default function Users() {
                           setExtDays("");
                         }}
                       >
-                        {t.extendAdd}
+                        Продлить
                       </button>
-                    </div>
-                    <div className="row" style={{ marginTop: 6 }}>
                       <input
-                        className="inp sm"
+                        className="input"
                         type="date"
                         value={extUntil}
                         style={{ width: 150 }}
@@ -593,83 +718,163 @@ export default function Users() {
                           setExtUntil("");
                         }}
                       >
-                        {t.extendUntil}
+                        До даты
                       </button>
                     </div>
-                    <div className="caps">{t.lastTx}</div>
-                    <div className="grid" style={{ gap: 6, fontSize: 12.5 }}>
-                      {d.transactions.map((tx) => (
-                        <div key={tx.id} className="row" style={{ justifyContent: "space-between" }}>
-                          <span className="muted">
-                            {dtTime(tx.created_at)} · {tx.type}
-                          </span>
-                          <span className="mono">{money(tx.amount_minor)}</span>
-                        </div>
-                      ))}
-                      {d.transactions.length === 0 && <span className="dim">—</span>}
+                  </div>
+
+                  <div className="ud-section">
+                    <div className="ud-title">Условия клиента</div>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                      <input
+                        className="input num"
+                        type="number"
+                        min={0}
+                        max={100}
+                        placeholder="%"
+                        value={discount}
+                        style={{ width: 70 }}
+                        onChange={(e) => setDiscount(e.target.value)}
+                      />
+                      <button
+                        className="btn secondary sm"
+                        disabled={discount === "" || act.isPending}
+                        onClick={() => act.mutate({ path: "/discount", body: { percent: Number(discount) } })}
+                      >
+                        Задать скидку
+                      </button>
+                      <button
+                        className="btn secondary sm"
+                        onClick={() =>
+                          act.mutate({ path: "/trial", body: { available: !d.is_trial_available } })
+                        }
+                      >
+                        {d.is_trial_available ? "Забрать пробный период" : "Вернуть пробный период"}
+                      </button>
+                      <button className="btn secondary sm" onClick={() => act.mutate({ path: "/sync" })}>
+                        ⟳ Синхронизировать с панелью
+                      </button>
                     </div>
                   </div>
-                )}
+                </div>
+              )}
 
-                {tab === "tickets" && (
-                  <div className="grid" style={{ marginTop: 16 }}>
-                    <span className="dim">→ {t.tickets}</span>
-                  </div>
-                )}
+              {tab === "tickets" && (
+                <div className="ud-section">
+                  <div className="ud-title">Обращения в поддержку</div>
+                  {userTickets.length ? (
+                    <div className="grid" style={{ gap: 0 }}>
+                      {userTickets.map((tk) => (
+                        <button
+                          key={tk.id}
+                          className="row"
+                          style={{
+                            justifyContent: "space-between",
+                            padding: "9px 0",
+                            border: 0,
+                            borderBottom: "1px solid var(--border)",
+                            background: "none",
+                            color: "var(--text)",
+                            cursor: "pointer",
+                            textAlign: "left",
+                            font: "inherit",
+                            fontSize: 13,
+                          }}
+                          onClick={() => {
+                            sessionStorage.setItem("open_ticket", String(tk.id));
+                            nav("/tickets");
+                          }}
+                        >
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                            <span className="dim">#{tk.id}</span> {tk.subject}
+                          </span>
+                          <span className="dim" style={{ fontSize: 12, flex: "0 0 auto" }}>
+                            {tk.status === "closed" ? "закрыт" : tk.status === "waiting" ? "ждёт клиента" : "открыт"} →
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="dim">Обращений не было</span>
+                  )}
+                </div>
+              )}
 
-                {tab === "actions" && (
-                  <div className="grid" style={{ gap: 8, marginTop: 16 }}>
-                    <button
-                      className="btn secondary"
-                      onClick={() => act.mutate({ path: "/extend", body: { days: 30 } })}
-                    >
-                      {t.extend30}
-                    </button>
-                    <button
-                      className="btn secondary"
-                      onClick={() => act.mutate({ path: "/reset-traffic" })}
-                    >
-                      {t.resetTraffic}
-                    </button>
-                    <button
-                      className="btn secondary"
-                      onClick={async () => {
-                        if (await confirm(t.resetDevicesConfirm))
-                          act.mutate({ path: "/reset-devices" });
-                      }}
-                    >
-                      {t.resetDevices}
-                    </button>
-                    <button
-                      className="btn secondary"
-                      onClick={() => act.mutate({ path: "/hwid", body: { delta: 1 } })}
-                    >
-                      {t.extendHwid}
-                    </button>
-                    {d.status !== "blocked" ? (
+              {tab === "actions" && (
+                <div className="grid" style={{ gap: 12 }}>
+                  <div className="ud-section">
+                    <div className="ud-title">Написать клиенту в бот</div>
+                    <textarea
+                      className="input"
+                      rows={3}
+                      placeholder="Текст сообщения…"
+                      value={msgText}
+                      style={{ width: "100%", resize: "vertical" }}
+                      onChange={(e) => setMsgText(e.target.value)}
+                    />
+                    <div className="row" style={{ justifyContent: "flex-end", marginTop: 8 }}>
                       <button
-                        className="btn danger"
-                        onClick={async () => {
-                          if (await confirm(t.blockConfirm)) act.mutate({ path: "/block" });
+                        className="btn primary sm"
+                        disabled={!msgText.trim() || act.isPending}
+                        onClick={() => {
+                          act.mutate({ path: "/message", body: { text: msgText } });
+                          setMsgText("");
                         }}
                       >
-                        {t.block}
+                        Отправить
                       </button>
-                    ) : (
-                      <button className="btn secondary" onClick={() => act.mutate({ path: "/unblock" })}>
-                        {t.unblock}
-                      </button>
-                    )}
-                    <button className="btn danger" onClick={() => void deleteUser()}>
-                      {t.deleteUser}
-                    </button>
+                    </div>
                   </div>
-                )}
-              </>
-            ) : (
-              <span className="dim">{t.loading}</span>
-            )}
-          </div>
+                  <div className="ud-section">
+                    <div className="ud-title">Обслуживание</div>
+                    <div className="grid" style={{ gap: 8 }}>
+                      <button className="btn secondary" onClick={() => act.mutate({ path: "/reset-traffic" })}>
+                        {t.resetTraffic}
+                      </button>
+                      <button
+                        className="btn secondary"
+                        onClick={async () => {
+                          if (await confirm(t.resetDevicesConfirm)) act.mutate({ path: "/reset-devices" });
+                        }}
+                      >
+                        {t.resetDevices}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="ud-section" style={{ borderColor: "rgba(208,59,59,.35)" }}>
+                    <div className="ud-title" style={{ color: "var(--bad-ink)" }}>
+                      Опасная зона
+                    </div>
+                    <div className="grid" style={{ gap: 8 }}>
+                      {d.status !== "blocked" ? (
+                        <button
+                          className="btn danger"
+                          onClick={async () => {
+                            if (await confirm(t.blockConfirm)) act.mutate({ path: "/block" });
+                          }}
+                        >
+                          {t.block}
+                        </button>
+                      ) : (
+                        <button className="btn secondary" onClick={() => act.mutate({ path: "/unblock" })}>
+                          {t.unblock}
+                        </button>
+                      )}
+                      <button className="btn danger" onClick={() => void deleteUser()}>
+                        {t.deleteUser}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="grid" style={{ gap: 12 }}>
+              <span className="sk" style={{ width: "60%", height: 22 }} />
+              <span className="sk" style={{ width: "100%", height: 70 }} />
+              <span className="sk" style={{ width: "100%", height: 160 }} />
+            </div>
+          )}
         </Drawer>
       )}
     </>

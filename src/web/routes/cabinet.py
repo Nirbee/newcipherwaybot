@@ -11,10 +11,11 @@ import contextlib
 import math
 from collections.abc import Iterable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from src.application.common.payments import PaymentContext, PaymentResultKind
@@ -832,8 +833,18 @@ def _support_msg(m: Any) -> dict[str, Any]:
     return {
         "from": "you" if m.author is TicketAuthor.USER else "support",
         "text": text,
+        "image": m.attachment_url if m.attachment_kind in ("photo", "document") else None,
         "at": m.created_at.isoformat(),
     }
+
+
+_SUPPORT_UPLOADS = Path("uploads") / "tickets"
+_SUPPORT_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_SUPPORT_IMAGE_MAX = 10 * 1024 * 1024
 
 
 @router.get("/support")
@@ -898,6 +909,68 @@ async def support_send(
         )
     outcome, ai_text = await container.ai_support.handle_ticket(user, ticket_id)
     return {"ok": True, "ticket_id": ticket_id, "ai_outcome": outcome, "ai_reply": ai_text}
+
+
+@router.post("/support/photo")
+async def support_send_photo(
+    file: UploadFile = File(...),
+    text: str = Form(""),
+    user: User = Depends(cabinet_user),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """A screenshot into the support conversation (mini-app / web cabinet). Stored like the
+    bot's ticket screenshots (uploads/tickets/) so the admin thread renders it inline."""
+    import uuid
+
+    from src.application.events import TicketOpened
+    from src.core.enums import TicketAuthor, TicketStatus
+    from src.infrastructure.database.base import utcnow
+    from src.infrastructure.database.models.ticket import Ticket, TicketMessage
+
+    ext = _SUPPORT_IMAGE_TYPES.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(400, "unsupported file type")
+    data = await file.read(_SUPPORT_IMAGE_MAX + 1)
+    if len(data) > _SUPPORT_IMAGE_MAX:
+        raise HTTPException(413, "file too large")
+    name = f"{uuid.uuid4().hex}{ext}"
+    try:
+        _SUPPORT_UPLOADS.mkdir(parents=True, exist_ok=True)
+        (_SUPPORT_UPLOADS / name).write_bytes(data)
+    except OSError as exc:
+        raise HTTPException(500, "could not store the file") from exc
+    caption = text.strip()[:1000]
+    async with container.uow() as uow:
+        tickets = await uow.tickets.list(user_id=user.id)
+        active = next((t for t in tickets if t.status is not TicketStatus.CLOSED), None)
+        created = active is None
+        if active is None:
+            active = Ticket(user_id=user.id, subject=(caption or "📎 Скриншот")[:64])
+            await uow.tickets.add(active)
+        await uow.ticket_messages.add(
+            TicketMessage(
+                ticket_id=active.id,
+                author=TicketAuthor.USER,
+                text=caption,
+                attachment_url=f"/uploads/tickets/{name}",
+                attachment_kind="photo",
+            )
+        )
+        active.status = TicketStatus.OPEN
+        active.updated_at = utcnow()
+        await uow.commit()
+        ticket_id = active.id
+    if created:
+        await container.event_bus.publish(
+            TicketOpened(
+                ticket_id=ticket_id,
+                user_id=user.id,
+                telegram_id=user.telegram_id or 0,
+                username=user.username,
+                subject=(caption or "📎 Скриншот")[:64],
+            )
+        )
+    return {"ok": True, "ticket_id": ticket_id}
 
 
 @router.post("/trial")

@@ -1201,6 +1201,19 @@
         .then((r) => { state.support.messages = r.messages || []; render(); })
         .catch(() => {});
     }
+    // Operator replies arrive without a reload: a quiet poll while the app is visible.
+    if (!mock && !state.support.poll) {
+      state.support.poll = setInterval(async () => {
+        if (document.hidden || state.support.sending) return;
+        try {
+          const fresh = (await api("GET", "/api/cabinet/support")).messages || [];
+          if (fresh.length !== (state.support.messages || []).length) {
+            state.support.messages = fresh;
+            render();
+          }
+        } catch {}
+      }, 25000);
+    }
     const supMsgs = state.support.messages || [];
     const supInp = el("input", { class: "inp", placeholder: T.supportPh, maxlength: 1000 });
     async function sendSupport() {
@@ -1229,28 +1242,70 @@
       state.support.sending = false;
       render();
     }
+    const supFile = el("input", { type: "file", accept: "image/jpeg,image/png,image/webp", style: "display:none" });
+    supFile.addEventListener("change", async () => {
+      const f = supFile.files && supFile.files[0];
+      supFile.value = "";
+      if (!f || state.support.sending) return;
+      if (f.size > 10 * 1024 * 1024) { toast(T === RU ? "Файл больше 10 МБ" : "File is over 10 MB"); return; }
+      state.support.sending = true;
+      haptic();
+      render();
+      try {
+        if (!mock) {
+          const form = new FormData();
+          form.append("file", f);
+          const caption = supInp.value.trim();
+          if (caption) form.append("text", caption);
+          const res = await fetch("/api/cabinet/support/photo", { method: "POST", headers: authHeaders(), body: form });
+          if (!res.ok) throw new Error(T === RU ? "Не удалось отправить картинку (jpg, png, webp)" : "Couldn't send the picture");
+          supInp.value = "";
+          state.support.messages = (await api("GET", "/api/cabinet/support")).messages || [];
+        }
+      } catch (e) {
+        toast((e.message || T.error).slice(0, 120));
+      }
+      state.support.sending = false;
+      render();
+    });
+    function supBubble(m) {
+      const mine = m.from === "you";
+      const kids = [];
+      if (m.image) {
+        kids.push(el("img", {
+          src: m.image,
+          alt: "",
+          style: "display:block;max-width:100%;max-height:220px;border-radius:9px;cursor:zoom-in" + (m.text ? ";margin-bottom:6px" : ""),
+          onclick: () => window.open(m.image, "_blank"),
+        }));
+      }
+      if (m.text) kids.push(el("span", { text: m.text }));
+      return el("div", { style: `margin:4px 0;text-align:${mine ? "right" : "left"}` }, [
+        el("span", {
+          style:
+            "display:inline-block;max-width:85%;padding:7px 11px;border-radius:12px;" +
+            "font-size:13.5px;white-space:pre-line;text-align:left;" +
+            (mine ? "background:var(--acc);color:var(--accInk)" : "background:var(--soft);color:var(--ink)"),
+        }, kids),
+      ]);
+    }
     frag.push(
       el("div", { class: "card fade" }, [
         el("div", { class: "h-cap", text: "🆘 " + T.support }),
         ...(supMsgs.length
-          ? supMsgs.slice(-8).map((m) =>
-              el("div", { style: `margin:4px 0;text-align:${m.from === "you" ? "right" : "left"}` }, [
-                el("span", {
-                  style:
-                    "display:inline-block;max-width:85%;padding:7px 11px;border-radius:12px;" +
-                    "font-size:13.5px;white-space:pre-line;text-align:left;" +
-                    (m.from === "you"
-                      ? "background:var(--acc);color:var(--accInk)"
-                      : "background:var(--soft);color:var(--ink)"),
-                  text: m.text,
-                }),
-              ]),
-            )
+          ? supMsgs.slice(-8).map(supBubble)
           : [el("div", { class: "sub", style: "font-size:12.5px", text: T.supportHint })]),
         state.support.sending
           ? el("div", { class: "sub", style: "font-size:12px;margin-top:4px", text: T.supportTyping })
           : null,
         el("div", { class: "row", style: "margin-top:8px" }, [
+          supFile,
+          el("button", {
+            class: "btn sm",
+            title: T === RU ? "Прикрепить скриншот" : "Attach a screenshot",
+            text: "📎",
+            onclick: () => supFile.click(),
+          }),
           supInp,
           el("button", { class: "btn primary sm", text: T.send, onclick: sendSupport }),
         ]),

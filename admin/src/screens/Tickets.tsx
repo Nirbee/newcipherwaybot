@@ -1,9 +1,9 @@
 /* Screen 11 — Тикеты: support channels config + ticket list + chat. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { api, dtTime } from "../api/client";
+import { api, dtTime, getToken } from "../api/client";
 import { Field, Modal, Toggle } from "../components/ui";
 import { useApp } from "../state/app";
 
@@ -13,6 +13,9 @@ type TicketRow = {
   subject: string;
   status: "open" | "waiting" | "closed";
   is_premium: boolean;
+  priority: number;
+  effective_priority: number;
+  waiting_minutes: number | null;
   messages: number;
   updated_at: string | null;
 };
@@ -21,6 +24,7 @@ type TicketDetail = {
   subject: string;
   status: string;
   is_premium: boolean;
+  priority: number;
   offers: {
     id: number;
     name: string;
@@ -48,6 +52,21 @@ type OfferDraft = {
   internal_squads: string[];
 };
 
+const PRIORITIES: { id: number; label: string; color: string }[] = [
+  { id: 0, label: "Низкий", color: "var(--dim)" },
+  { id: 1, label: "Обычный", color: "var(--muted)" },
+  { id: 2, label: "Высокий", color: "var(--warn)" },
+  { id: 3, label: "Срочный", color: "var(--bad-ink)" },
+];
+
+function waitLabel(min: number | null): string | null {
+  if (min === null) return null;
+  if (min < 60) return `ждёт ${min} мин`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `ждёт ${h} ч`;
+  return `ждёт ${Math.floor(h / 24)} дн`;
+}
+
 const PERIOD_LADDER = [30, 90, 180, 360];
 
 function nextDuration(ds: OfferDraft["durations"]): OfferDraft["durations"][number] {
@@ -71,8 +90,16 @@ const ST: Record<string, [string, string]> = {
 export default function Tickets() {
   const { t, toast } = useApp();
   const qc = useQueryClient();
-  const [selId, setSelId] = useState<number | null>(null);
+  const [selId, setSelId] = useState<number | null>(() => {
+    const pending = sessionStorage.getItem("open_ticket");
+    sessionStorage.removeItem("open_ticket");
+    return pending ? Number(pending) : null;
+  });
   const [reply, setReply] = useState("");
+  const [attach, setAttach] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const [redirect, setRedirect] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferDraft | null>(null);
   const [sendingOffer, setSendingOffer] = useState(false);
@@ -98,15 +125,52 @@ export default function Tickets() {
   });
 
   const sendReply = useMutation({
-    mutationFn: () => api.post(`/api/admin/tickets/${selId}/reply`, { text: reply }),
+    mutationFn: () =>
+      api.post(`/api/admin/tickets/${selId}/reply`, {
+        text: reply,
+        attachment_url: attach ?? undefined,
+      }),
     onSuccess: () => {
       setReply("");
+      setAttach(null);
       void qc.invalidateQueries({ queryKey: ["ticket", selId] });
       void qc.invalidateQueries({ queryKey: ["tickets"] });
       toast("✓");
     },
     onError: (e) => toast(e.message),
   });
+
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [detail.data?.messages.length, selId]);
+
+  async function uploadShot(f: File) {
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", f);
+      const res = await fetch("/api/admin/upload", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${getToken()}` },
+        body: form,
+      });
+      if (!res.ok) throw new Error("Не удалось загрузить картинку (jpg, png, webp до 20 МБ)");
+      const data = (await res.json()) as { url: string; kind: string };
+      if (data.kind !== "photo") throw new Error("Можно прикрепить только картинку");
+      setAttach(data.url);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function setPriority(priority: number) {
+    await api.patch(`/api/admin/tickets/${selId}/priority`, { priority });
+    void qc.invalidateQueries({ queryKey: ["ticket", selId] });
+    void qc.invalidateQueries({ queryKey: ["tickets"] });
+  }
 
   async function setStatus(status: string) {
     await api.patch(`/api/admin/tickets/${selId}/status`, { status });
@@ -231,7 +295,26 @@ export default function Tickets() {
                     {tk.username ? `@${tk.username}` : "—"} · {tk.subject}
                   </div>
                   <div className="dim" style={{ fontSize: 11.5 }}>
-                    {tk.messages} · {dtTime(tk.updated_at)}
+                    {tk.status !== "closed" && tk.effective_priority >= 2 && (
+                      <b style={{ color: PRIORITIES[tk.effective_priority].color, fontWeight: 600 }}>
+                        {PRIORITIES[tk.effective_priority].label} ·{" "}
+                      </b>
+                    )}
+                    {waitLabel(tk.waiting_minutes) && (
+                      <span
+                        style={{
+                          color:
+                            (tk.waiting_minutes ?? 0) >= 720
+                              ? "var(--bad-ink)"
+                              : (tk.waiting_minutes ?? 0) >= 240
+                                ? "var(--warn)"
+                                : undefined,
+                        }}
+                      >
+                        {waitLabel(tk.waiting_minutes)} ·{" "}
+                      </span>
+                    )}
+                    {tk.messages} сообщ. · {dtTime(tk.updated_at)}
                   </div>
                 </span>
               </div>
@@ -283,7 +366,32 @@ export default function Tickets() {
                     .join(" · ")}
                 </div>
               )}
-              <div className="grid" style={{ gap: 8, flex: 1, overflowY: "auto", marginBottom: 12 }}>
+              <div
+                className="row"
+                style={{ gap: 6, marginBottom: 10, flexWrap: "wrap", fontSize: 12 }}
+              >
+                <span className="dim">Приоритет:</span>
+                {PRIORITIES.map((pr) => (
+                  <button
+                    key={pr.id}
+                    className="cap-pill"
+                    onClick={() => void setPriority(pr.id)}
+                    style={{
+                      cursor: "pointer",
+                      color: d.priority === pr.id ? "var(--text)" : pr.color,
+                      borderColor: d.priority === pr.id ? pr.color : undefined,
+                      background: d.priority === pr.id ? "var(--hover)" : undefined,
+                    }}
+                  >
+                    {pr.label}
+                  </button>
+                ))}
+              </div>
+              <div
+                ref={threadRef}
+                className="grid"
+                style={{ gap: 8, flex: 1, overflowY: "auto", marginBottom: 12, maxHeight: 520 }}
+              >
                 {d.messages.map((m) => (
                   <div
                     key={m.id}
@@ -329,20 +437,58 @@ export default function Tickets() {
                   </div>
                 ))}
               </div>
+              {attach && (
+                <div className="row" style={{ marginBottom: 8, gap: 8 }}>
+                  <img
+                    src={attach}
+                    alt="вложение"
+                    style={{ height: 64, borderRadius: 8, border: "1px solid var(--border2)" }}
+                  />
+                  <button className="btn secondary sm" onClick={() => setAttach(null)}>
+                    Убрать
+                  </button>
+                </div>
+              )}
               <div className="row">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void uploadShot(f);
+                    e.target.value = "";
+                  }}
+                />
+                <button
+                  className="icon-btn"
+                  title="Прикрепить скриншот"
+                  disabled={uploading}
+                  onClick={() => fileRef.current?.click()}
+                >
+                  {uploading ? <span className="spin">⟳</span> : "📎"}
+                </button>
                 <input
                   className="input"
                   style={{ flex: 1 }}
                   placeholder={t.reply + "…"}
                   value={reply}
                   onChange={(e) => setReply(e.target.value)}
+                  onPaste={(e) => {
+                    const f = Array.from(e.clipboardData.files).find((x) => x.type.startsWith("image/"));
+                    if (f) {
+                      e.preventDefault();
+                      void uploadShot(f);
+                    }
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && reply.trim()) sendReply.mutate();
+                    if (e.key === "Enter" && (reply.trim() || attach)) sendReply.mutate();
                   }}
                 />
                 <button
                   className="btn primary"
-                  disabled={!reply.trim() || sendReply.isPending}
+                  disabled={(!reply.trim() && !attach) || sendReply.isPending || uploading}
                   onClick={() => sendReply.mutate()}
                 >
                   {t.reply}

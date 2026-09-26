@@ -271,6 +271,8 @@ async def change_balance(
         user = await uow.users.get(user_id)
         if user is None:
             raise HTTPException(404, "user not found")
+        if body.amount_minor < 0 and user.balance_minor + body.amount_minor < 0:
+            raise HTTPException(400, "insufficient balance")
         await uow.users.increment_balance(user, body.amount_minor)
         now = dt.datetime.now(dt.UTC)
         await uow.transactions.add(
@@ -558,6 +560,8 @@ async def _set_status(
 
 class DeviceLimitIn(BaseModel):
     delta: int = Field(1, ge=-10, le=10)
+    # An exact limit typed by the admin (wins over ``delta``) — no clicking +1 twenty times.
+    value: int | None = Field(None, ge=1, le=100)
 
 
 @router.post("/{user_id}/hwid", response_model=OkOut)
@@ -574,7 +578,9 @@ async def change_device_limit(
         sub = await uow.subscriptions.get(user.current_subscription_id)
         if sub is None:
             raise HTTPException(400, "subscription missing")
-        new_limit = max(1, (sub.device_limit or 1) + body.delta)
+        new_limit = (
+            body.value if body.value is not None else max(1, (sub.device_limit or 1) + body.delta)
+        )
         sub.device_limit = new_limit
         panel_ref = sub.panel_ref
         if panel_ref is not None and user.telegram_id is not None:
