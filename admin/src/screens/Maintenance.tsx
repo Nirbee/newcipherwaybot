@@ -15,6 +15,14 @@ type Topic = {
   enabled: boolean;
 };
 type TopicsResp = { group_id: string; items: Topic[] };
+type GroupCheck = {
+  ok: boolean;
+  group_id: string;
+  title?: string;
+  is_forum?: boolean;
+  error?: string;
+  topics: { code: string; ok: boolean; error?: string }[];
+};
 
 const TOPIC_NAMES: Record<string, string> = {
   daily_report: "Отчёты · ежедневно",
@@ -94,6 +102,8 @@ export default function Maintenance() {
   const [squads, setSquads] = useState<Squad[]>([]);
   const [squad, setSquad] = useState("");
   const [groupId, setGroupId] = useState<string | null>(null);
+  const [groupCheck, setGroupCheck] = useState<GroupCheck | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const topics = useQuery({
     queryKey: ["report-topics"],
@@ -262,10 +272,21 @@ export default function Maintenance() {
   }
 
   async function saveGroup() {
-    if (groupId === null) return;
-    await api.post("/api/admin/report-topics/group", { group_id: groupId });
-    void qc.invalidateQueries({ queryKey: ["report-topics"] });
-    toast(t.saved);
+    const value = groupId ?? topics.data?.group_id ?? "";
+    setChecking(true);
+    try {
+      const r = await api.post<GroupCheck>("/api/admin/report-topics/group", { group_id: value });
+      setGroupId(r.group_id);
+      setGroupCheck(r);
+      void qc.invalidateQueries({ queryKey: ["report-topics"] });
+      if (r.error) toast(r.error);
+      else if (r.ok) toast(`Группа «${r.title ?? r.group_id}» подключена — в топики ушли тестовые сообщения`);
+      else toast("Часть топиков не приняла сообщение — причины ниже");
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setChecking(false);
+    }
   }
 
   const tp = topics.data;
@@ -440,11 +461,29 @@ export default function Maintenance() {
                   value={groupId ?? tp?.group_id ?? ""}
                   onChange={(e) => setGroupId(e.target.value)}
                 />
-                <button className="btn secondary sm" onClick={saveGroup}>
-                  {t.checkGroup}
+                <button className="btn secondary sm" onClick={saveGroup} disabled={checking}>
+                  {checking ? <span className="spin">⟳</span> : null} {t.checkGroup}
                 </button>
               </div>
             </Field>
+            {groupCheck && (
+              <div style={{ fontSize: 12.5 }}>
+                {groupCheck.error ? (
+                  <span style={{ color: "var(--bad-ink)" }}>✕ {groupCheck.error}</span>
+                ) : (
+                  <span>
+                    <span className="status-dot ok" />
+                    {groupCheck.title ?? groupCheck.group_id}
+                    {groupCheck.is_forum === false && (
+                      <span style={{ color: "var(--warn)" }}>
+                        {" "}
+                        · в группе не включены темы (топики)
+                      </span>
+                    )}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="grid" style={{ gap: 8 }}>
               {(tp?.items ?? []).map((topic) => (
                 <div
@@ -459,9 +498,26 @@ export default function Maintenance() {
                 >
                   <span style={{ minWidth: 0 }}>
                     {TOPIC_NAMES[topic.code] ?? topic.code}
+                    {(() => {
+                      const c = groupCheck?.topics.find((x) => x.code === topic.code);
+                      if (!c) return null;
+                      return (
+                        <span
+                          title={c.error}
+                          style={{ marginLeft: 6, color: c.ok ? "var(--good-ink)" : "var(--bad-ink)" }}
+                        >
+                          {c.ok ? "✓" : "✕"}
+                        </span>
+                      );
+                    })()}
                     <div className="dim mono" style={{ fontSize: 10 }}>
                       {topic.schedule ?? "—"}
                     </div>
+                    {groupCheck?.topics.find((x) => x.code === topic.code && !x.ok) && (
+                      <div style={{ fontSize: 10.5, color: "var(--bad-ink)" }}>
+                        {groupCheck.topics.find((x) => x.code === topic.code)?.error}
+                      </div>
+                    )}
                   </span>
                   <input
                     className="input num"

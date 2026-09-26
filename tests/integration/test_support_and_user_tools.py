@@ -184,3 +184,41 @@ async def test_balance_debit_cannot_go_negative_and_hwid_takes_exact_value(
         user = await uow.users.get(user_id)
         sub = await uow.subscriptions.get(user.current_subscription_id)
     assert sub.device_limit == 12
+
+
+def test_report_group_id_normalization() -> None:
+    from src.infrastructure.services.reports import normalize_group_id
+
+    assert normalize_group_id("3914340224") == "-1003914340224"  # bare supergroup id
+    assert normalize_group_id(" -1003914340224 ") == "-1003914340224"
+    assert normalize_group_id("-4012345678") == "-4012345678"  # basic group: kept as-is
+    assert normalize_group_id("") == ""
+
+
+async def test_saving_report_group_normalizes_and_runs_the_delivery_check(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: object
+) -> None:
+    import pytest
+
+    from src.infrastructure.services import reports
+
+    http, container = client
+    seen: dict[str, object] = {}
+
+    async def fake_verify(token: str, group_id: str, topics: list[tuple[str, int | None]]):
+        seen["group_id"], seen["topics"] = group_id, topics
+        return {"ok": True, "group_id": group_id, "title": "Отчёты", "topics": []}
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    monkeypatch.setattr(reports, "verify_report_group", fake_verify)
+    auth = await _login(http)
+    await http.get("/api/admin/report-topics", headers=auth)  # seeds the topic kinds
+    res = await http.post(
+        "/api/admin/report-topics/group", headers=auth, json={"group_id": "3914340224"}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["title"] == "Отчёты"
+    assert seen["group_id"] == "-1003914340224"
+    async with container.uow() as uow:
+        stored = await container.bot_config.value(uow, "REPORT_GROUP_ID")
+    assert stored == "-1003914340224"

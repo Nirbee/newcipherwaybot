@@ -36,6 +36,59 @@ def fmt_amount(minor: int, currency: str = "RUB") -> str:
     return f"{s.replace(',', ' ')} {sign}"
 
 
+def normalize_group_id(raw: str) -> str:
+    """Telegram group ids are always negative; a forum (topics) group is a supergroup, whose
+    Bot API id is ``-100`` + its internal id. Admins often paste the bare internal id (as shown
+    by some clients/bots), e.g. ``3914340224`` -> ``-1003914340224``. A positive id is never a
+    group (positive ids are users), so that case is unambiguous; anything else is kept."""
+    value = raw.strip().replace(" ", "")
+    if value.isdigit():
+        return f"-100{value}"
+    return value
+
+
+async def verify_report_group(
+    token: str, group_id: str, topics: list[tuple[str, int | None]]
+) -> dict[str, object]:
+    """Ask Telegram whether the bot can actually post there: resolve the chat, then send a
+    short test message into every given (code, thread_id) topic. Returns a per-topic outcome
+    so the admin sees exactly which topic id is wrong instead of a silent nothing."""
+    from aiogram import Bot
+
+    result: dict[str, object] = {"group_id": group_id, "ok": False, "topics": []}
+    if not group_id.lstrip("-").isdigit():
+        result["error"] = "ID группы должен быть числом, например -1001234567890"
+        return result
+    bot = Bot(token=token)
+    try:
+        try:
+            chat = await bot.get_chat(int(group_id))
+        except Exception as exc:
+            result["error"] = (
+                "Бот не видит эту группу — проверьте ID и что бот добавлен в группу "
+                f"({str(exc)[:120]})"
+            )
+            return result
+        result["title"] = chat.title
+        result["is_forum"] = bool(getattr(chat, "is_forum", False))
+        outcomes = []
+        for code, thread_id in topics:
+            try:
+                await bot.send_message(
+                    int(group_id),
+                    "✅ Проверка: сюда будут приходить отчёты этого топика.",
+                    message_thread_id=thread_id,
+                )
+                outcomes.append({"code": code, "ok": True})
+            except Exception as exc:
+                outcomes.append({"code": code, "ok": False, "error": str(exc)[:160]})
+        result["topics"] = outcomes
+        result["ok"] = all(o["ok"] for o in outcomes)
+    finally:
+        await bot.session.close()
+    return result
+
+
 async def send_topic_report(
     container: AppContainer,
     code: str,
@@ -55,7 +108,9 @@ async def send_topic_report(
     report group.
     """
     async with container.uow() as uow:
-        group = str(await container.bot_config.value(uow, "REPORT_GROUP_ID") or "").strip()
+        group = normalize_group_id(
+            str(await container.bot_config.value(uow, "REPORT_GROUP_ID") or "")
+        )
         dm_admins = bool(await container.bot_config.value(uow, "REPORT_DM_ADMINS"))
         topic = next((t for t in await uow.report_topics.list() if t.code == code), None)
     if not container.settings.bot.token:

@@ -133,12 +133,22 @@ async def set_report_group(
     body: GroupIn,
     identity: AdminIdentity = Depends(require_admin),
     container: AppContainer = Depends(get_container),
-) -> OkOut:
+) -> dict[str, Any]:
+    """Save the group (id normalized to the Bot API form) and actually test delivery into
+    every enabled topic — the button used to only save, so a wrong id failed silently."""
+    from src.infrastructure.services.reports import normalize_group_id, verify_report_group
+
+    group_id = normalize_group_id(body.group_id)
     async with container.uow() as uow:
-        await container.bot_config.set_values(uow, {"REPORT_GROUP_ID": body.group_id})
-        await audit(uow, identity, "report_topic.group", None, group_id=body.group_id)
+        await container.bot_config.set_values(uow, {"REPORT_GROUP_ID": group_id})
+        await audit(uow, identity, "report_topic.group", None, group_id=group_id)
         await uow.commit()
-    return OkOut()
+        topics = [(t.code, t.topic_id) for t in await uow.report_topics.list() if t.enabled]
+    if not group_id:
+        return {"ok": True, "group_id": "", "topics": []}
+    if not container.settings.bot.token:
+        return {"ok": False, "group_id": group_id, "error": "не задан токен бота", "topics": []}
+    return await verify_report_group(container.settings.bot.token, group_id, topics)
 
 
 # --- maintenance actions -------------------------------------------------------
