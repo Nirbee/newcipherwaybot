@@ -111,6 +111,9 @@ class PlanCategory(StrEnum):
 
     APP = "app"
     ROUTER = "router"
+    # A personal server offer issued to ONE customer from a premium ticket — never listed in a
+    # storefront, purchasable only by the Telegram ids in the plan's allow-list.
+    PREMIUM = "premium"
 
 
 class Availability(StrEnum):

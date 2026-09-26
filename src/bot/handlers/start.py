@@ -46,6 +46,12 @@ async def cmd_start(
     elif param == onboarding.PLANS_START_PARAM:
         await _router_offer(message, container, db_user)
         return
+    elif param.startswith("plan_") and param.removeprefix("plan_").isdigit():
+        # A personal premium invoice link: straight to its duration/payment screen.
+        from src.bot.handlers.purchase import render_durations
+
+        await render_durations(message, container, db_user, int(param.removeprefix("plan_")))
+        return
     elif param:
         await _attribute(container, db_user, param, created=db_user_created)
     if gift_note:

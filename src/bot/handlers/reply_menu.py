@@ -132,7 +132,7 @@ def _reply_action_handlers() -> dict[str, Any]:
     """code -> handler for bottom-bar taps. Every MENU_ACTIONS code (except ``promocode``,
     which needs the FSM and is special-cased in ``_open_action``) must appear here, or a
     visible reply button dead-ends. ``test_reply_dispatch_covers_all_actions`` locks the sync."""
-    from src.bot.handlers import actions, purchase
+    from src.bot.handlers import actions, premium, purchase
 
     return {
         "buy": purchase.open_buy,
@@ -147,6 +147,7 @@ def _reply_action_handlers() -> dict[str, Any]:
         "nodes": actions.act_nodes,
         "proxy": actions.act_proxy,
         "support": actions.act_support,
+        "premium": premium.act_premium,
         "terms": actions.act_terms,
         "privacy": actions.act_privacy,
     }

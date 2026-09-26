@@ -169,7 +169,11 @@ async def patch_plan(
             plan.traffic_limit_bytes = gb * GIB or None
         if "device_limit" in data:
             plan.device_limit = data["device_limit"]
-        if body.category is not None:
+        if body.category is not None and body.category is not plan.category:
+            if PlanCategory.PREMIUM in (plan.category, body.category):
+                # A personal invoice must never leak into (or a public plan into) the private
+                # premium bucket — issue a new invoice from the ticket instead.
+                raise HTTPException(400, "premium plans can't change category")
             plan.category = body.category
         if "is_active" in data and data["is_active"] is not None:
             plan.is_active = data["is_active"]

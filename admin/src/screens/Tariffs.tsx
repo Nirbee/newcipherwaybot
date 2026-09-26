@@ -8,7 +8,7 @@ import { Field, Modal, Seg, Toggle } from "../components/ui";
 import { useApp } from "../state/app";
 
 type Duration = { id?: number; days: number; prices: Record<string, number> };
-type PlanCategory = "app" | "router";
+type PlanCategory = "app" | "router" | "premium";
 type Plan = {
   id: number;
   name: string;
@@ -245,6 +245,7 @@ export default function Tariffs() {
                 { id: "all" as const, label: t.catAll },
                 { id: "app" as const, label: t.catApp },
                 { id: "router" as const, label: t.catRouter },
+                { id: "premium" as const, label: t.catPremium },
               ]}
               onChange={setCatFilter}
             />
@@ -294,6 +295,9 @@ export default function Tariffs() {
                       </span>
                       <b>{p.name}</b>
                       {p.category === "router" && <span className="cap-pill">{t.catRouter}</span>}
+                      {p.category === "premium" && (
+                        <span className="cap-pill">💎 {t.catPremium}</span>
+                      )}
                     </span>
                     <Toggle on={p.is_active} onChange={(v) => void togglePlan(p, v)} />
                   </div>
@@ -550,14 +554,20 @@ export default function Tariffs() {
               </Field>
             </div>
             <Field label={t.category}>
-              <Seg
-                value={draft.category}
-                options={[
-                  { id: "app" as const, label: t.catApp },
-                  { id: "router" as const, label: t.catRouter },
-                ]}
-                onChange={(category) => setDraft({ ...draft, category })}
-              />
+              {draft.category === "premium" ? (
+                // A personal invoice stays personal: switching it to a public category would put
+                // one customer's private offer into everyone's storefront.
+                <span className="cap-pill">💎 {t.catPremium}</span>
+              ) : (
+                <Seg
+                  value={draft.category}
+                  options={[
+                    { id: "app" as const, label: t.catApp },
+                    { id: "router" as const, label: t.catRouter },
+                  ]}
+                  onChange={(category) => setDraft({ ...draft, category })}
+                />
+              )}
             </Field>
             <div>
               <div className="caps" style={{ marginBottom: 6 }}>{t.planSquads}</div>

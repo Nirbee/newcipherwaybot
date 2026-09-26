@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from src.application.dto.pricing import PriceQuote, PurchaseRequest
 from src.core.constants import MAX_DISCOUNT_PERCENT
-from src.core.enums import Currency, PurchaseType
+from src.core.enums import Currency, PlanCategory, PurchaseType
 from src.core.exceptions import PurchaseError
 from src.core.money import Money
 from src.infrastructure.database.models.plan import Plan, PlanDuration, PlanPrice
@@ -38,6 +38,8 @@ class PricingService:
             plan = await uow.plans.get(req.plan_id)
             if plan is None or not plan.is_active:
                 raise PurchaseError(f"plan {req.plan_id} not found or inactive")
+            if plan.category is PlanCategory.PREMIUM:
+                return await self._premium_quote(uow, plan, req)
 
             base_minor = await self._base_price_minor(uow, plan, req)
             squads_minor = await self._squads_addon_minor(uow, req)
@@ -70,6 +72,23 @@ class PricingService:
             components=components,
             sale_campaign_id=sale_id if sale_pct > 0 else None,
         )
+
+    async def _premium_quote(
+        self, uow: UnitOfWork, plan: Plan, req: PurchaseRequest
+    ) -> PriceQuote:
+        """A personal server invoice: only its addressee may buy it, at exactly the price the
+        admin quoted — no sale / promo-group / personal discount shaves an individual deal."""
+        from src.application.services.premium import can_buy
+
+        if not can_buy(plan, await uow.users.get(req.user_id)):
+            raise PurchaseError("этот тариф выставлен другому клиенту")
+        base = Money(await self._base_price_minor(uow, plan, req), req.currency)
+        components = {"plan": base.amount_minor}
+        if req.purchase_type is PurchaseType.CHANGE and req.subscription_id is not None:
+            bonus = await self.change_bonus_days(uow, req)
+            if bonus > 0:
+                components["change_bonus_days"] = bonus
+        return PriceQuote(base=base, discount_pct=0, final=base, components=components)
 
     async def _sale_discount(self, uow: UnitOfWork) -> tuple[int, int | None]:
         """Best active limited-quantity sale: (discount_pct, campaign_id) or (0, None)."""

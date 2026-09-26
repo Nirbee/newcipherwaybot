@@ -7,6 +7,7 @@ from aiogram import Router
 from src.bot.handlers import (
     actions,
     admin,
+    premium,
     promo,
     purchase,
     reply_menu,
@@ -24,6 +25,7 @@ def build_router() -> Router:
     root.include_router(admin.router)  # admin commands (/setlogo, …)
     root.include_router(promo.router)  # before tickets: state-gated code input wins
     root.include_router(withdraw.router)  # ditto: withdrawal details input
+    root.include_router(premium.router)  # ditto: premium request input
     root.include_router(purchase.router)
     root.include_router(reply_menu.router)  # before tickets: bottom-bar taps beat the catch-all
     root.include_router(tickets.router)

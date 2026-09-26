@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, dtTime } from "../api/client";
-import { Toggle } from "../components/ui";
+import { Field, Modal, Toggle } from "../components/ui";
 import { useApp } from "../state/app";
 
 type TicketRow = {
@@ -12,6 +12,7 @@ type TicketRow = {
   username: string | null;
   subject: string;
   status: "open" | "waiting" | "closed";
+  is_premium: boolean;
   messages: number;
   updated_at: string | null;
 };
@@ -19,6 +20,13 @@ type TicketDetail = {
   id: number;
   subject: string;
   status: string;
+  is_premium: boolean;
+  offers: {
+    id: number;
+    name: string;
+    is_active: boolean;
+    durations: { days: number; price_minor: number | null }[];
+  }[];
   user: { username: string | null };
   messages: {
     id: number;
@@ -30,6 +38,29 @@ type TicketDetail = {
   }[];
 };
 type Channels = { mode: string; redirect_username: string };
+type Squad = { id: number; name: string; uuid: string };
+type OfferDraft = {
+  name: string;
+  description: string;
+  device_limit: number;
+  traffic_limit_gb: number;
+  durations: { days: number; price_minor: number }[];
+  internal_squads: string[];
+};
+
+const PERIOD_LADDER = [30, 90, 180, 360];
+
+function nextDuration(ds: OfferDraft["durations"]): OfferDraft["durations"][number] {
+  const last = ds[ds.length - 1];
+  if (!last) return { days: 30, price_minor: 0 };
+  const days = PERIOD_LADDER.find((d) => d > last.days) ?? last.days * 2;
+  const perDay = last.price_minor / Math.max(last.days, 1);
+  return { days, price_minor: Math.round((perDay * days) / 100) * 100 };
+}
+
+function rub(minor: number | null): string {
+  return minor == null ? "—" : `${(minor / 100).toLocaleString("ru-RU")} ₽`;
+}
 
 const ST: Record<string, [string, string]> = {
   open: ["●", "on"],
@@ -43,6 +74,13 @@ export default function Tickets() {
   const [selId, setSelId] = useState<number | null>(null);
   const [reply, setReply] = useState("");
   const [redirect, setRedirect] = useState<string | null>(null);
+  const [offer, setOffer] = useState<OfferDraft | null>(null);
+  const [sendingOffer, setSendingOffer] = useState(false);
+  const servers = useQuery({
+    queryKey: ["servers"],
+    queryFn: () => api.get<{ squads: Squad[] }>("/api/admin/servers"),
+    enabled: offer !== null,
+  });
 
   const channels = useQuery({
     queryKey: ["support-channels"],
@@ -100,6 +138,42 @@ export default function Tickets() {
 
   const d = detail.data;
 
+  function openOffer() {
+    setOffer({
+      name: "",
+      description: "",
+      device_limit: 3,
+      traffic_limit_gb: 0,
+      durations: [{ days: 30, price_minor: 0 }],
+      internal_squads: [],
+    });
+  }
+
+  async function sendOffer() {
+    if (!offer || selId === null) return;
+    const durations = offer.durations.filter((x) => x.price_minor > 0);
+    if (!offer.name.trim() || durations.length === 0) {
+      toast(t.premiumOfferNeedPrice);
+      return;
+    }
+    setSendingOffer(true);
+    try {
+      await api.post(`/api/admin/tickets/${selId}/premium-offer`, {
+        ...offer,
+        name: offer.name.trim(),
+        durations,
+      });
+      setOffer(null);
+      void qc.invalidateQueries({ queryKey: ["ticket", selId] });
+      void qc.invalidateQueries({ queryKey: ["tickets"] });
+      toast(t.premiumOfferSent);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setSendingOffer(false);
+    }
+  }
+
   return (
     <>
       <div className="page-head">
@@ -153,6 +227,7 @@ export default function Tickets() {
                 <span style={{ minWidth: 0 }}>
                   <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     <span className="mono dim">#{tk.id}</span>{" "}
+                    {tk.is_premium && <span className="cap-pill">💎 {t.premiumBadge}</span>}{" "}
                     {tk.username ? `@${tk.username}` : "—"} · {tk.subject}
                   </div>
                   <div className="dim" style={{ fontSize: 11.5 }}>
@@ -173,21 +248,41 @@ export default function Tickets() {
             <>
               <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
                 <span>
-                  <b className="mono">#{d.id}</b> · {d.subject}{" "}
+                  <b className="mono">#{d.id}</b> ·{" "}
+                  {d.is_premium && <span className="cap-pill">💎 {t.premiumBadge}</span>}{" "}
+                  {d.subject}{" "}
                   <span className={`st ${ST[d.status]?.[1] ?? "off"}`}>
                     {d.status === "open" ? t.openSt : d.status === "waiting" ? t.waitSt : t.closedSt}
                   </span>
                 </span>
-                {d.status !== "closed" ? (
-                  <button className="btn secondary sm" onClick={() => void setStatus("closed")}>
-                    {t.closeTicket}
+                <span className="row" style={{ gap: 6 }}>
+                  <button className="btn primary sm" onClick={openOffer}>
+                    {t.premiumOffer}
                   </button>
-                ) : (
-                  <button className="btn secondary sm" onClick={() => void setStatus("open")}>
-                    {t.reopenTicket}
-                  </button>
-                )}
+                  {d.status !== "closed" ? (
+                    <button className="btn secondary sm" onClick={() => void setStatus("closed")}>
+                      {t.closeTicket}
+                    </button>
+                  ) : (
+                    <button className="btn secondary sm" onClick={() => void setStatus("open")}>
+                      {t.reopenTicket}
+                    </button>
+                  )}
+                </span>
               </div>
+              {d.offers.length > 0 && (
+                <div className="dim" style={{ fontSize: 12, marginBottom: 10 }}>
+                  {t.premiumOffers}:{" "}
+                  {d.offers
+                    .map(
+                      (o) =>
+                        `${o.name} (${o.durations
+                          .map((x) => `${x.days} дн. — ${rub(x.price_minor)}`)
+                          .join(", ")})${o.is_active ? "" : " ✕"}`,
+                    )
+                    .join(" · ")}
+                </div>
+              )}
               <div className="grid" style={{ gap: 8, flex: 1, overflowY: "auto", marginBottom: 12 }}>
                 {d.messages.map((m) => (
                   <div
@@ -259,6 +354,133 @@ export default function Tickets() {
           )}
         </div>
       </div>
+
+      {offer && (
+        <Modal title={t.premiumOfferTitle} onClose={() => setOffer(null)}>
+          <div className="grid" style={{ gap: 12 }}>
+            <Field label={t.premiumOfferName}>
+              <input
+                className="input"
+                placeholder={t.premiumOfferNamePh}
+                value={offer.name}
+                onChange={(e) => setOffer({ ...offer, name: e.target.value })}
+              />
+            </Field>
+            <Field label={t.premiumOfferDesc}>
+              <input
+                className="input"
+                value={offer.description}
+                onChange={(e) => setOffer({ ...offer, description: e.target.value })}
+              />
+            </Field>
+            <div className="row" style={{ gap: 10 }}>
+              <Field label="Трафик ГБ (0=∞)">
+                <input
+                  className="input num"
+                  type="number"
+                  value={offer.traffic_limit_gb}
+                  onChange={(e) =>
+                    setOffer({ ...offer, traffic_limit_gb: Number(e.target.value) || 0 })
+                  }
+                />
+              </Field>
+              <Field label={t.devices}>
+                <input
+                  className="input num"
+                  type="number"
+                  value={offer.device_limit}
+                  onChange={(e) => setOffer({ ...offer, device_limit: Number(e.target.value) || 0 })}
+                />
+              </Field>
+            </div>
+            <div className="grid" style={{ gap: 4 }}>
+              <span className="caps">{t.premiumOfferSquads}</span>
+              <span className="dim" style={{ fontSize: 11.5 }}>
+                {t.premiumOfferSquadsHint}
+              </span>
+              {(servers.data?.squads ?? []).map((sq) => {
+                const on = offer.internal_squads.includes(sq.uuid);
+                return (
+                  <label key={sq.uuid} className="row" style={{ gap: 8, fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() =>
+                        setOffer({
+                          ...offer,
+                          internal_squads: on
+                            ? offer.internal_squads.filter((u) => u !== sq.uuid)
+                            : [...offer.internal_squads, sq.uuid],
+                        })
+                      }
+                    />
+                    {sq.name}
+                  </label>
+                );
+              })}
+            </div>
+            <span className="caps">{t.periods}</span>
+            {offer.durations.map((dur, i) => (
+              <div key={i} className="row">
+                <input
+                  className="input num"
+                  style={{ width: 90 }}
+                  type="number"
+                  value={dur.days}
+                  onChange={(e) =>
+                    setOffer({
+                      ...offer,
+                      durations: offer.durations.map((x, j) =>
+                        j === i ? { ...x, days: Number(e.target.value) || 1 } : x,
+                      ),
+                    })
+                  }
+                />
+                <span className="dim">{t.days}</span>
+                <input
+                  className="input num"
+                  style={{ width: 110 }}
+                  type="number"
+                  value={dur.price_minor / 100}
+                  onChange={(e) =>
+                    setOffer({
+                      ...offer,
+                      durations: offer.durations.map((x, j) =>
+                        j === i ? { ...x, price_minor: Math.round(Number(e.target.value) * 100) } : x,
+                      ),
+                    })
+                  }
+                />
+                <span className="dim">₽</span>
+                <button
+                  className="btn danger sm"
+                  onClick={() =>
+                    setOffer({ ...offer, durations: offer.durations.filter((_, j) => j !== i) })
+                  }
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <button
+              className="btn secondary sm"
+              onClick={() =>
+                setOffer({ ...offer, durations: [...offer.durations, nextDuration(offer.durations)] })
+              }
+            >
+              + {t.periods}
+            </button>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn secondary" onClick={() => setOffer(null)}>
+                {t.cancel}
+              </button>
+              <button className="btn primary" disabled={sendingOffer} onClick={() => void sendOffer()}>
+                {t.premiumOfferSend}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }

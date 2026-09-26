@@ -20,6 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from src.application.events import TicketOpened
+from src.application.services import premium
 from src.bot.banners import render_screen
 from src.bot.keyboards import simple_keyboard
 from src.bot.screen import ack
@@ -47,14 +48,21 @@ async def _append_ticket_message(
     text: str,
     attachment_url: str | None = None,
     attachment_kind: str | None = None,
-) -> tuple[int, bool]:
-    """Append to the user's open ticket (or open a new one). Returns (ticket_id, created)."""
+) -> tuple[int, bool, bool]:
+    """Append to the user's open ticket (or open a new one).
+
+    Returns (ticket_id, created, is_premium). A new ticket from a customer on a premium plan is
+    flagged premium: human-only and pinned to the top of the admin queue."""
     async with container.uow() as uow:
         tickets = await uow.tickets.list(user_id=db_user.id)
         active = next((t for t in tickets if t.status is not TicketStatus.CLOSED), None)
         created = False
         if active is None:
-            active = Ticket(user_id=db_user.id, subject=(text or "📎 Вложение")[:64])
+            active = Ticket(
+                user_id=db_user.id,
+                subject=(text or "📎 Вложение")[:64],
+                is_premium=await premium.user_on_premium_plan(uow, db_user),
+            )
             await uow.tickets.add(active)
             created = True
         await uow.ticket_messages.add(
@@ -69,7 +77,13 @@ async def _append_ticket_message(
         active.status = TicketStatus.OPEN
         active.updated_at = utcnow()  # same-status assign is not dirty -> force the bump
         await uow.commit()
-        return active.id, created
+        return active.id, created, active.is_premium
+
+
+async def _has_premium_ticket(container: AppContainer, user_id: int) -> bool:
+    """A premium request keeps its conversation in the bot whatever SUPPORT_MODE says."""
+    async with container.uow() as uow:
+        return await premium.active_ticket(uow, user_id, premium_only=True) is not None
 
 
 class TicketForm(StatesGroup):
@@ -137,12 +151,14 @@ async def user_message(
         cfg = container.bot_config
         mode = str(await cfg.value(uow, "SUPPORT_MODE"))
         support_chat = str(await cfg.value(uow, "SUPPORT_CHAT_ID") or "")
-    if mode != "tickets":
+    if mode != "tickets" and not await _has_premium_ticket(container, db_user.id):
         # Only the in-bot ticket mode consumes free text. Under bot/miniapp/redirect
         # act_support pointed the user elsewhere; creating a DB ticket nobody is watching
         # would silently orphan the message and contradict what we told them.
         return
-    ticket_id, created = await _append_ticket_message(container, db_user, text=text)
+    ticket_id, created, is_premium = await _append_ticket_message(
+        container, db_user, text=text
+    )
 
     if created:
         # Instant "tickets" report topic (screen 14) listens on the bus.
@@ -157,7 +173,8 @@ async def user_message(
         )
 
     # AI support: if enabled and no human is handling this ticket yet, answer or escalate.
-    if not await _maybe_ai_reply(message, container, db_user, ticket_id):
+    # Premium tickets are human-only — never auto-answered by the AI.
+    if is_premium or not await _maybe_ai_reply(message, container, db_user, ticket_id):
         if created:
             await message.answer(
                 f"🆗 Тикет <b>#{ticket_id}</b> создан — ответим здесь.", parse_mode="HTML"
@@ -219,7 +236,7 @@ async def user_media(
         cfg = container.bot_config
         mode = str(await cfg.value(uow, "SUPPORT_MODE"))
         support_chat = str(await cfg.value(uow, "SUPPORT_CHAT_ID") or "")
-    if mode != "tickets":
+    if mode != "tickets" and not await _has_premium_ticket(container, db_user.id):
         return
 
     attachment: tuple[str, str] | None = None
@@ -234,7 +251,7 @@ async def user_media(
 
     attachment_url, attachment_kind = attachment
     caption = (message.caption or "").strip()
-    ticket_id, created = await _append_ticket_message(
+    ticket_id, created, is_premium = await _append_ticket_message(
         container,
         db_user,
         text=caption,
@@ -255,7 +272,11 @@ async def user_media(
 
     # AI support only makes sense with actual text to read; an attachment-only message just
     # gets acknowledged (mirrors the text-only branch in user_message).
-    handled = bool(caption) and await _maybe_ai_reply(message, container, db_user, ticket_id)
+    handled = (
+        bool(caption)
+        and not is_premium
+        and await _maybe_ai_reply(message, container, db_user, ticket_id)
+    )
     if not handled:
         if created:
             await message.answer(

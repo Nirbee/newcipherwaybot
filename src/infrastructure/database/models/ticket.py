@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Enum, ForeignKey, String
+from sqlalchemy import Boolean, Enum, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.core.enums import TicketAuthor, TicketStatus
@@ -27,6 +27,9 @@ class Ticket(IntPk, TimestampMixin, Base):
         index=True,
     )
     closed_at: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+    # A premium-server request, or a ticket from a customer on a premium plan: human-only
+    # (no AI auto-reply) and pinned to the top of the admin queue.
+    is_premium: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     messages: Mapped[list[TicketMessage]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan", order_by="TicketMessage.id"

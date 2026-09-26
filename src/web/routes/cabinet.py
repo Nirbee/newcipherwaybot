@@ -32,6 +32,7 @@ from src.core.constants import MAX_DEPOSIT_AMOUNT_MINOR
 from src.core.enums import (
     Currency,
     Locale,
+    PlanCategory,
     PurchaseType,
     TransactionStatus,
     TransactionType,
@@ -251,7 +252,12 @@ async def _plan_items(container: AppContainer, user: User | None = None) -> list
     from src.application.dto.pricing import PurchaseRequest
 
     async with container.uow() as uow:
-        rows = [p for p in await uow.plans.list_with_durations() if p.is_active and not p.is_trial]
+        rows = [
+            p
+            for p in await uow.plans.list_with_durations()
+            # Personal premium offers are paid via their own link, never shown in a storefront.
+            if p.is_active and not p.is_trial and p.category is not PlanCategory.PREMIUM
+        ]
         stars_rate = int(await container.bot_config.value(uow, "STARS_RATE_RUB"))
         current_plan_id: int | None = None
         if user is not None and user.current_subscription_id:

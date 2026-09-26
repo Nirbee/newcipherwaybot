@@ -42,6 +42,7 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("nodes", "Статус серверов", "Server status"),
     MenuAction("proxy", "MTProto-прокси", "MTProto proxy"),
     MenuAction("support", "Поддержка", "Support"),
+    MenuAction("premium", "Премиум-сервер", "Premium server"),
     MenuAction("terms", "Пользовательское соглашение", "Terms of Service"),
     MenuAction("privacy", "Политика конфиденциальности", "Privacy Policy"),
     MenuAction("admin", "Администратор", "Admin panel"),

@@ -26,7 +26,13 @@ from src.bot.gate import ensure_channel
 from src.bot.keyboards import simple_keyboard
 from src.bot.screen import ack, show_screen
 from src.core.constants import MAX_DEPOSIT_AMOUNT_MINOR
-from src.core.enums import Currency, PurchaseType, TransactionStatus, TransactionType
+from src.core.enums import (
+    Currency,
+    PlanCategory,
+    PurchaseType,
+    TransactionStatus,
+    TransactionType,
+)
 from src.core.exceptions import (
     DomainError,
     InsufficientBalance,
@@ -67,7 +73,11 @@ async def show_plans(cb: CallbackQuery | Message, container: AppContainer, db_us
     if not await ensure_channel(cb, container, scope="buy"):  # channel-lock (#1)
         return
     async with container.uow() as uow:
-        plans = [p for p in await uow.plans.list_with_durations() if p.is_active and not p.is_trial]
+        plans = [
+            p
+            for p in await uow.plans.list_with_durations()
+            if p.is_active and not p.is_trial and p.category is not PlanCategory.PREMIUM
+        ]
     if not plans:
         await ack(cb, "Тарифы ещё не настроены", alert=True)
         return
@@ -120,12 +130,22 @@ async def show_durations(cb: CallbackQuery, container: AppContainer, db_user: Us
     if len(parts) < 2 or not parts[1].isdigit():  # crafted/stale payload — back to the menu
         await open_buy(cb, container, db_user)
         return
-    plan_id = int(parts[1])
+    await render_durations(cb, container, db_user, int(parts[1]))
+
+
+async def render_durations(
+    cb: CallbackQuery | Message, container: AppContainer, db_user: User, plan_id: int
+) -> None:
+    """The duration picker for one plan — from a ``plan:<id>`` button, or from a premium
+    invoice link (``/start plan_<id>``)."""
+    from src.application.services.premium import can_buy
+
     async with container.uow() as uow:
         plan = await uow.plans.get_with_durations(plan_id)
-    if plan is None or not plan.durations:
+    if plan is None or not plan.durations or not plan.is_active or not can_buy(plan, db_user):
         # Also lands here from «Продлить» when the subscription is a constructor one
         # (the hidden plan has no durations) — open_buy routes back to the constructor.
+        # A premium offer opened by anyone but its addressee lands here too.
         await open_buy(cb, container, db_user)
         return
     # Quote the discounted final per duration so the browse price equals the charge (#4) — the
@@ -156,7 +176,7 @@ async def show_durations(cb: CallbackQuery, container: AppContainer, db_user: Us
         "Выбери срок — чем длиннее, тем дешевле месяц.",
         simple_keyboard(rows),
     )
-    await cb.answer()
+    await ack(cb)
 
 
 async def _payment_methods(
