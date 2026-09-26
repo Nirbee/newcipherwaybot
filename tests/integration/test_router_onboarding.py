@@ -394,3 +394,38 @@ async def test_dashboard_period_revenue_split_and_delta(
     assert rev["orders"] == 2 and rev["payers"] == 1 and rev["avg_check_minor"] == 35000
     assert rev["series"][-1]["amount_minor"] == 50000
     assert body["routers"] == {"total": 0, "online": 0, "offline": 0, "pending": 0}
+
+
+async def test_short_install_code_serves_a_wrapper_and_dies_with_the_token(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """The technician types `curl -fsSL <base>/i/<code> | sh` instead of a 43-char token."""
+    http, container = client
+    await _router_plans(container)
+    auth = await _login(http)
+    body = await _create_qr_router(http, auth)
+    code = body["install_code"]
+    assert code and len(code) == 6
+    assert not set(code) & set("0O1IL")  # no look-alike symbols to misread off a phone
+
+    script = (await http.get(f"/i/{code.lower()}")).text  # case doesn't matter
+    assert "/api/agent/install.sh" in script
+    assert f"'{body['token']}'" in script
+    assert "</dev/null" in script
+
+    # the card keeps showing the same code while it is valid
+    detail = (await http.get(f"/api/admin/routers/{body['id']}", headers=auth)).json()
+    assert detail["install_code"] == code
+
+    # a new token gets a new code; the old code no longer hands out anything
+    rotated = (await http.post(f"/api/admin/routers/{body['id']}/rotate", headers=auth)).json()
+    assert rotated["install_code"] and rotated["install_code"] != code
+    stale = (await http.get(f"/i/{code}")).text
+    assert "exit 1" in stale and body["token"] not in stale
+    fresh = (await http.get(f"/i/{rotated['install_code']}")).text
+    assert f"'{rotated['token']}'" in fresh
+
+    # a revoked router's code stops working too
+    await http.post(f"/api/admin/routers/{body['id']}/revoke", headers=auth)
+    gone = (await http.get(f"/i/{rotated['install_code']}")).text
+    assert "exit 1" in gone and rotated["token"] not in gone

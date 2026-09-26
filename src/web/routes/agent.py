@@ -18,11 +18,12 @@ import datetime as dt
 import hashlib
 import json
 import re
+import secrets
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from src.application.services.router_config import (
@@ -39,6 +40,9 @@ from src.web.deps import get_container
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+# Short install links (/i/<code>) live at the site root so the command stays short enough
+# to type from a phone screen into the router's terminal.
+short_router = APIRouter(tags=["agent"])
 
 # A hair under the agent's 5-minute poll interval's floor — generous margin for a misbehaving
 # script or clock drift, never tight enough to bite a legitimately-timed poll.
@@ -65,6 +69,104 @@ def _agent_version() -> str:
 # Advertised on every /config reply; an agent seeing a different value fetches /agent.sh and
 # replaces itself — so a fix ships to the whole fleet with a deploy, no SSH to any router.
 _AGENT_VERSION = _agent_version()
+
+
+# --- short install codes ------------------------------------------------------------------
+# The full install command carries a 43-char token — technicians read it off a phone and retype
+# it into PowerShell, and typos broke installs. A short code (6 chars, no look-alike symbols)
+# maps to the token in redis for a day: `curl -fsSL <base>/i/K7PX2Q | sh`.
+INSTALL_CODE_TTL_SECONDS = 24 * 3600
+_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L
+_CODE_LEN = 6
+_CODE_LOOKUPS_PER_WINDOW = 30
+_CODE_LOOKUP_WINDOW_SECONDS = 600
+
+
+async def issue_install_code(container: AppContainer, device_id: int, token: str) -> str | None:
+    """New short code for this device's (fresh) token; the previous code stops working.
+    None when redis is unavailable — the UI then falls back to the long command."""
+    code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LEN))
+    try:
+        old = await _redis_get(container, f"agent:icdev:{device_id}")
+        if old:
+            await container.redis.delete(f"agent:ic:{old}")
+        await container.redis.set(
+            f"agent:ic:{code}", f"{device_id}:{token}", ex=INSTALL_CODE_TTL_SECONDS
+        )
+        await container.redis.set(f"agent:icdev:{device_id}", code, ex=INSTALL_CODE_TTL_SECONDS)
+    except Exception:
+        log.warning("agent: install code not stored", device_id=device_id)
+        return None
+    return code
+
+
+async def current_install_code(container: AppContainer, device_id: int) -> str | None:
+    code = await _redis_get(container, f"agent:icdev:{device_id}")
+    if code and await _redis_get(container, f"agent:ic:{code}"):
+        return code
+    return None
+
+
+async def drop_install_code(container: AppContainer, device_id: int) -> None:
+    try:
+        code = await _redis_get(container, f"agent:icdev:{device_id}")
+        if code:
+            await container.redis.delete(f"agent:ic:{code}")
+        await container.redis.delete(f"agent:icdev:{device_id}")
+    except Exception:
+        log.warning("agent: install code not dropped", device_id=device_id)
+
+
+def _sh_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _install_error(text: str) -> PlainTextResponse:
+    # Still a (tiny) shell script: the command pipes it into `sh`, so a plain 404 body would
+    # only produce curl's English error — this prints the reason in Russian instead.
+    return PlainTextResponse(f"#!/bin/sh\necho {_sh_quote('!!! ' + text)}\nexit 1\n")
+
+
+@short_router.get("/i/{code}", response_class=PlainTextResponse)
+async def short_install(
+    code: str, request: Request, container: AppContainer = Depends(get_container)
+) -> PlainTextResponse:
+    """`curl -fsSL <base>/i/<code> | sh` — a wrapper that downloads the full installer to a file
+    and runs it with the device token (stdin detached, so nothing in it can swallow the piped
+    script)."""
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (
+        request.client.host if request.client else "?"
+    )
+    try:
+        key = f"agent:ic:rl:{ip}"
+        hits = int(await container.redis.incr(key))
+        if hits == 1:
+            await container.redis.expire(key, _CODE_LOOKUP_WINDOW_SECONDS)
+    except Exception:
+        hits = 0
+    if hits > _CODE_LOOKUPS_PER_WINDOW:
+        return _install_error("Слишком много попыток. Подождите 10 минут и повторите.")
+    stored = await _redis_get(container, f"agent:ic:{code.strip().upper()}")
+    if not stored or ":" not in stored:
+        return _install_error(
+            "Код установки не найден или устарел (действует 24 часа). Откройте карточку роутера "
+            "в админке и возьмите новую команду."
+        )
+    _device_id, token = stored.split(":", 1)
+    async with container.uow() as uow:
+        device = await uow.router_devices.by_token_hash(_hash_token(token))
+    if device is None or device.status is RouterDeviceStatus.REVOKED:
+        return _install_error("Этот роутер удалён или отозван в админке — создайте его заново.")
+    base = (container.settings.web.public_url or "").strip().rstrip("/") or str(
+        request.base_url
+    ).rstrip("/")
+    return PlainTextResponse(
+        "#!/bin/sh\n"
+        "# CipherWay: установка агента на роутер (короткая ссылка)\n"
+        f"curl -fsSL {_sh_quote(base + '/api/agent/install.sh')} -o /tmp/cw-install.sh || "
+        "{ echo '!!! Не удалось скачать установщик — проверьте интернет на роутере'; exit 1; }\n"
+        f"sh /tmp/cw-install.sh {_sh_quote(token)} {_sh_quote(base)} </dev/null\n"
+    )
 
 
 def _hash_token(token: str) -> str:
@@ -164,9 +266,9 @@ async def whoami(
         owner = await uow.users.get(sub.user_id) if sub else None
     client = None
     if owner is not None:
-        client = (
-            f"@{owner.username}" if owner.username else owner.first_name or owner.email
-        ) or (str(owner.telegram_id) if owner.telegram_id else None)
+        client = (f"@{owner.username}" if owner.username else owner.first_name or owner.email) or (
+            str(owner.telegram_id) if owner.telegram_id else None
+        )
     return {"id": device.id, "label": device.label, "client": client}
 
 
@@ -248,9 +350,7 @@ async def heartbeat(
         fresh.last_seen_at = dt.datetime.now(dt.UTC)
         xray_running = body.get("xray_running")
         fresh.status = (
-            RouterDeviceStatus.OFFLINE
-            if xray_running is False
-            else RouterDeviceStatus.ONLINE
+            RouterDeviceStatus.OFFLINE if xray_running is False else RouterDeviceStatus.ONLINE
         )
         if body.get("xray_version") is not None:
             fresh.xray_version = str(body["xray_version"])[:32]

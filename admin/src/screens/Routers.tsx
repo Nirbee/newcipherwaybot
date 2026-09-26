@@ -4,6 +4,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { api, dtTime } from "../api/client";
 import { Drawer, Field, Modal, Seg, SecretInput } from "../components/ui";
@@ -47,34 +48,78 @@ type RouterDetail = RouterDevice & {
   available_hosts: AvailableHost[];
   subscription: SubSummary;
   claim_url: string | null;
+  install_code: string | null;
 };
 
 function QrImage({ text }: { text: string }) {
   const [src, setSrc] = useState("");
+  const [full, setFull] = useState(false);
   useEffect(() => {
-    QRCode.toDataURL(text, { margin: 1, width: 240 })
+    // Rendered large once; CSS scales it down — stays sharp when opened full-screen.
+    QRCode.toDataURL(text, { margin: 2, width: 720, errorCorrectionLevel: "M" })
       .then(setSrc)
       .catch(() => setSrc(""));
   }, [text]);
   if (!src) return null;
   return (
-    <img
-      src={src}
-      width={240}
-      height={240}
-      alt="QR"
-      style={{ background: "#fff", padding: 8, borderRadius: 8, alignSelf: "center" }}
-    />
+    <>
+      <button type="button" className="qr-box" onClick={() => setFull(true)}>
+        <img src={src} alt="QR-код для клиента" />
+        <span className="qr-hint">⤢ Нажмите — QR на весь экран</span>
+      </button>
+      {/* Portal: outside the Field's <label> (a click there re-fires the button and reopens
+          it) and outside the drawer's transformed box (which would clip position:fixed). */}
+      {full &&
+        createPortal(
+          <div className="qr-full" onClick={() => setFull(false)} role="dialog">
+            <img src={src} alt="QR-код для клиента" />
+            <div className="qr-full-note">
+              Клиент сканирует камерой телефона · нажмите, чтобы закрыть
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 
-function installCommand(token: string): string {
+/** Short install command: the 6-char code replaces the 43-char token the technician used to
+ *  retype from the phone (typos broke installs). Falls back to the long form without a code. */
+function installCommand(token: string, code?: string | null): string {
   const base = window.location.origin;
+  if (code) return `opkg update && opkg install curl && curl -fsSL ${base}/i/${code} | sh`;
   return (
     `opkg update && opkg install curl && curl -fsSL ${base}/api/agent/install.sh ` +
     `-o /tmp/cw-install.sh && sh /tmp/cw-install.sh ${token} ${base}`
   );
 }
+
+function InstallBlock({
+  code,
+  token,
+  onCopy,
+}: {
+  code: string | null;
+  token: string | null;
+  onCopy: (text: string) => void;
+}) {
+  const cmd = installCommand(token ?? "", code);
+  return (
+    <div className="install-block">
+      {/* No own onClick: it sits inside Field's <label>, so a tap already activates the copy
+          button below — a handler here would copy twice. */}
+      <code className="install-cmd">{cmd}</code>
+      <button className="btn primary install-copy" onClick={() => onCopy(cmd)}>
+        📋 Скопировать команду
+      </button>
+      <div className="dim install-note">
+        Вставьте целиком в SSH-подключение к роутеру.
+        {code && " Команда действует 24 часа — потом выпустите новую в карточке роутера."}
+      </div>
+    </div>
+  );
+}
+
 
 function DiagRow({ label, value, warn }: { label: string; value: string; warn?: string | null }) {
   return (
@@ -101,6 +146,7 @@ type CreateResp = {
   ok: boolean;
   id: number;
   token: string;
+  install_code: string | null;
   primary_host_uuid: string | null;
   backup_host_uuid: string | null;
   warning: string | null;
@@ -169,6 +215,7 @@ export default function Routers() {
   const [tokenModal, setTokenModal] = useState<{
     label: string;
     token: string;
+    code: string | null;
     warning: string | null;
     claimUrl: string | null;
   } | null>(null);
@@ -237,6 +284,7 @@ export default function Routers() {
       setTokenModal({
         label: finalLabel,
         token: r.token,
+        code: r.install_code,
         warning: r.warning,
         claimUrl: r.claim_url,
       });
@@ -281,8 +329,17 @@ export default function Routers() {
   async function rotate(d: RouterDevice) {
     if (!(await confirm(t.routersRotateConfirm))) return;
     try {
-      const r = await api.post<{ token: string }>(`/api/admin/routers/${d.id}/rotate`);
-      setTokenModal({ label: d.label, token: r.token, warning: null, claimUrl: null });
+      const r = await api.post<{ token: string; install_code: string | null }>(
+        `/api/admin/routers/${d.id}/rotate`,
+      );
+      void qc.invalidateQueries({ queryKey: ["routers", d.id] });
+      setTokenModal({
+        label: d.label,
+        token: r.token,
+        code: r.install_code,
+        warning: null,
+        claimUrl: null,
+      });
     } catch (e) {
       toast((e as Error).message);
     }
@@ -343,8 +400,12 @@ export default function Routers() {
   }
 
   async function copy(text: string) {
-    await navigator.clipboard.writeText(text);
-    toast(t.copied);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(t.copied);
+    } catch {
+      toast("Не удалось скопировать — выделите текст вручную");
+    }
   }
 
   const hostOptions = eligible.data?.items ?? [];
@@ -370,7 +431,7 @@ export default function Routers() {
         </div>
       </div>
 
-      <div className="tbl">
+      <div className="tbl rt-tbl">
         <div className="tr head" style={{ gridTemplateColumns: cols }}>
           <span>{t.routersLabel}</span>
           <span>{t.routersClient}</span>
@@ -387,7 +448,7 @@ export default function Routers() {
             style={{ gridTemplateColumns: cols, cursor: "pointer" }}
             onClick={() => setOpenId(d.id)}
           >
-            <span>
+            <span className="rt-label">
               <b style={{ fontWeight: 500 }}>{d.label}</b>
               {d.note && (
                 <div className="dim" style={{ fontSize: 11.5 }}>
@@ -395,10 +456,12 @@ export default function Routers() {
                 </div>
               )}
             </span>
-            <span className="mono muted">
+            <span className="mono muted rt-client">
               {d.awaiting_claim ? t.routersAwaitingQr : (d.subscription_label ?? `#${d.subscription_id}`)}
             </span>
-            <span className={`st ${d.is_online ? "on" : d.status === "pending" ? "mid" : "off"}`}>
+            <span
+              className={`rt-status st ${d.is_online ? "on" : d.status === "pending" ? "mid" : "off"}`}
+            >
               {d.is_online && <span className="status-dot" />}
               {d.status === "pending"
                 ? t.routersStPending
@@ -408,8 +471,10 @@ export default function Routers() {
                     ? t.routersStOnline
                     : t.routersStOffline}
             </span>
-            <span className="cap-pill">{d.mode === "auto" ? t.routersModeAuto : t.routersModeForce}</span>
-            <span className="mono" style={{ fontSize: 11.5 }}>
+            <span className="cap-pill rt-mode">
+              {d.mode === "auto" ? t.routersModeAuto : t.routersModeForce}
+            </span>
+            <span className="mono rt-hosts" style={{ fontSize: 11.5 }}>
               {hostLabel(hostOptions, d.primary_host_uuid)}
               {d.backup_host_uuid && (
                 <div className="dim">+ {hostLabel(hostOptions, d.backup_host_uuid)}</div>
@@ -420,8 +485,10 @@ export default function Routers() {
                 </div>
               )}
             </span>
-            <span className="mono muted">{d.last_seen_at ? dtTime(d.last_seen_at) : "—"}</span>
-            <span className="row" style={{ gap: 4 }} onClick={(e) => e.stopPropagation()}>
+            <span className="mono muted rt-seen">
+              {d.last_seen_at ? dtTime(d.last_seen_at) : "—"}
+            </span>
+            <span className="row rt-actions" style={{ gap: 4 }} onClick={(e) => e.stopPropagation()}>
               <button className="btn secondary sm" onClick={() => void rotate(d)}>
                 {t.routersRotate}
               </button>
@@ -573,7 +640,7 @@ export default function Routers() {
               <Field label={t.routersClaimTitle}>
                 <div className="grid" style={{ gap: 8 }}>
                   <QrImage text={tokenModal.claimUrl} />
-                  <div className="dim" style={{ fontSize: 12 }}>
+                  <div className="dim" style={{ fontSize: 12.5 }}>
                     {t.routersClaimHint}
                   </div>
                   <div className="row">
@@ -597,24 +664,11 @@ export default function Routers() {
               {t.routersTokenHint}
             </div>
             <Field label={t.routersInstallCmd}>
-              <div className="grid" style={{ gap: 6 }}>
-                <textarea
-                  className="input mono"
-                  readOnly
-                  rows={4}
-                  style={{ fontSize: 11.5, resize: "none" }}
-                  value={installCommand(tokenModal.token)}
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-                <div className="row" style={{ justifyContent: "flex-end" }}>
-                  <button
-                    className="btn secondary sm"
-                    onClick={() => void copy(installCommand(tokenModal.token))}
-                  >
-                    {t.copy}
-                  </button>
-                </div>
-              </div>
+              <InstallBlock
+                code={tokenModal.code}
+                token={tokenModal.token}
+                onCopy={(text) => void copy(text)}
+              />
             </Field>
             <Field label={t.routersToken}>
               <div className="row">
@@ -630,7 +684,7 @@ export default function Routers() {
               </div>
             )}
             <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button className="btn primary" onClick={() => setTokenModal(null)}>
+              <button className="btn secondary" onClick={() => setTokenModal(null)}>
                 {t.close}
               </button>
             </div>
@@ -773,10 +827,36 @@ export default function Routers() {
                 <Field label={t.routersClaimTitle}>
                   <div className="grid" style={{ gap: 8 }}>
                     <QrImage text={detail.data.claim_url} />
-                    <div className="dim" style={{ fontSize: 12 }}>
+                    <div className="dim" style={{ fontSize: 12.5 }}>
                       {t.routersClaimHint}
                     </div>
                   </div>
+                </Field>
+              )}
+              {(detail.data.install_code || !detail.data.last_seen_at) && (
+                <Field label={t.routersInstallCmd}>
+                  {detail.data.install_code ? (
+                    <InstallBlock
+                      code={detail.data.install_code}
+                      token={null}
+                      onCopy={(text) => void copy(text)}
+                    />
+                  ) : (
+                    <div className="grid" style={{ gap: 8 }}>
+                      <span className="dim" style={{ fontSize: 12.5 }}>
+                        Код установки истёк (действует 24 часа после выдачи). Выпустите новый — старый
+                        токен на роутере перестанет работать, поэтому делайте это только для
+                        установки или переустановки.
+                      </span>
+                      <button
+                        className="btn secondary"
+                        style={{ justifySelf: "start" }}
+                        onClick={() => void rotate(detail.data!)}
+                      >
+                        🔑 Новый код установки
+                      </button>
+                    </div>
+                  )}
                 </Field>
               )}
               <Field label={t.routersNote}>
@@ -915,6 +995,13 @@ export default function Routers() {
                   </span>
                 )}
               </Field>
+              {!detail.data.install_code && detail.data.last_seen_at && (
+                <Field label="Переустановка">
+                  <button className="btn secondary sm" onClick={() => void rotate(detail.data!)}>
+                    🔑 Новая команда установки
+                  </button>
+                </Field>
+              )}
               {detail.data.install_report && (
                 <Field label={t.routersInstallReport}>
                   <pre

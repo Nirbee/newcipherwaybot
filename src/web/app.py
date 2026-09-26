@@ -170,6 +170,7 @@ def create_app() -> FastAPI:
     app.include_router(cabinet_auth.router)
     app.include_router(cabinet_link.router)
     app.include_router(agent.router)
+    app.include_router(agent.short_router)
 
     @app.get("/dl", response_class=HTMLResponse)
     async def _deep_link_redirect(to: str, request: Request) -> HTMLResponse:

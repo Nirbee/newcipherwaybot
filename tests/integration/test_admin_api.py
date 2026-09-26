@@ -79,6 +79,16 @@ class _FakeRedis:
     async def get(self, key: str) -> str | None:
         return self.store.get(key)
 
+    async def delete(self, *keys: str) -> int:
+        return sum(1 for k in keys if self.store.pop(k, None) is not None)
+
+    async def incr(self, key: str) -> int:
+        self.store[key] = str(int(self.store.get(key, "0")) + 1)
+        return int(self.store[key])
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        return key in self.store
+
     async def aclose(self) -> None: ...
 
 

@@ -36,6 +36,11 @@ from src.infrastructure.di import AppContainer
 from src.web.deps import get_container
 from src.web.routes.admin._common import OkOut, audit, iso
 from src.web.routes.admin.deps import AdminIdentity, require_admin
+from src.web.routes.agent import (
+    current_install_code,
+    drop_install_code,
+    issue_install_code,
+)
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/routers")
@@ -258,9 +263,7 @@ async def create_device(
                         days=await _trial_days(container, uow),
                     )
                 if customer.telegram_id:
-                    text = onboarding.attached_text(
-                        label, sub, await _bot_username(container, uow)
-                    )
+                    text = onboarding.attached_text(label, sub, await _bot_username(container, uow))
                     notify = (customer.telegram_id, text)
             else:
                 placeholder = await onboarding.new_placeholder_customer(uow, label=label)
@@ -310,6 +313,7 @@ async def create_device(
 
     if notify is not None:
         await container.notifier.notify_user(*notify)
+    install_code = await issue_install_code(container, device.id, token)
     warning = None
     if primary is None:
         warning = (
@@ -320,6 +324,7 @@ async def create_device(
         "ok": True,
         "id": device.id,
         "token": token,
+        "install_code": install_code,
         "primary_host_uuid": primary,
         "backup_host_uuid": backup,
         "warning": warning,
@@ -477,6 +482,9 @@ async def get_device(
     except Exception:
         hosts = []
     detail = _row(device, label)
+    # The short install command stays available from the card for its 24h lifetime, so a
+    # technician who closed the token window can still read it off the phone.
+    detail["install_code"] = await current_install_code(container, device.id)
     detail["install_report"] = device.install_report
     detail["diagnostics"] = device.diagnostics
     detail["subscription"] = summary
@@ -523,7 +531,10 @@ async def patch_device(
         if body.note is not None:
             device.note = body.note.strip() or None
         await audit(
-            uow, identity, "routers.patch", f"router:{device.id}",
+            uow,
+            identity,
+            "routers.patch",
+            f"router:{device.id}",
             **body.model_dump(exclude_none=True),
         )
         await uow.commit()
@@ -545,7 +556,11 @@ async def rotate_token(
         device.token_hash = hashlib.sha256(token.encode()).hexdigest()
         await audit(uow, identity, "routers.rotate", f"router:{device.id}")
         await uow.commit()
-    return {"ok": True, "token": token}
+    return {
+        "ok": True,
+        "token": token,
+        "install_code": await issue_install_code(container, device_id, token),
+    }
 
 
 @router.post("/{device_id}/revoke")
@@ -564,6 +579,7 @@ async def revoke_device(
         device.status = RouterDeviceStatus.REVOKED
         await audit(uow, identity, "routers.revoke", f"router:{device.id}")
         await uow.commit()
+    await drop_install_code(container, device_id)
     return OkOut()
 
 
@@ -580,4 +596,5 @@ async def delete_device(
         await audit(uow, identity, "routers.delete", f"router:{device.id}")
         await uow.router_devices.delete(device)
         await uow.commit()
+    await drop_install_code(container, device_id)
     return OkOut()

@@ -1340,3 +1340,188 @@ hr.sep {
     animation: none;
   }
 }
+
+/* routers: QR for the customer's camera */
+.qr-box {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+  color: var(--muted);
+  font: 500 12px/1.2 "Golos Text", sans-serif;
+}
+.qr-box img {
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  background: #fff;
+  padding: 10px;
+  border-radius: 12px;
+  image-rendering: pixelated;
+}
+.qr-full {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: #fff;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 18px;
+  padding: 16px;
+  cursor: zoom-out;
+  animation: fadeIn 0.15s;
+}
+.qr-full img {
+  width: min(92vw, 78vh);
+  aspect-ratio: 1;
+  image-rendering: pixelated;
+}
+.qr-full-note {
+  color: #333;
+  font: 500 15px/1.35 "Golos Text", sans-serif;
+  text-align: center;
+  max-width: 420px;
+}
+
+/* routers: install command */
+.install-block {
+  display: grid;
+  gap: 10px;
+}
+.install-cmd {
+  display: block;
+  font: 500 14px/1.55 "JetBrains Mono", ui-monospace, monospace;
+  word-break: break-all;
+  white-space: pre-wrap;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  color: var(--text);
+  cursor: copy;
+  user-select: all;
+}
+.install-copy {
+  justify-content: center;
+  min-height: 42px;
+}
+.install-note {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* ---------- phones: bottom-sheet modals, full-width drawers, card rows ---------- */
+@media (max-width: 700px) {
+  .overlay {
+    place-items: end center;
+  }
+  .modal {
+    width: 100vw;
+    max-height: 92vh;
+    border-radius: 18px 18px 0 0;
+    border-bottom: 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+    animation: sheetUp 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .drawer {
+    width: 100vw;
+    border-left: 0;
+    padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  /* 16px stops iOS Safari zooming into a focused field */
+  .input,
+  select.input,
+  textarea.input {
+    font-size: 16px;
+  }
+  .page-head .actions {
+    margin-left: 0;
+    width: 100%;
+  }
+  .page-head .actions .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  /* routers list: each device becomes a card */
+  .rt-tbl .tr.head {
+    display: none;
+  }
+  .rt-tbl .tr {
+    grid-template-columns: 1fr auto !important;
+    grid-template-areas:
+      "label status"
+      "client client"
+      "hosts hosts"
+      "actions actions";
+    gap: 6px 12px;
+    padding: 14px;
+  }
+  .rt-label {
+    grid-area: label;
+    font-size: 15px;
+  }
+  .rt-status {
+    grid-area: status;
+  }
+  .rt-client {
+    grid-area: client;
+  }
+  .rt-hosts {
+    grid-area: hosts;
+  }
+  .rt-mode,
+  .rt-seen {
+    display: none;
+  }
+  .rt-actions {
+    grid-area: actions;
+    margin-top: 4px;
+  }
+  .rt-actions .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+    min-height: 36px;
+  }
+}
+@keyframes sheetUp {
+  from {
+    transform: translateY(40px);
+    opacity: 0;
+  }
+}
+
+/* drawer close bar (sticky, always reachable) */
+.drawer-bar {
+  position: sticky;
+  top: -20px;
+  z-index: 5;
+  display: flex;
+  justify-content: flex-end;
+  margin: -20px -20px 6px;
+  padding: 10px 12px 4px;
+  background: linear-gradient(var(--panel) 70%, transparent);
+}
+.drawer-close {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--pill);
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+}
+.drawer-close:hover {
+  background: var(--hover);
+}
+@media (max-width: 700px) {
+  .drawer-bar {
+    top: -16px;
+    margin: -16px -16px 6px;
+  }
+}

@@ -183,7 +183,15 @@ export function Drawer({ onClose, children }: { onClose: () => void; children: R
   return (
     <>
       <div className="drawer-overlay" onClick={onClose} />
-      <div className="drawer">{children}</div>
+      <div className="drawer">
+        {/* On a phone the drawer covers the whole screen — there is no outside to tap. */}
+        <div className="drawer-bar">
+          <button className="drawer-close" aria-label="Закрыть" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
     </>
   );
 }
