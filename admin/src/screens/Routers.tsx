@@ -1044,8 +1044,13 @@ export default function Routers() {
                   <div className="grid" style={{ gap: 6, fontSize: 13 }}>
                     {(() => {
                       const d = detail.data.diagnostics;
+                      // Spoofing = no address in common. Same set in another order (or a CDN
+                      // rotating part of its pool) is normal and must not raise a warning.
+                      const routerIps = new Set((d.dns_router ?? "").split(/\s+/).filter(Boolean));
                       const dnsMismatch =
-                        d.dns_router && d.dns_1111 && d.dns_router !== d.dns_1111
+                        routerIps.size > 0 &&
+                        d.dns_1111 &&
+                        !d.dns_1111.split(/\s+/).some((ip) => routerIps.has(ip))
                           ? t.routersDiagDnsMismatch
                           : null;
                       return (
