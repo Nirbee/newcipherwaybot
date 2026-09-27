@@ -73,6 +73,7 @@ type RouterDetail = RouterDevice & {
   claim_url: string | null;
   install_code: string | null;
   config_info: ConfigInfo;
+  recommended_xray: string;
 };
 
 function QrImage({ text }: { text: string }) {
@@ -1006,6 +1007,13 @@ export default function Routers() {
                   <span className="muted">{t.routersXrayVer}</span>
                   <span className="mono">{detail.data.xray_version ?? "—"}</span>
                 </div>
+                {detail.data.xray_version &&
+                  !detail.data.xray_version.startsWith(detail.data.recommended_xray.replace(/^v/, "")) && (
+                    <div style={{ color: "var(--warn)", fontSize: 12 }}>
+                      ⚠️ На нодах Xray {detail.data.recommended_xray.replace(/^v/, "")} — на роутере другая
+                      версия. Повторный запуск команды установки заменит Xray на версию нод.
+                    </div>
+                  )}
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span className="muted">{t.routersActiveOutbound}</span>
                   {/* The agent doesn't report which candidate the router's leastPing balancer

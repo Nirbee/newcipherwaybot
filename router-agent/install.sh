@@ -14,6 +14,7 @@ set -u
 
 INSTALLER_VERSION="2"
 XKEEN_VERSION="2.0"
+XRAY_VERSION="v26.7.28"   # the server may override: the version the VPN nodes run
 AGENT_DIR="/opt/etc/cipherway-agent"
 CONFDIR="/opt/etc/xray/configs"
 LOG="/opt/var/log/cipherway-install.log"
@@ -100,7 +101,9 @@ say "Проверка токена"
 code="$(curl -sS -m 20 -o /tmp/cw-whoami.json -w '%{http_code}' \
     -H "Authorization: Bearer $TOKEN" "$API_BASE/api/agent/whoami" 2>>"$LOG" || echo 000)"
 case "$code" in
-    200) ok token "роутер «$(jq -r '.label // "?"' /tmp/cw-whoami.json)», клиент $(jq -r '.client // "?"' /tmp/cw-whoami.json)" ;;
+    200) server_xray="$(jq -r '.xray_version // empty' /tmp/cw-whoami.json 2>/dev/null)"
+         [ -n "$server_xray" ] && XRAY_VERSION="$server_xray"
+         ok token "роутер «$(jq -r '.label // "?"' /tmp/cw-whoami.json)», клиент $(jq -r '.client // "?"' /tmp/cw-whoami.json)" ;;
     401|403) fail token "Сервер не принял токен (HTTP $code). Скопируйте команду из админки заново или выпустите новый токен." ;;
     *) fail token "Сервер $API_BASE недоступен (HTTP $code). Проверьте интернет на роутере." ;;
 esac
@@ -140,7 +143,8 @@ xkeen_answer() {
         *"Выберите минуту"*) echo 0 ;;
         *"Выберите день"*) echo 0 ;;                         # no geo-file auto-update schedule
         *"ядро проксирования"*) echo 1 ;;                     # Xray
-        *"порядковый номер релиза"*) echo 1 ;;                # newest Xray
+        *"Введите версию Xray"*) echo "$XRAY_VERSION" ;;     # same core as the VPN nodes
+        *"порядковый номер релиза"*) echo 9 ;;                # 9 = type the version
         *"номера действий через пробел"*) echo 0 ;;           # GeoSite/GeoIP: skip
         *"автообновления"*) echo 0 ;;
         *"российские IP-адреса"*) echo 1 ;;
@@ -153,12 +157,21 @@ xkeen_answer() {
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'; }
 
+# Hard failure on a fresh install; with XK_SOFT=1 (only swapping the Xray core on a working
+# router) a warning, and the router keeps the core it has.
+xk_fail() {
+    if [ "${XK_SOFT:-0}" = "1" ]; then warn "$1"; else fail xkeen "$1"; fi
+}
+
 run_xkeen_install() {
+    # $@ = xkeen arguments (-i full install, -ux Xray core only)
     fifo="/tmp/cw-xkeen.in"
     rm -f "$fifo"
-    mkfifo "$fifo" || fail xkeen "Не удалось создать канал для ответов установщику XKeen."
+    mkfifo "$fifo" || { xk_fail "Не удалось создать канал для ответов установщику XKeen."; return 1; }
     : > "$XK_LOG"
-    autoinstall_mode=true xkeen -i < "$fifo" > "$XK_LOG" 2>&1 &
+    # No autoinstall_mode: it would take the newest Xray; the release question is answered
+    # with the pinned version instead.
+    xkeen "$@" < "$fifo" > "$XK_LOG" 2>&1 &
     xk_pid=$!
     exec 3> "$fifo"      # keeps the channel open: XKeen waits for an answer instead of EOF
 
@@ -184,14 +197,14 @@ run_xkeen_install() {
                 kill "$xk_pid" 2>/dev/null
                 exec 3>&-
                 tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
-                fail xkeen "XKeen не принял ответ установщика на вопрос «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v "$XK_NOISE" | tail -n 2 | tr '\n' ' ')». Подробности отправлены в админ-панель."
+                xk_fail "XKeen не принял ответ установщика на вопрос «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v "$XK_NOISE" | tail -n 2 | tr '\n' ' ')». Подробности отправлены в админ-панель."; return 1
             fi
             ans="$(xkeen_answer "$ctx")"
             if [ -z "$ans" ] || [ "$answers" -ge 20 ]; then
                 kill "$xk_pid" 2>/dev/null
                 exec 3>&-
                 printf '%s\n' "$ctx" >> "$LOG"
-                fail xkeen "XKeen задал вопрос, на который у установщика нет ответа: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')». Текст вопроса отправлен в админ-панель."
+                xk_fail "XKeen задал вопрос, на который у установщика нет ответа: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')». Текст вопроса отправлен в админ-панель."; return 1
             fi
             echo "$ans" >&3
             answers=$((answers + 1))
@@ -205,13 +218,13 @@ run_xkeen_install() {
             kill "$xk_pid" 2>/dev/null
             exec 3>&-
             tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
-            fail xkeen "XKeen не принял ответ установщика (изменились вопросы). Подробности отправлены в админ-панель."
+            xk_fail "XKeen не принял ответ установщика (изменились вопросы). Подробности отправлены в админ-панель."; return 1
         fi
         if [ "$waited" -ge 1200 ]; then
             kill "$xk_pid" 2>/dev/null
             exec 3>&-
             tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
-            fail xkeen "Установка XKeen идёт больше 20 минут — прерываю. Подробности отправлены в админ-панель."
+            xk_fail "Установка XKeen идёт больше 20 минут — прерываю. Подробности отправлены в админ-панель."; return 1
         fi
     done
     exec 3>&-
@@ -221,7 +234,20 @@ run_xkeen_install() {
 
 if command -v xkeen >/dev/null 2>&1 && [ -x /opt/sbin/xray ] && [ -f /opt/etc/init.d/S05xkeen ]; then
     say "XKeen уже установлен — пропускаю установку"
-    ok xkeen "уже был"
+    cur_xray="$(/opt/sbin/xray version 2>/dev/null | head -n 1 | awk '{print $2}')"
+    if [ -n "$cur_xray" ] && [ "v${cur_xray#v}" != "$XRAY_VERSION" ]; then
+        say "Xray на роутере $cur_xray, на серверах ${XRAY_VERSION#v} — ставлю ту же версию"
+        XK_SOFT=1
+        if run_xkeen_install -ux && [ "v$(/opt/sbin/xray version 2>/dev/null | head -n 1 | awk '{print $2}')" = "$XRAY_VERSION" ]; then
+            ok xkeen "уже был; Xray заменён на $XRAY_VERSION"
+        else
+            warn "Xray остался версии $cur_xray — замена не удалась, подробности в админке"
+            ok xkeen "уже был (Xray $cur_xray)"
+        fi
+        XK_SOFT=0
+    else
+        ok xkeen "уже был"
+    fi
 else
     say "Установка XKeen $XKEEN_VERSION и Xray (несколько минут, ход установки ниже)"
     cd /tmp || true
@@ -236,12 +262,12 @@ else
     sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION" >> "$LOG" 2>&1 </dev/null \
         || fail xkeen "Не удалось скачать XKeen $XKEEN_VERSION (GitHub недоступен у этого провайдера). Подробности: $LOG"
 
-    run_xkeen_install
+    run_xkeen_install -i
 
     if [ ! -x /opt/sbin/xray ] || [ ! -f /opt/etc/init.d/S05xkeen ]; then
         fail xkeen "XKeen установился не полностью (нет /opt/sbin/xray или S05xkeen) — скорее всего, не скачался Xray. Подробности отправлены в админ-панель."
     fi
-    ok xkeen "XKeen $XKEEN_VERSION и Xray установлены"
+    ok xkeen "XKeen $XKEEN_VERSION и Xray $XRAY_VERSION установлены"
 fi
 
 # --- 4. baseline XKeen settings --------------------------------------------------------

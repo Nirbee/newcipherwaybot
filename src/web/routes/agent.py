@@ -75,6 +75,12 @@ def _agent_version() -> str:
 _AGENT_VERSION = _agent_version()
 
 
+# Xray the installer puts on a router: the version the Remnawave nodes run, not whatever is
+# newest. A field router on a fresh release failed while an otherwise identical one on the
+# nodes' version worked — client and server cores are kept in step deliberately.
+ROUTER_XRAY_VERSION = "v26.7.28"
+
+
 # --- short install codes ------------------------------------------------------------------
 # The full install command carries a 43-char token — technicians read it off a phone and retype
 # it into PowerShell, and typos broke installs. A short code (6 chars, no look-alike symbols)
@@ -384,7 +390,12 @@ async def whoami(
         client = (f"@{owner.username}" if owner.username else owner.first_name or owner.email) or (
             str(owner.telegram_id) if owner.telegram_id else None
         )
-    return {"id": device.id, "label": device.label, "client": client}
+    return {
+        "id": device.id,
+        "label": device.label,
+        "client": client,
+        "xray_version": ROUTER_XRAY_VERSION,
+    }
 
 
 @router.get("/config")
