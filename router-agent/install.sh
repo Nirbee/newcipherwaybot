@@ -12,11 +12,13 @@
 
 set -u
 
-INSTALLER_VERSION="1"
+INSTALLER_VERSION="2"
 XKEEN_VERSION="2.0"
 AGENT_DIR="/opt/etc/cipherway-agent"
 CONFDIR="/opt/etc/xray/configs"
 LOG="/opt/var/log/cipherway-install.log"
+XK_LOG="/opt/var/log/cipherway-xkeen.log"
+XK_NOISE="Некорректн"   # XKeen's «invalid input» line
 MIN_FREE_MB=60
 
 TOKEN="${1:-}"
@@ -44,6 +46,8 @@ fail() {
 report() {
     command -v jq >/dev/null 2>&1 || return 0
     command -v curl >/dev/null 2>&1 || return 0
+    # XKeen's «invalid input» spam filtered out, so the tail shows what actually happened.
+    log_tail="$(grep -v "$XK_NOISE" "$LOG" 2>/dev/null | tail -n 60)"
     body="$(jq -n \
         --arg installer_version "$INSTALLER_VERSION" \
         --arg xkeen_version "$XKEEN_VERSION" \
@@ -51,7 +55,7 @@ report() {
         --arg failed "$FAILED" \
         --arg arch "$(opkg print-architecture 2>/dev/null | awk '/aarch64|mips|arm/ {print $2}' | tr '\n' ' ')" \
         --arg opt_device "$(mount | awk '$3 == "/opt" {print $1}')" \
-        --arg log_tail "$(tail -n 40 "$LOG" 2>/dev/null)" \
+        --arg log_tail "$log_tail" \
         '{installer_version: $installer_version, xkeen_version: $xkeen_version,
           steps: $steps, failed: $failed, arch: $arch, opt_device: $opt_device,
           log_tail: $log_tail}')"
@@ -103,45 +107,139 @@ esac
 
 # --- 3. XKeen + Xray -------------------------------------------------------------------
 
+GH_MIRROR="$API_BASE/gh"
+
+# Some ISPs freeze connections to GitHub after ~16 KB — XKeen and Xray then never finish
+# downloading. If our server passes a large download fine, XKeen's own «gh_proxy» setting is
+# pointed at the server's GitHub mirror (top-level key: XKeen refuses to start when an «xkeen»
+# section has no policies).
+use_mirror=0
+big="$(curl -sS -m 25 -H "Authorization: Bearer $TOKEN" -o /dev/null -w '%{http_code} %{size_download}' \
+    "$API_BASE/api/agent/probe" 2>>"$LOG" || true)"
+if [ "${big%% *}" = "200" ] && [ "${big#* }" -ge 200000 ] 2>/dev/null; then
+    use_mirror=1
+    xk_cfg="/opt/etc/xkeen/xkeen.json"
+    mkdir -p /opt/etc/xkeen
+    if [ ! -s "$xk_cfg" ]; then
+        printf '{\n  "gh_proxy": "%s"\n}\n' "$GH_MIRROR" > "$xk_cfg"
+    elif ! grep -q '"gh_proxy"' "$xk_cfg"; then
+        jq --arg u "$GH_MIRROR" '. + {gh_proxy: $u}' "$xk_cfg" > "$xk_cfg.tmp" 2>>"$LOG" \
+            && mv "$xk_cfg.tmp" "$xk_cfg"
+    fi
+    echo "GitHub mirror: $GH_MIRROR" >> "$LOG"
+else
+    warn "большая загрузка с сервера не прошла (${big:-нет ответа}) — XKeen будет качать с GitHub напрямую"
+fi
+
+# Answer for one XKeen question, chosen by its text ($1 = XKeen's output since the previous
+# answer). Nothing = a question this installer doesn't know -> stop and report it, instead of
+# the old fixed answer list running out and XKeen printing «Некорректный ввод» forever.
+xkeen_answer() {
+    case "$1" in
+        *"Выберите час"*) echo 4 ;;
+        *"Выберите минуту"*) echo 0 ;;
+        *"Выберите день"*) echo 0 ;;                         # no geo-file auto-update schedule
+        *"ядро проксирования"*) echo 1 ;;                     # Xray
+        *"порядковый номер релиза"*) echo 1 ;;                # newest Xray
+        *"номера действий через пробел"*) echo 0 ;;           # GeoSite/GeoIP: skip
+        *"автообновления"*) echo 0 ;;
+        *"российские IP-адреса"*) echo 1 ;;
+        *"автозагрузку"*) echo 1 ;;                            # start XKeen on boot
+        *"IPv6"*) echo 0 ;;                                    # leave IPv6 as it is
+        *"Продолжить установку"*) echo 1 ;;
+        *) ;;
+    esac
+}
+
+strip_ansi() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'; }
+
+run_xkeen_install() {
+    fifo="/tmp/cw-xkeen.in"
+    rm -f "$fifo"
+    mkfifo "$fifo" || fail xkeen "Не удалось создать канал для ответов установщику XKeen."
+    : > "$XK_LOG"
+    autoinstall_mode=true xkeen -i < "$fifo" > "$XK_LOG" 2>&1 &
+    xk_pid=$!
+    exec 3> "$fifo"      # keeps the channel open: XKeen waits for an answer instead of EOF
+
+    waited=0; stable=0; last_size=-1; answered_at=0; answers=0
+    while kill -0 "$xk_pid" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+        size="$(wc -c < "$XK_LOG" 2>/dev/null || echo 0)"
+        if [ "$size" = "$last_size" ]; then stable=$((stable + 1)); else stable=0; last_size="$size"; fi
+
+        if [ $((waited % 15)) -eq 0 ]; then
+            printf '    … %s с: %s\n' "$waited" \
+                "$(strip_ansi < "$XK_LOG" | grep -v '^[[:space:]]*$' | tail -n 1)"
+        fi
+
+        # XKeen is waiting at a question: output ends in ": " and stopped growing.
+        if [ "$stable" -ge 2 ] && [ "$size" != "$answered_at" ] \
+            && [ "$(tail -c 2 "$XK_LOG" 2>/dev/null)" = ": " ]; then
+            ctx="$(tail -c +$((answered_at + 1)) "$XK_LOG" | strip_ansi | tail -n 25)"
+            # The question came back with «Некорректный ввод»: XKeen rejected our answer
+            # (its menu changed). Stop now rather than answering the same thing forever.
+            if [ "$answers" -gt 0 ] && printf '%s' "$ctx" | grep -q "$XK_NOISE"; then
+                kill "$xk_pid" 2>/dev/null
+                exec 3>&-
+                tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
+                fail xkeen "XKeen не принял ответ установщика на вопрос «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v "$XK_NOISE" | tail -n 2 | tr '\n' ' ')». Подробности отправлены в админ-панель."
+            fi
+            ans="$(xkeen_answer "$ctx")"
+            if [ -z "$ans" ] || [ "$answers" -ge 20 ]; then
+                kill "$xk_pid" 2>/dev/null
+                exec 3>&-
+                printf '%s\n' "$ctx" >> "$LOG"
+                fail xkeen "XKeen задал вопрос, на который у установщика нет ответа: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')». Текст вопроса отправлен в админ-панель."
+            fi
+            echo "$ans" >&3
+            answers=$((answers + 1))
+            answered_at="$size"
+            printf '    %s → %s\n' "$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v ': $' | tail -n 1)" "$ans"
+            echo ">>> answer: $ans" >> "$LOG"
+        fi
+
+        # XKeen rejected an answer (its menu changed): stop now, not after 15 minutes.
+        if [ "$(tail -c +$((answered_at + 1)) "$XK_LOG" 2>/dev/null | grep -c "$XK_NOISE")" -ge 2 ]; then
+            kill "$xk_pid" 2>/dev/null
+            exec 3>&-
+            tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
+            fail xkeen "XKeen не принял ответ установщика (изменились вопросы). Подробности отправлены в админ-панель."
+        fi
+        if [ "$waited" -ge 1200 ]; then
+            kill "$xk_pid" 2>/dev/null
+            exec 3>&-
+            tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
+            fail xkeen "Установка XKeen идёт больше 20 минут — прерываю. Подробности отправлены в админ-панель."
+        fi
+    done
+    exec 3>&-
+    rm -f "$fifo"
+    strip_ansi < "$XK_LOG" | grep -v '^[[:space:]]*$' | tail -n 40 >> "$LOG"
+}
+
 if command -v xkeen >/dev/null 2>&1 && [ -x /opt/sbin/xray ] && [ -f /opt/etc/init.d/S05xkeen ]; then
     say "XKeen уже установлен — пропускаю установку"
     ok xkeen "уже был"
 else
-    say "Установка XKeen $XKEEN_VERSION и Xray (несколько минут)"
+    say "Установка XKeen $XKEEN_VERSION и Xray (несколько минут, ход установки ниже)"
     cd /tmp || true
-    curl -fsSL -m 120 https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh \
-        -o /tmp/xkeen-install.sh 2>>"$LOG" \
-        || fail xkeen "Не удалось скачать установщик XKeen с GitHub."
-    sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION" >> "$LOG" 2>&1 </dev/null \
-        || fail xkeen "Установщик XKeen завершился с ошибкой. Подробности: $LOG"
-
-    # Answers for `xkeen -i` (XKeen 2.0), in prompt order:
-    #   [only if Entware is in internal memory] continue anyway -> 1
-    #   proxy core -> 1 (Xray); Xray release -> auto (autoinstall_mode=true, no prompt)
-    #   GeoSite -> 0, GeoIP -> 0 (our routing rules use plain domain/IP lists, no geo files)
-    #   GeoIPSET -> no prompt without a TTY (installs RU-subnet exclusion)
-    #   geofile auto-update -> 0; autostart on boot -> 1
-    answers="/tmp/xkeen-answers.txt"
-    : > "$answers"
-    if mount | awk '$3 == "/opt" {print $1}' | grep -q '^/dev/ubi'; then
-        echo 1 >> "$answers"
+    xk_boot="https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh"
+    got=0
+    if [ "$use_mirror" = "1" ]; then
+        curl -fsSL -m 60 "$GH_MIRROR/$xk_boot" -o /tmp/xkeen-install.sh 2>>"$LOG" && got=1
     fi
-    printf '1\n0\n0\n0\n1\n' >> "$answers"
+    [ "$got" = "1" ] || curl -fsSL -m 60 "$xk_boot" -o /tmp/xkeen-install.sh 2>>"$LOG" \
+        || fail xkeen "Не удалось скачать установщик XKeen (GitHub недоступен у этого провайдера)."
+    printf '    скачиваю XKeen %s…\n' "$XKEEN_VERSION"
+    sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION" >> "$LOG" 2>&1 </dev/null \
+        || fail xkeen "Не удалось скачать XKeen $XKEEN_VERSION (GitHub недоступен у этого провайдера). Подробности: $LOG"
 
-    autoinstall_mode=true xkeen -i < "$answers" >> "$LOG" 2>&1 &
-    xk_pid=$!
-    waited=0
-    while kill -0 "$xk_pid" 2>/dev/null; do
-        sleep 5
-        waited=$((waited + 5))
-        if [ "$waited" -ge 900 ]; then
-            kill "$xk_pid" 2>/dev/null
-            fail xkeen "Установка XKeen зависла (больше 15 минут) — вероятно, изменились вопросы установщика. Установите XKeen вручную: xkeen -i, затем запустите эту команду снова."
-        fi
-    done
+    run_xkeen_install
 
     if [ ! -x /opt/sbin/xray ] || [ ! -f /opt/etc/init.d/S05xkeen ]; then
-        fail xkeen "XKeen установился не полностью (нет /opt/sbin/xray или S05xkeen). Подробности: $LOG"
+        fail xkeen "XKeen установился не полностью (нет /opt/sbin/xray или S05xkeen) — скорее всего, не скачался Xray. Подробности отправлены в админ-панель."
     fi
     ok xkeen "XKeen $XKEEN_VERSION и Xray установлены"
 fi

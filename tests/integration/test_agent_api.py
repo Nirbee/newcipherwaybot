@@ -141,9 +141,7 @@ async def test_config_etag_returns_304_on_match(
 ) -> None:
     http, container = client
     container.remnawave_client.hosts = [_host("host-a")]
-    device_id, token = await _create_device(
-        http, container, telegram_id=3, host_uuids=["host-a"]
-    )
+    device_id, token = await _create_device(http, container, telegram_id=3, host_uuids=["host-a"])
     headers = {"Authorization": f"Bearer {token}"}
 
     first = await http.get("/api/agent/config", headers=headers)
@@ -154,9 +152,7 @@ async def test_config_etag_returns_304_on_match(
     # window having elapsed, so this test isolates ETag/304 behavior from rate limiting.
     container.redis.store.pop(f"agent:cfg:{device_id}", None)
 
-    second = await http.get(
-        "/api/agent/config", headers={**headers, "If-None-Match": etag}
-    )
+    second = await http.get("/api/agent/config", headers={**headers, "If-None-Match": etag})
     assert second.status_code == 304
 
 
@@ -165,9 +161,7 @@ async def test_config_inactive_subscription_is_freedom_only(
 ) -> None:
     http, container = client
     container.remnawave_client.hosts = [_host("host-a")]
-    device_id, token = await _create_device(
-        http, container, telegram_id=4, host_uuids=["host-a"]
-    )
+    device_id, token = await _create_device(http, container, telegram_id=4, host_uuids=["host-a"])
     async with container.uow() as uow:
         device = await uow.router_devices.get(device_id)
         sub = await uow.subscriptions.get(device.subscription_id)
@@ -271,13 +265,11 @@ async def test_config_includes_split_tunnel_rules_from_happ_subscription(
     http, container = client
     container.remnawave_client.hosts = [_host("host-a")]
     container.remnawave_client.subscription_json = _HAPP_JSON
-    device_id, token = await _create_device(
-        http, container, telegram_id=20, host_uuids=["host-a"]
-    )
+    device_id, token = await _create_device(http, container, telegram_id=20, host_uuids=["host-a"])
 
     res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 200
-    rules = res.json()["routing"]["rules"]
+    rules = [r for r in res.json()["routing"]["rules"] if "inboundTag" not in r]
     assert rules[0] == {
         "type": "field",
         "domain": ["domain:gosuslugi.ru"],
@@ -298,14 +290,12 @@ async def test_config_falls_back_to_last_good_rules_when_fetch_fails(
     http, container = client
     container.remnawave_client.hosts = [_host("host-a")]
     container.remnawave_client.subscription_json = _HAPP_JSON
-    device_id, token = await _create_device(
-        http, container, telegram_id=21, host_uuids=["host-a"]
-    )
+    device_id, token = await _create_device(http, container, telegram_id=21, host_uuids=["host-a"])
     headers = {"Authorization": f"Bearer {token}"}
     first = await http.get("/api/agent/config", headers=headers)
 
     store = container.redis.store
-    for key in [k for k in store if k.startswith("agent:rt:") and not k.endswith(":last")]:
+    for key in [k for k in store if k.startswith("agent:sub:") and not k.endswith(":last")]:
         store.pop(key)
     container.redis.store.pop(f"agent:cfg:{device_id}", None)
     container.remnawave_client.subscription_json = RuntimeError("sub page down")
@@ -377,3 +367,118 @@ async def test_scripts_are_served_and_config_advertises_agent_version(
     _, token = await _create_device(http, container, telegram_id=33, host_uuids=["host-a"])
     res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
     assert res.headers["X-Agent-Version"] == version
+
+
+def _sub_server(remark: str, address: str) -> dict:
+    return {
+        "remarks": remark,
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{"address": address, "port": 443, "users": [{"id": "cust-uuid"}]}]
+                },
+                "streamSettings": {"network": "xhttp", "security": "reality"},
+            },
+            {"tag": "direct", "protocol": "freedom"},
+        ],
+    }
+
+
+async def test_config_takes_servers_from_subscription_and_flags_a_foreign_one(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Field failure: the router was pinned to a server outside the customer's squads, so the
+    node rejected the UUID and everything left via direct. Now the router gets the servers the
+    customer's subscription really has, and the card says what was substituted."""
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-de", remark="DE", address="203.0.113.1")]
+    container.remnawave_client.subscription_json = [_sub_server("🇳🇱 NL", "203.0.113.2")]
+    device_id, token = await _create_device(http, container, telegram_id=30, host_uuids=["host-de"])
+
+    res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
+    proxies = [o for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
+    assert [o["settings"]["vnext"][0]["address"] for o in proxies] == ["203.0.113.2"]
+    assert proxies[0]["settings"]["vnext"][0]["users"][0]["id"] == "cust-uuid"
+
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=await _login(http))).json()
+    info = detail["config_info"]
+    assert info["source"] == "subscription"
+    assert info["servers"] == ["🇳🇱 NL"]
+    assert "DE" in info["warning"]
+
+
+def _selftest(balancer: dict, direct_ip: str = "91.0.0.1") -> dict:
+    return {
+        "self_test": [
+            {"name": "direct", "ok": True, "ip": direct_ip, "big": "ok", "error": ""},
+            {"name": "proxy-aaaaaaaa", "ok": True, "ip": "132.0.0.9", "big": "ok", "error": ""},
+            {"name": "balancer", **balancer},
+        ]
+    }
+
+
+def test_vpn_verdict_reads_the_agent_self_test() -> None:
+    from src.web.routes.agent import vpn_verdict
+
+    assert vpn_verdict({}) is None  # old agent: no verdict rather than a guess
+    ok = vpn_verdict(_selftest({"ok": True, "ip": "132.0.0.9", "big": "ok"}))
+    assert ok and ok["state"] == "ok" and "132.0.0.9" in ok["text"]
+    # the field failure: probe got out, but with the router's own ISP address
+    leak = vpn_verdict(_selftest({"ok": True, "ip": "91.0.0.1", "big": "ok"}))
+    assert leak and leak["state"] == "direct" and "напрямую" in leak["text"]
+    slow = vpn_verdict(
+        _selftest({"ok": True, "ip": "132.0.0.9", "big": "оборвалось на 16384 байт"})
+    )
+    assert slow and slow["state"] == "slow"
+    dead = vpn_verdict(_selftest({"ok": False, "ip": "", "error": "curl: (7) refused"}))
+    assert dead and dead["state"] == "fail" and "refused" in dead["text"]
+
+
+async def test_probe_endpoints_need_the_device_token(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    _device_id, token = await _create_device(http, container, telegram_id=31)
+    assert (await http.get("/api/agent/ip")).status_code == 401
+    headers = {"Authorization": f"Bearer {token}", "X-Forwarded-For": "132.0.0.9, 10.0.0.1"}
+    assert (await http.get("/api/agent/ip", headers=headers)).text == "132.0.0.9"
+    blob = await http.get("/api/agent/probe", headers=headers)
+    assert blob.status_code == 200 and len(blob.content) == 256 * 1024
+
+
+async def test_broken_vpn_alerts_once_after_two_reports_and_again_on_recovery(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=32)
+    sent: list[str] = []
+
+    async def fake_report(_container, code: str, text: str, **_kw) -> bool:
+        sent.append(f"{code}:{text}")
+        return True
+
+    monkeypatch.setattr("src.infrastructure.services.reports.send_topic_report", fake_report)
+    headers = {"Authorization": f"Bearer {token}"}
+    leak = {"diagnostics": _selftest({"ok": True, "ip": "91.0.0.1", "big": "ok"})}
+    good = {"diagnostics": _selftest({"ok": True, "ip": "132.0.0.9", "big": "ok"})}
+
+    async def beat(body: dict) -> None:
+        container.redis.store.pop(f"agent:hb:{device_id}", None)  # skip the rate limit
+        assert (
+            await http.post("/api/agent/heartbeat", headers=headers, json=body)
+        ).status_code == 204
+
+    await beat(leak)
+    assert sent == []  # one bad report may be a restart's first seconds
+    await beat(leak)
+    assert len(sent) == 1 and sent[0].startswith("alerts:🔴") and "напрямую" in sent[0]
+    await beat(leak)
+    assert len(sent) == 1  # no repeats while it stays broken
+    await beat(good)
+    assert len(sent) == 2 and sent[1].startswith("alerts:🟢")
+
+    row = (await http.get("/api/admin/routers", headers=await _login(http))).json()["items"][0]
+    assert row["vpn"]["state"] == "ok"

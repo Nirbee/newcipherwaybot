@@ -10,6 +10,7 @@ keeps this a pure, trivially-testable function.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Sequence
@@ -26,7 +27,13 @@ _TCP_LIKE_NETWORKS = {"tcp", "raw"}
 _DIRECT: dict[str, Any] = {"tag": "direct", "protocol": "freedom"}
 _BLOCK: dict[str, Any] = {"tag": "block", "protocol": "blackhole"}
 _BALANCER_TAG = "balancer"
-_NON_PROXY_PROTOCOLS = {"freedom", "blackhole", "dns"}
+_NON_PROXY_PROTOCOLS = {"freedom", "blackhole", "dns", "loopback"}
+# Loopback SOCKS inbounds for the agent's self-test: one per proxy outbound (is THIS server
+# reachable and passing traffic?) plus one through the balancer (where does real traffic exit?).
+# Routed first, so no split-tunnel rule can send a probe direct.
+TEST_BALANCER_PORT = 10869
+TEST_PORT_BASE = 10870
+_TEST_TAG_PREFIX = "cwtest-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +122,7 @@ def build_outbounds(
     vless_uuid: str,
     subscription_active: bool,
     template: RoutingTemplate | None = None,
+    subscription_outbounds: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``hosts`` must already be the small candidate set picked for ONE router (its primary +
     optional backup) — never a whole squad.
@@ -126,18 +134,26 @@ def build_outbounds(
 
     ``template`` carries the admin's split-tunnel rules (RU services direct); without one,
     everything goes through the balancer.
+
+    ``subscription_outbounds`` (see :func:`select_subscription_outbounds`) are the proxy
+    outbounds exactly as the customer's Happ receives them — preferred over rebuilding them
+    from panel host data, which can drift from what the node actually accepts.
     """
     proxies: list[dict[str, Any]] = []
     if subscription_active:
-        for host in hosts:
-            if host.is_disabled or host.protocol != "vless":
-                continue
-            outbound = _proxy_outbound(host, vless_uuid)
-            if outbound is not None:
-                proxies.append(outbound)
+        if subscription_outbounds is not None:
+            proxies = [copy.deepcopy(o) for o in subscription_outbounds]
+        else:
+            for host in hosts:
+                if host.is_disabled or host.protocol != "vless":
+                    continue
+                outbound = _proxy_outbound(host, vless_uuid)
+                if outbound is not None:
+                    proxies.append(outbound)
+    proxy_tags = [str(o["tag"]) for o in proxies if str(o.get("tag", "")).startswith("proxy-")]
 
     config: dict[str, Any] = {"outbounds": [*proxies, _DIRECT, _BLOCK]}
-    if proxies:
+    if proxy_tags:
         # Server picked the (1-2) candidates; the router's own observatory/balancer only
         # needs to pick the better of THOSE by live ping — cheap even with just one candidate.
         config["observatory"] = {
@@ -163,9 +179,208 @@ def build_outbounds(
             if template.dns:
                 config["dns"] = template.dns
         rules.append({"type": "field", "network": "tcp,udp", "balancerTag": _BALANCER_TAG})
-        routing["rules"] = rules
+        inbounds, test_rules = _self_test_plumbing(proxy_tags)
+        config["inbounds"] = inbounds
+        routing["rules"] = test_rules + rules
         config["routing"] = routing
     return config
+
+
+def _self_test_plumbing(
+    proxy_tags: Sequence[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def socks(tag: str, port: int) -> dict[str, Any]:
+        return {
+            "tag": tag,
+            "listen": "127.0.0.1",
+            "port": port,
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": False},
+        }
+
+    inbounds = [socks(f"{_TEST_TAG_PREFIX}balancer", TEST_BALANCER_PORT)]
+    rules: list[dict[str, Any]] = [
+        {
+            "type": "field",
+            "inboundTag": [f"{_TEST_TAG_PREFIX}balancer"],
+            "balancerTag": _BALANCER_TAG,
+        }
+    ]
+    for i, tag in enumerate(proxy_tags):
+        inbounds.append(socks(f"{_TEST_TAG_PREFIX}{tag}", TEST_PORT_BASE + i))
+        rules.append(
+            {"type": "field", "inboundTag": [f"{_TEST_TAG_PREFIX}{tag}"], "outboundTag": tag}
+        )
+    return inbounds, rules
+
+
+# --- proxies straight from the customer's Xray-JSON subscription --------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionProxy:
+    """One server as the customer's Happ receives it: the proxy outbound plus any outbounds
+    its ``sockopt.dialerProxy`` chain needs (e.g. a fragment dialer)."""
+
+    remark: str
+    address: str
+    port: int
+    outbound: dict[str, Any]
+    chain: tuple[dict[str, Any], ...] = ()
+
+
+def _endpoint(outbound: dict[str, Any]) -> tuple[str, int] | None:
+    settings = outbound.get("settings") or {}
+    for key in ("vnext", "servers"):
+        items = settings.get(key)
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            first = items[0]
+            if first.get("address"):
+                return str(first["address"]), int(first.get("port") or 0)
+    if settings.get("address"):  # Xray 25+ flat vless/vmess settings
+        return str(settings["address"]), int(settings.get("port") or 0)
+    return None
+
+
+def _dialer(outbound: dict[str, Any]) -> str | None:
+    sockopt = (outbound.get("streamSettings") or {}).get("sockopt") or {}
+    value = sockopt.get("dialerProxy")
+    return str(value) if value else None
+
+
+def proxies_from_subscription(payload: Any) -> list[SubscriptionProxy]:
+    """Every server in a Remnawave Xray-JSON subscription (a list of per-server client configs,
+    or one config). Only servers the customer's squads actually grant appear there — which is
+    exactly the set a router can use with this customer's UUID."""
+    configs = payload if isinstance(payload, list) else [payload]
+    out: list[SubscriptionProxy] = []
+    seen: set[tuple[str, int]] = set()
+    for config in configs:
+        if not isinstance(config, dict):
+            continue
+        outbounds = [o for o in config.get("outbounds") or [] if isinstance(o, dict)]
+        by_tag = {str(o["tag"]): o for o in outbounds if o.get("tag")}
+        dialers = {d for d in (_dialer(o) for o in outbounds) if d}
+        for ob in outbounds:
+            if ob.get("protocol") in _NON_PROXY_PROTOCOLS or str(ob.get("tag")) in dialers:
+                continue
+            endpoint = _endpoint(ob)
+            if endpoint is None or endpoint in seen:
+                continue
+            chain: list[dict[str, Any]] = []
+            nxt = _dialer(ob)
+            while nxt and nxt in by_tag and len(chain) < 3:
+                chain.append(by_tag[nxt])
+                nxt = _dialer(by_tag[nxt])
+            seen.add(endpoint)
+            out.append(
+                SubscriptionProxy(
+                    remark=str(config.get("remarks") or ob.get("tag") or ""),
+                    address=endpoint[0],
+                    port=endpoint[1],
+                    outbound=ob,
+                    chain=tuple(chain),
+                )
+            )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionPick:
+    outbounds: list[dict[str, Any]]
+    servers: list[str]  # human names, in priority order
+    warning: str | None
+    tags: dict[str, str]  # outbound tag -> human name (labels the agent's per-server probes)
+
+
+def _tagged(sp: SubscriptionProxy, tag: str) -> list[dict[str, Any]]:
+    """The proxy outbound under ``tag`` plus its renamed dialer chain (never ``proxy-*``, so
+    the observatory/balancer selector doesn't mistake a fragment dialer for a server)."""
+    ob = copy.deepcopy(sp.outbound)
+    ob["tag"] = tag
+    extra: list[dict[str, Any]] = []
+    prev = ob
+    for i, link in enumerate(sp.chain):
+        renamed = copy.deepcopy(link)
+        renamed["tag"] = f"cwdial-{tag.removeprefix('proxy-')}-{i}"
+        sockopt = prev.setdefault("streamSettings", {}).setdefault("sockopt", {})
+        sockopt["dialerProxy"] = renamed["tag"]
+        extra.append(renamed)
+        prev = renamed
+    # A dialer this config doesn't carry would make xray refuse the whole file.
+    last_sockopt = (prev.get("streamSettings") or {}).get("sockopt") or {}
+    if last_sockopt.get("dialerProxy") and not str(last_sockopt["dialerProxy"]).startswith(
+        "cwdial-"
+    ):
+        last_sockopt.pop("dialerProxy", None)
+    return [ob, *extra]
+
+
+def _fallback_tag(address: str, port: int) -> str:
+    return "proxy-" + hashlib.sha256(f"{address}:{port}".encode()).hexdigest()[:8]
+
+
+def select_subscription_outbounds(
+    available: Sequence[SubscriptionProxy],
+    assigned: Sequence[PanelHost],
+    *,
+    preferred: Sequence[PanelHost] = (),
+    limit: int = 2,
+) -> SubscriptionPick:
+    """Map the router's assigned servers (primary, backup) onto the customer's subscription.
+
+    A server the customer's subscription doesn't include can't work — the node rejects this
+    UUID there, the balancer's probes fail and every connection falls back to ``direct`` (the
+    field failure: a router online, VPN "on", traffic leaving with the ISP's address). Such a
+    server is replaced by one the subscription does have, preferring the admin's router
+    allowlist (``preferred``), and the substitution is reported instead of staying silent."""
+    by_endpoint = {(p.address, p.port): p for p in available}
+    chosen: list[tuple[str, SubscriptionProxy]] = []
+    missing: list[str] = []
+    for host in assigned:
+        sp = by_endpoint.get((host.address, host.port))
+        if sp is None:
+            missing.append(host.remark or host.address)
+        elif all(sp is not c for _, c in chosen):
+            chosen.append((f"proxy-{host.uuid[:8]}", sp))
+
+    want = min(limit, len(assigned)) if assigned else limit
+    if len(chosen) < want:
+        pref = {(h.address, h.port): h for h in preferred}
+        ordered = [p for p in available if (p.address, p.port) in pref] + [
+            p for p in available if (p.address, p.port) not in pref
+        ]
+        for sp in ordered:
+            if len(chosen) >= want:
+                break
+            if any(sp is c for _, c in chosen):
+                continue
+            known = pref.get((sp.address, sp.port))
+            tag = (
+                f"proxy-{known.uuid[:8]}"
+                if known is not None
+                else _fallback_tag(sp.address, sp.port)
+            )
+            chosen.append((tag, sp))
+
+    outbounds: list[dict[str, Any]] = []
+    for tag, sp in chosen:
+        outbounds.extend(_tagged(sp, tag))
+    warning = None
+    if missing:
+        used = ", ".join(sp.remark for _, sp in chosen) or "нет"
+        warning = (
+            f"Сервер(ы) {', '.join(missing)} не входят в подписку клиента (сквады тарифа) — "
+            f"через них роутер не работал бы. Использую серверы из подписки: {used}."
+        )
+    elif not assigned and chosen:
+        warning = "Серверы роутеру не назначены — использую серверы из подписки клиента."
+    return SubscriptionPick(
+        outbounds,
+        [sp.remark for _, sp in chosen],
+        warning,
+        {tag: sp.remark for tag, sp in chosen},
+    )
 
 
 def _proxy_outbound(host: PanelHost, vless_uuid: str) -> dict[str, Any] | None:

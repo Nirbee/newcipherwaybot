@@ -13,6 +13,28 @@ import { useApp } from "../state/app";
 type Mode = "auto" | "force";
 type Status = "pending" | "online" | "offline" | "revoked";
 
+type ProbeResult = {
+  name: string;
+  ok: boolean;
+  ip: string;
+  secs: string;
+  big: string;
+  error: string;
+};
+type VpnVerdict = {
+  state: "ok" | "direct" | "slow" | "fail" | "none";
+  text: string;
+  exit_ip?: string;
+  direct_ip?: string;
+  servers: ProbeResult[];
+} | null;
+type ConfigInfo = {
+  source: "subscription" | "panel" | "none";
+  servers: string[];
+  warning: string | null;
+  tags?: Record<string, string>;
+} | null;
+
 type RouterDevice = {
   id: number;
   label: string;
@@ -30,6 +52,7 @@ type RouterDevice = {
   active_outbound: string | null;
   external_ip: string | null;
   last_error: string | null;
+  vpn: VpnVerdict;
   note: string | null;
   created_at: string;
 };
@@ -49,6 +72,7 @@ type RouterDetail = RouterDevice & {
   subscription: SubSummary;
   claim_url: string | null;
   install_code: string | null;
+  config_info: ConfigInfo;
 };
 
 function QrImage({ text }: { text: string }) {
@@ -120,6 +144,63 @@ function InstallBlock({
   );
 }
 
+
+const VPN_COLOR: Record<string, string> = {
+  ok: "var(--good-ink)",
+  slow: "var(--warn)",
+  direct: "var(--bad-ink)",
+  fail: "var(--bad-ink)",
+  none: "var(--muted)",
+};
+
+function VpnBadge({ vpn }: { vpn: VpnVerdict }) {
+  if (!vpn || vpn.state === "none") return null;
+  const label =
+    vpn.state === "ok" ? "VPN ✓" : vpn.state === "slow" ? "VPN медленно" : "VPN не работает";
+  return (
+    <div className="vpn-badge" style={{ color: VPN_COLOR[vpn.state] }} title={vpn.text}>
+      {label}
+    </div>
+  );
+}
+
+function VpnCheck({ vpn, info }: { vpn: VpnVerdict; info: ConfigInfo }) {
+  const names = info?.tags ?? {};
+  return (
+    <div className="grid" style={{ gap: 8, fontSize: 13 }}>
+      {vpn ? (
+        <div className="vpn-verdict" style={{ borderColor: VPN_COLOR[vpn.state] }}>
+          <b style={{ color: VPN_COLOR[vpn.state] }}>{vpn.text}</b>
+        </div>
+      ) : (
+        <span className="dim" style={{ fontSize: 12.5 }}>
+          Проверки ещё нет — агент обновится до версии 3 и пришлёт её в течение ~10 минут.
+        </span>
+      )}
+      {info?.warning && (
+        <div style={{ color: "var(--warn)", fontSize: 12.5 }}>⚠️ {info.warning}</div>
+      )}
+      {vpn?.servers.map((s) => (
+        <div key={s.name} className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+          <span>
+            {s.ok ? "✅" : "❌"} {names[s.name] ?? s.name}
+          </span>
+          <span className="mono" style={{ fontSize: 11.5, textAlign: "right", wordBreak: "break-all" }}>
+            {s.ok
+              ? `${s.ip} · ${Number(s.secs || 0).toFixed(2)} с${s.big && s.big !== "ok" ? ` · ⚠ ${s.big}` : ""}`
+              : s.error || "нет ответа"}
+          </span>
+        </div>
+      ))}
+      {vpn?.direct_ip && (
+        <div className="row dim" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span>Без VPN (провайдер роутера)</span>
+          <span className="mono">{vpn.direct_ip}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function DiagRow({ label, value, warn }: { label: string; value: string; warn?: string | null }) {
   return (
@@ -470,6 +551,7 @@ export default function Routers() {
                   : d.is_online
                     ? t.routersStOnline
                     : t.routersStOffline}
+              {d.status !== "revoked" && <VpnBadge vpn={d.vpn} />}
             </span>
             <span className="cap-pill rt-mode">
               {d.mode === "auto" ? t.routersModeAuto : t.routersModeForce}
@@ -823,6 +905,9 @@ export default function Routers() {
                   </button>
                 </div>
               </Field>
+              <Field label="Проверка VPN">
+                <VpnCheck vpn={detail.data.vpn} info={detail.data.config_info} />
+              </Field>
               {detail.data.claim_url && (
                 <Field label={t.routersClaimTitle}>
                   <div className="grid" style={{ gap: 8 }}>
@@ -927,6 +1012,9 @@ export default function Routers() {
                       picked, so show the servers it balances between (primary + backup). */}
                   <span className="mono" style={{ textAlign: "right" }}>
                     {detail.data.active_outbound ??
+                      (detail.data.config_info?.servers.length
+                        ? detail.data.config_info.servers.join(" / ")
+                        : null) ??
                       (detail.data.primary_host_uuid
                         ? hostLabel(hostOptions, detail.data.primary_host_uuid) +
                           (detail.data.backup_host_uuid
@@ -985,6 +1073,12 @@ export default function Routers() {
                           <DiagRow label={t.routersDiagFree} value={d.opt_free} />
                           <DiagRow label={t.routersDiagFiles} value={d.confdir_files} />
                           <DiagRow label={t.routersDiagXrayTest} value={d.xray_test} />
+                          {d.xray_errors && (
+                            <div className="grid" style={{ gap: 4 }}>
+                              <span className="muted">Журнал ошибок Xray</span>
+                              <pre className="mono xray-errors">{d.xray_errors}</pre>
+                            </div>
+                          )}
                         </>
                       );
                     })()}

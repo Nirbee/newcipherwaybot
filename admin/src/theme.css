@@ -1525,3 +1525,28 @@ hr.sep {
     margin: -16px -16px 6px;
   }
 }
+
+/* routers: VPN self-test */
+.vpn-badge {
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.vpn-verdict {
+  border-left: 3px solid var(--border2);
+  background: var(--panel2);
+  border-radius: 8px;
+  padding: 9px 11px;
+  line-height: 1.4;
+}
+.xray-errors {
+  font-size: 10.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--panel2);
+  border-radius: 6px;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+}

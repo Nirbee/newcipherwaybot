@@ -37,9 +37,11 @@ from src.web.deps import get_container
 from src.web.routes.admin._common import OkOut, audit, iso
 from src.web.routes.admin.deps import AdminIdentity, require_admin
 from src.web.routes.agent import (
+    config_info,
     current_install_code,
     drop_install_code,
     issue_install_code,
+    vpn_verdict,
 )
 
 log = get_logger(__name__)
@@ -112,6 +114,8 @@ def _row(device: RouterDevice, sub_label: str | None) -> dict[str, Any]:
         "active_outbound": device.active_outbound,
         "external_ip": device.external_ip,
         "last_error": device.last_error,
+        # Agent v3 self-test: does traffic really leave through a VPN server?
+        "vpn": vpn_verdict(device.diagnostics),
         "note": device.note,
         "created_at": iso(device.created_at),
     }
@@ -485,6 +489,7 @@ async def get_device(
     # The short install command stays available from the card for its 24h lifetime, so a
     # technician who closed the token window can still read it off the phone.
     detail["install_code"] = await current_install_code(container, device.id)
+    detail["config_info"] = await config_info(container, device.id)
     detail["install_report"] = device.install_report
     detail["diagnostics"] = device.diagnostics
     detail["subscription"] = summary

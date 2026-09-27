@@ -16,7 +16,7 @@
 
 set -eu
 
-AGENT_VERSION="2"
+AGENT_VERSION="3"
 
 CONF_FILE="${CIPHERWAY_AGENT_CONF:-/opt/etc/cipherway-agent/agent.conf}"
 SELF="/opt/etc/cipherway-agent/agent.sh"
@@ -210,8 +210,75 @@ xkeen_version() {
         | cut -d'"' -f2
 }
 
+# --- self-test -------------------------------------------------------------------------
+# The server's config adds loopback SOCKS listeners (cwtest-*): one per VPN server and one
+# through the balancer. Probing them shows, per server, whether traffic really passes and where
+# it exits — a router can look "online" while every connection silently falls back to direct.
+# The large download catches ISPs that freeze connections to foreign hosts after ~16 KB.
+
+probe() {
+    # $1 = name, $2 = socks port ("" = straight from the router, no VPN)
+    p_name="$1"
+    p_port="$2"
+    p_proxy=""
+    [ -n "$p_port" ] && p_proxy="--socks5-hostname 127.0.0.1:$p_port"
+    p_ip=""
+    p_err=""
+    p_big=""
+    # shellcheck disable=SC2086
+    p_res="$(curl -sS -m 10 $p_proxy -H "Authorization: Bearer $TOKEN" \
+        -o "$STATE_DIR/probe.out" -w '%{http_code} %{time_total}' \
+        "$API_BASE/api/agent/ip" 2>"$STATE_DIR/probe.err")" || true
+    p_code="${p_res%% *}"
+    p_secs="${p_res#* }"
+    if [ "$p_code" = "200" ]; then
+        p_ip="$(head -c 64 "$STATE_DIR/probe.out" | tr -d '\r\n ')"
+        # shellcheck disable=SC2086
+        p_bres="$(curl -sS -m 20 $p_proxy -H "Authorization: Bearer $TOKEN" \
+            -o /dev/null -w '%{http_code} %{size_download}' \
+            "$API_BASE/api/agent/probe" 2>"$STATE_DIR/probe.err")" || true
+        p_bytes="${p_bres#* }"
+        if [ "${p_bres%% *}" = "200" ] && [ "${p_bytes%.*}" -ge 200000 ] 2>/dev/null; then
+            p_big="ok"
+        else
+            p_big="оборвалось на ${p_bytes:-0} байт: $(head -c 160 "$STATE_DIR/probe.err" | tr '\r\n' '  ')"
+        fi
+    else
+        p_err="$(head -c 200 "$STATE_DIR/probe.err" | tr '\r\n' '  ')"
+        [ -n "$p_err" ] || p_err="HTTP ${p_code:-нет ответа}"
+        p_secs=""
+    fi
+    jq -n --arg name "$p_name" --arg ip "$p_ip" --arg secs "$p_secs" --arg big "$p_big" \
+        --arg error "$p_err" --arg code "$p_code" \
+        '{name: $name, ok: ($code == "200"), ip: $ip, secs: $secs, big: $big, error: $error}'
+}
+
+self_test() {
+    [ -f "$TARGET" ] && is_xray_running || { echo '[]'; return 0; }
+    {
+        probe direct ""
+        jq -r '.inbounds[]? | select(.tag | startswith("cwtest-")) | "\(.tag) \(.port)"' \
+            "$TARGET" 2>/dev/null | while read -r t_tag t_port; do
+            probe "${t_tag#cwtest-}" "$t_port"
+        done
+    } | jq -s '.'
+}
+
+xray_error_tail() {
+    # sed, not jq: XKeen's JSON files may carry comments, which jq rejects.
+    f="$(sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$CONFDIR/01_log.json" 2>/dev/null | head -n1)" || true
+    [ -n "$f" ] || f="/opt/var/log/xray/error.log"
+    [ -f "$f" ] || return 0
+    tail -n 15 "$f" 2>/dev/null | cut -c1-220 | tail -c 2500
+}
+
 build_diagnostics() {
+    tests="$(self_test 2>/dev/null)" || tests='[]'
+    printf '%s' "$tests" | jq empty >/dev/null 2>&1 || tests='[]'
     jq -n \
+        --argjson self_test "$tests" \
+        --arg xray_errors "$(xray_error_tail)" \
         --arg agent_version "$AGENT_VERSION" \
         --arg xkeen_version "$(xkeen_version)" \
         --arg router "$(router_model)" \
@@ -229,7 +296,8 @@ build_diagnostics() {
           route_only: $route_only, ports_proxied: $ports_proxied,
           ports_excluded: $ports_excluded, confdir_files: $confdir_files, cron: $cron,
           dns_probe: $dns_probe, dns_router: $dns_router, dns_1111: $dns_1111,
-          opt_free: $opt_free, xray_test: $xray_test}'
+          opt_free: $opt_free, xray_test: $xray_test, self_test: $self_test,
+          xray_errors: $xray_errors}'
 }
 
 send_heartbeat() {
