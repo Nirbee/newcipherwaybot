@@ -7,6 +7,7 @@ import datetime as dt
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from src.core.dates import fmt_date
 from src.core.enums import PurchaseType, RouterDeviceStatus, TransactionStatus, TransactionType
 from src.core.logging import get_logger
 from src.infrastructure.taskiq.broker import broker, get_container, is_transient_infra
@@ -241,7 +242,7 @@ async def _try_auto_purchase(container: object, payment_id: UUID) -> None:
         telegram_id = user.telegram_id if user else None
         url = sub.subscription_url if sub else None
         plan_name = str((sub.plan_snapshot or {}).get("name") or "") if sub else ""
-        expire = sub.expire_at.strftime("%d.%m.%Y") if sub and sub.expire_at else ""
+        expire = fmt_date(sub.expire_at) if sub else ""
         text = await notification_text(uow, "auto_purchase", plan=plan_name, expire=expire)
     if telegram_id is not None and text:
         if url:
@@ -414,7 +415,7 @@ async def _notify_paid(container: object, payment_id: UUID) -> None:
                 sub = await uow.subscriptions.get(user.current_subscription_id)
                 if sub is not None:
                     plan_name = str((sub.plan_snapshot or {}).get("name") or "")
-                    expire = sub.expire_at.strftime("%d.%m.%Y") if sub.expire_at else ""
+                    expire = fmt_date(sub.expire_at)
                     sub_url = sub.subscription_url
             # Distinct owner-editable template per purchase kind (NOTIF-1).
             event = "purchase"
@@ -1927,7 +1928,7 @@ async def _autopay_one(container: object, subscription_id: int, horizon: dt.date
                 user.telegram_id,
                 "autopay_success",
                 plan=str((sub.plan_snapshot or {}).get("name") or ""),
-                expire=sub.expire_at.strftime("%d.%m.%Y") if sub.expire_at else "",
+                expire=fmt_date(sub.expire_at),
             )
             return True
     return await _autopay_charge_card(c, subscription_id)
@@ -2035,7 +2036,7 @@ async def _autopay_charge_card(c: AppContainer, subscription_id: int) -> bool:
         async with c.uow() as uow:
             sub2 = await uow.subscriptions.get(subscription_id)
             if sub2 is not None and sub2.expire_at:
-                expire_s = sub2.expire_at.strftime("%d.%m.%Y")
+                expire_s = fmt_date(sub2.expire_at)
         await _lifecycle_dm(c, telegram_id, "autopay_success", plan=title, expire=expire_s)
         return True
     await _lifecycle_dm(c, telegram_id, "autopay_failed")

@@ -25,6 +25,8 @@ from src.bot.keyboards import menu_keyboard, simple_keyboard, webapp_button
 from src.bot.media import answer_media
 from src.bot.menu_render import send_main_menu
 from src.bot.screen import ack, safe_answer, show_screen
+from src.core.dates import days_left as _days_left
+from src.core.dates import fmt_date
 from src.core.enums import Currency, PurchaseType, TransactionStatus, TransactionType
 from src.core.exceptions import RemnawaveError
 from src.core.logging import get_logger
@@ -131,10 +133,8 @@ async def act_subscription(
     else:
         days_left = ""
         if sub.expire_at is not None:
-            import datetime as dt
-
-            left = max(0, (sub.expire_at - dt.datetime.now(dt.UTC)).days)
-            days_left = f"\n⏳ Осталось: <b>{left} дн.</b> · до <b>{sub.expire_at:%d.%m.%Y}</b>"
+            left = _days_left(sub.expire_at)
+            days_left = f"\n⏳ Осталось: <b>{left} дн.</b> · до <b>{fmt_date(sub.expire_at)}</b>"
         traffic = f"{sub.traffic_used_bytes / GIB:.1f} / " + (
             f"{sub.traffic_limit_bytes / GIB:.0f} ГБ" if sub.traffic_limit_bytes else "∞"
         )
@@ -291,7 +291,7 @@ async def act_cabinet(
     }
     if is_active and sub is not None:
         now = dt.datetime.now(dt.UTC)
-        values["срок"] = sub.expire_at.strftime("%d.%m.%Y") if sub.expire_at else "—"
+        values["срок"] = fmt_date(sub.expire_at, "—")
         if sub.expire_at is not None:
             # Clamp on total seconds: a negative timedelta has .seconds in [0,86400), which
             # would render a bogus positive "23 ч." for an already-expired sub (CAB-1).

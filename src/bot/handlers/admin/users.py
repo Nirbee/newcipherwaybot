@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from src.bot.handlers.admin._common import MENU_CB, back_kb, rub
 from src.bot.handlers.reply_menu import maybe_dispatch_menu_button
 from src.bot.screen import ack, show_screen
+from src.core.dates import fmt_date
 from src.core.enums import TransactionStatus, TransactionType, UserStatus
 from src.core.exceptions import DomainError
 from src.infrastructure.database.base import utcnow
@@ -117,7 +118,7 @@ async def _render_card(target: CallbackQuery | Message, container: AppContainer,
         f"🤝 Приглашено: {invited}",
     ]
     if sub is not None:
-        expire = sub.expire_at.strftime("%d.%m.%Y") if sub.expire_at else "—"
+        expire = fmt_date(sub.expire_at, "—")
         lines.append(f"📶 Подписка: {sub.status.value} · до {expire}")
     else:
         lines.append("📶 Подписки нет")

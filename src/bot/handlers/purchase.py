@@ -26,6 +26,7 @@ from src.bot.gate import ensure_channel
 from src.bot.keyboards import simple_keyboard
 from src.bot.screen import ack, show_screen
 from src.core.constants import MAX_DEPOSIT_AMOUNT_MINOR
+from src.core.dates import fmt_date
 from src.core.enums import (
     Currency,
     PaymentGatewayType,
@@ -1457,7 +1458,7 @@ async def successful_payment(message: Message, container: AppContainer, db_user:
     elif txn is not None and txn.purchase_type is PurchaseType.TRAFFIC_TOPUP:
         event = "traffic_topup"
     plan_name = str((sub.plan_snapshot or {}).get("name") or "") if sub else ""
-    expire = sub.expire_at.strftime("%d.%m.%Y") if sub and sub.expire_at else ""
+    expire = fmt_date(sub.expire_at) if sub else ""
     async with container.uow() as uow:
         text = await notification_text(
             uow,
