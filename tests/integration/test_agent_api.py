@@ -437,6 +437,27 @@ def test_vpn_verdict_reads_the_agent_self_test() -> None:
     assert dead and dead["state"] == "fail" and "refused" in dead["text"]
 
 
+def test_vpn_verdict_without_the_direct_probe() -> None:
+    """The direct probe failed, so there's no ISP address to compare with — a balancer that
+    fell back to direct must still not read as "VPN works"."""
+    from src.web.routes.agent import vpn_verdict
+
+    via_vpn = {"ok": True, "ip": "132.0.0.9", "big": "ok"}
+    leaked = {"ok": True, "ip": "91.0.0.1", "big": "ok"}
+    # exit matches a server that passed on its own -> still a confirmed "ok"
+    assert vpn_verdict(_selftest(via_vpn, direct_ip=""))["state"] == "ok"  # type: ignore[index]
+    # the router's address from its heartbeat stands in for the failed direct probe
+    v = vpn_verdict(_selftest(leaked, direct_ip=""), isp_ip="91.0.0.1")
+    assert v and v["state"] == "direct" and "91.0.0.1" in v["text"]
+    # every server failed while the balancer passed -> it can only be the direct fallback
+    tests = _selftest(leaked, direct_ip="")
+    tests["self_test"][1] = {"name": "proxy-aaaaaaaa", "ok": False, "ip": "", "error": "timeout"}
+    assert vpn_verdict(tests)["state"] == "direct"  # type: ignore[index]
+    # nothing to compare with at all -> "not verified", never a false "ok"
+    v = vpn_verdict(_selftest(leaked, direct_ip=""))
+    assert v and v["state"] == "unknown"
+
+
 async def test_probe_endpoints_need_the_device_token(
     client: tuple[httpx.AsyncClient, ApiTestContainer],
 ) -> None:

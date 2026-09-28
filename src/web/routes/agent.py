@@ -528,14 +528,22 @@ async def probe_blob(_device: RouterDevice = Depends(require_device)) -> Respons
     )
 
 
-def vpn_verdict(diagnostics: dict[str, Any] | None) -> dict[str, Any] | None:
+def vpn_verdict(
+    diagnostics: dict[str, Any] | None, isp_ip: str | None = None
+) -> dict[str, Any] | None:
     """Plain-language verdict from the agent's self-test (agent v3+), or None without one.
 
     ``ok``      — traffic through the balancer exits via a VPN server, big downloads pass;
     ``direct``  — the probe got out, but with the router's own address: every server failed and
                   the balancer fell back to direct (VPN silently off);
     ``slow``    — exits via VPN, but large transfers stall (ISP throttling to that server);
-    ``fail``    — nothing passes through the balancer at all.
+    ``fail``    — nothing passes through the balancer at all;
+    ``unknown`` — the balancer passed, but its exit address can't be tied to a server and the
+                  router's own address is unknown, so "works" can't be confirmed.
+
+    ``isp_ip`` (the router's address from its heartbeat) stands in for the direct probe's
+    address when that probe itself failed — without either, a balancer that fell back to
+    direct would otherwise read as "VPN works".
     """
     tests = (diagnostics or {}).get("self_test")
     if not isinstance(tests, list) or not tests:
@@ -545,16 +553,26 @@ def vpn_verdict(diagnostics: dict[str, Any] | None) -> dict[str, Any] | None:
     balancer = by_name.get("balancer")
     servers = [t for name, t in by_name.items() if name.startswith("proxy-")]
     direct_ip = str(direct.get("ip") or "")
+    own_ip = direct_ip or str(isp_ip or "")
+    server_ips = {str(t.get("ip")) for t in servers if t.get("ok") and t.get("ip")}
     if balancer is None:
         return {"state": "none", "text": "VPN-серверов в конфиге нет", "servers": servers}
     exit_ip = str(balancer.get("ip") or "")
     if not balancer.get("ok"):
         state, text = "fail", f"VPN не работает: {balancer.get('error') or 'нет ответа'}"
-    elif direct_ip and exit_ip == direct_ip:
+    elif (own_ip and exit_ip == own_ip) or (servers and not server_ips):
+        # Same address as the router itself, or no single server passed while the balancer
+        # did — either way it can only have gone out through the direct fallback.
         state = "direct"
         text = (
             "VPN не работает: все серверы недоступны, трафик идёт напрямую "
-            f"с адреса провайдера {direct_ip}"
+            f"с адреса провайдера {own_ip or exit_ip}"
+        )
+    elif not own_ip and exit_ip not in server_ips:
+        state = "unknown"
+        text = (
+            f"VPN не проверен: выход {exit_ip} не совпадает ни с одним сервером, "
+            "а адрес провайдера роутера неизвестен (прямой запрос не прошёл)"
         )
     elif balancer.get("big") and balancer.get("big") != "ok":
         state = "slow"
@@ -577,7 +595,7 @@ async def _alert_on_vpn_change(
 ) -> None:
     """One message to the «alerts» topic when a router's VPN breaks (confirmed by two reports
     in a row, so a restart's first seconds don't page anyone) and one when it recovers."""
-    if verdict is None or verdict["state"] == "none":
+    if verdict is None or verdict["state"] in ("none", "unknown"):
         return
     key = f"agent:vpn:{device.id}"
     prev_raw = await _redis_get(container, key)
@@ -641,7 +659,7 @@ async def heartbeat(
             fresh.diagnostics = diagnostics
         await uow.commit()
     if stored:
-        await _alert_on_vpn_change(container, fresh, vpn_verdict(diagnostics))
+        await _alert_on_vpn_change(container, fresh, vpn_verdict(diagnostics, fresh.external_ip))
 
 
 @router.post("/install-report", status_code=204)

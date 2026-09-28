@@ -22,7 +22,7 @@ type ProbeResult = {
   error: string;
 };
 type VpnVerdict = {
-  state: "ok" | "direct" | "slow" | "fail" | "none";
+  state: "ok" | "direct" | "slow" | "fail" | "unknown" | "none";
   text: string;
   exit_ip?: string;
   direct_ip?: string;
@@ -149,6 +149,7 @@ function InstallBlock({
 const VPN_COLOR: Record<string, string> = {
   ok: "var(--good-ink)",
   slow: "var(--warn)",
+  unknown: "var(--warn)",
   direct: "var(--bad-ink)",
   fail: "var(--bad-ink)",
   none: "var(--muted)",
@@ -157,7 +158,13 @@ const VPN_COLOR: Record<string, string> = {
 function VpnBadge({ vpn }: { vpn: VpnVerdict }) {
   if (!vpn || vpn.state === "none") return null;
   const label =
-    vpn.state === "ok" ? "VPN ✓" : vpn.state === "slow" ? "VPN медленно" : "VPN не работает";
+    vpn.state === "ok"
+      ? "VPN ✓"
+      : vpn.state === "slow"
+        ? "VPN медленно"
+        : vpn.state === "unknown"
+          ? "VPN не проверен"
+          : "VPN не работает";
   return (
     <div className="vpn-badge" style={{ color: VPN_COLOR[vpn.state] }} title={vpn.text}>
       {label}

@@ -116,7 +116,7 @@ def _row(device: RouterDevice, sub_label: str | None) -> dict[str, Any]:
         "external_ip": device.external_ip,
         "last_error": device.last_error,
         # Agent v3 self-test: does traffic really leave through a VPN server?
-        "vpn": vpn_verdict(device.diagnostics),
+        "vpn": vpn_verdict(device.diagnostics, device.external_ip),
         "note": device.note,
         "created_at": iso(device.created_at),
     }

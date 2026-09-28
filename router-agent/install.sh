@@ -12,7 +12,7 @@
 
 set -u
 
-INSTALLER_VERSION="2"
+INSTALLER_VERSION="3"
 XKEEN_VERSION="2.0"
 XRAY_VERSION="v26.7.28"   # the server may override: the version the VPN nodes run
 AGENT_DIR="/opt/etc/cipherway-agent"
@@ -21,6 +21,7 @@ LOG="/opt/var/log/cipherway-install.log"
 XK_LOG="/opt/var/log/cipherway-xkeen.log"
 XK_NOISE="Некорректн"   # XKeen's «invalid input» line
 MIN_FREE_MB=60
+XK_SILENT_LIMIT=300   # XKeen printing nothing this long = stalled download or unknown prompt
 
 TOKEN="${1:-}"
 API_BASE="${2:-https://cabinet.cipherway.net.ru}"
@@ -65,6 +66,41 @@ report() {
         -X POST --data "$body" "$API_BASE/api/agent/install-report" 2>/dev/null || true
 }
 
+# Anti-hang insurance: every step that talks to the network or to another installer runs under
+# a time limit, so a stalled download (ISPs that freeze foreign connections after ~16 KB) stops
+# with a clear reason instead of hanging the technician's terminal. fd 4 = the terminal, for
+# progress lines while the step's own output goes to the log.
+exec 4>&1
+
+# Stop a process and its children (a killed installer must not leave its curl hanging).
+kill_tree() {
+    command -v pkill >/dev/null 2>&1 && pkill -P "$1" 2>/dev/null
+    kill "$1" 2>/dev/null
+    sleep 1
+    command -v pkill >/dev/null 2>&1 && pkill -9 -P "$1" 2>/dev/null
+    kill -9 "$1" 2>/dev/null
+}
+
+# $1 = seconds, $2 = what the technician sees, rest = the command. 124 = killed on timeout.
+run_limited() {
+    rl_limit="$1"; rl_what="$2"; shift 2
+    "$@" 4>&- &
+    rl_pid=$!
+    rl_t=0
+    while kill -0 "$rl_pid" 2>/dev/null; do
+        sleep 1
+        rl_t=$((rl_t + 1))
+        [ $((rl_t % 15)) -eq 0 ] && printf '    … %s: %s с\n' "$rl_what" "$rl_t" >&4
+        if [ "$rl_t" -ge "$rl_limit" ]; then
+            kill_tree "$rl_pid"
+            wait "$rl_pid" 2>/dev/null
+            echo "TIMEOUT ${rl_limit}s: $rl_what ($*)" >> "$LOG"
+            return 124
+        fi
+    done
+    wait "$rl_pid"
+}
+
 mkdir -p /opt/var/log
 echo "=== install $(date '+%F %T') installer v$INSTALLER_VERSION" >> "$LOG"
 
@@ -92,9 +128,10 @@ ok preflight "Entware, архитектура, модули ядра, место
 # --- 2. packages -----------------------------------------------------------------------
 
 say "Установка пакетов (curl, jq, tar, ca-bundle)"
-opkg update >> "$LOG" 2>&1 </dev/null || warn "opkg update завершился с ошибкой, продолжаю"
-opkg install curl jq tar ca-bundle >> "$LOG" 2>&1 </dev/null \
-    || fail packages "Не удалось установить пакеты. Проверьте интернет на роутере. Подробности: $LOG"
+run_limited 180 "обновление списка пакетов" opkg update >> "$LOG" 2>&1 </dev/null \
+    || warn "opkg update завершился с ошибкой или завис (3 мин), продолжаю"
+run_limited 300 "установка пакетов" opkg install curl jq tar ca-bundle >> "$LOG" 2>&1 </dev/null \
+    || fail packages "Не удалось установить пакеты (ошибка или больше 5 минут). Проверьте интернет на роутере. Подробности: $LOG"
 ok packages "установлены"
 
 say "Проверка токена"
@@ -171,7 +208,7 @@ run_xkeen_install() {
     : > "$XK_LOG"
     # No autoinstall_mode: it would take the newest Xray; the release question is answered
     # with the pinned version instead.
-    xkeen "$@" < "$fifo" > "$XK_LOG" 2>&1 &
+    xkeen "$@" < "$fifo" > "$XK_LOG" 2>&1 4>&- &
     xk_pid=$!
     exec 3> "$fifo"      # keeps the channel open: XKeen waits for an answer instead of EOF
 
@@ -187,21 +224,36 @@ run_xkeen_install() {
                 "$(strip_ansi < "$XK_LOG" | grep -v '^[[:space:]]*$' | tail -n 1)"
         fi
 
-        # XKeen is waiting at a question: output ends in ": " and stopped growing.
-        if [ "$stable" -ge 2 ] && [ "$size" != "$answered_at" ] \
-            && [ "$(tail -c 2 "$XK_LOG" 2>/dev/null)" = ": " ]; then
+        # XKeen is waiting at a question: output ends in ": " and stopped growing ("strict").
+        # A prompt of another shape (ends in "?", ")", "]" … with no newline) is "loose": it is
+        # answered only when the text is a known question — otherwise the silence watchdog
+        # below stops the install with the question's text instead of waiting 20 minutes.
+        prompt=""
+        if [ "$stable" -ge 2 ] && [ "$size" != "$answered_at" ]; then
+            if [ "$(tail -c 2 "$XK_LOG" 2>/dev/null)" = ": " ]; then
+                prompt=strict
+            elif [ "$stable" -ge 4 ] && [ -n "$(tail -c 1 "$XK_LOG" 2>/dev/null)" ] \
+                && tail -c 300 "$XK_LOG" | strip_ansi | tail -n 1 \
+                    | grep -q '[]:?)>][[:space:]]*$'; then
+                prompt=loose
+            fi
+        fi
+        if [ "$prompt" = "loose" ] && [ -z "$(xkeen_answer "$(tail -c +$((answered_at + 1)) "$XK_LOG" | strip_ansi | tail -n 25)")" ]; then
+            prompt=""
+        fi
+        if [ -n "$prompt" ]; then
             ctx="$(tail -c +$((answered_at + 1)) "$XK_LOG" | strip_ansi | tail -n 25)"
             # The question came back with «Некорректный ввод»: XKeen rejected our answer
             # (its menu changed). Stop now rather than answering the same thing forever.
             if [ "$answers" -gt 0 ] && printf '%s' "$ctx" | grep -q "$XK_NOISE"; then
-                kill "$xk_pid" 2>/dev/null
+                kill_tree "$xk_pid"
                 exec 3>&-
                 tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
                 xk_fail "XKeen не принял ответ установщика на вопрос «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v "$XK_NOISE" | tail -n 2 | tr '\n' ' ')». Подробности отправлены в админ-панель."; return 1
             fi
             ans="$(xkeen_answer "$ctx")"
             if [ -z "$ans" ] || [ "$answers" -ge 20 ]; then
-                kill "$xk_pid" 2>/dev/null
+                kill_tree "$xk_pid"
                 exec 3>&-
                 printf '%s\n' "$ctx" >> "$LOG"
                 xk_fail "XKeen задал вопрос, на который у установщика нет ответа: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')». Текст вопроса отправлен в админ-панель."; return 1
@@ -209,19 +261,27 @@ run_xkeen_install() {
             echo "$ans" >&3
             answers=$((answers + 1))
             answered_at="$size"
-            printf '    %s → %s\n' "$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v ': $' | tail -n 1)" "$ans"
+            printf '    %s → %s\n' "$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 1 | sed 's/[[:space:]]*$//')" "$ans"
             echo ">>> answer: $ans" >> "$LOG"
         fi
 
         # XKeen rejected an answer (its menu changed): stop now, not after 15 minutes.
         if [ "$(tail -c +$((answered_at + 1)) "$XK_LOG" 2>/dev/null | grep -c "$XK_NOISE")" -ge 2 ]; then
-            kill "$xk_pid" 2>/dev/null
+            kill_tree "$xk_pid"
             exec 3>&-
             tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
             xk_fail "XKeen не принял ответ установщика (изменились вопросы). Подробности отправлены в админ-панель."; return 1
         fi
+        # Silence watchdog: nothing new from XKeen for 5 minutes — a download frozen by the ISP
+        # or a question this installer can't recognise. Stop and show where it stuck.
+        if [ "$stable" -ge "$XK_SILENT_LIMIT" ]; then
+            kill_tree "$xk_pid"
+            exec 3>&-
+            tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
+            xk_fail "XKeen ничего не выводит $((XK_SILENT_LIMIT / 60)) минут — зависла загрузка или вопрос без ответа. Последнее: «$(tail -c 600 "$XK_LOG" | strip_ansi | grep -v '^[[:space:]]*$' | tail -n 2 | tr '\n' ' ')». Подробности отправлены в админ-панель."; return 1
+        fi
         if [ "$waited" -ge 1200 ]; then
-            kill "$xk_pid" 2>/dev/null
+            kill_tree "$xk_pid"
             exec 3>&-
             tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
             xk_fail "Установка XKeen идёт больше 20 минут — прерываю. Подробности отправлены в админ-панель."; return 1
@@ -259,8 +319,8 @@ else
     [ "$got" = "1" ] || curl -fsSL -m 60 "$xk_boot" -o /tmp/xkeen-install.sh 2>>"$LOG" \
         || fail xkeen "Не удалось скачать установщик XKeen (GitHub недоступен у этого провайдера)."
     printf '    скачиваю XKeen %s…\n' "$XKEEN_VERSION"
-    sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION" >> "$LOG" 2>&1 </dev/null \
-        || fail xkeen "Не удалось скачать XKeen $XKEEN_VERSION (GitHub недоступен у этого провайдера). Подробности: $LOG"
+    run_limited 300 "загрузка XKeen" sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION" >> "$LOG" 2>&1 </dev/null \
+        || fail xkeen "Не удалось скачать XKeen $XKEEN_VERSION (ошибка или больше 5 минут — GitHub недоступен у этого провайдера). Подробности: $LOG"
 
     run_xkeen_install -i
 
@@ -310,7 +370,7 @@ if [ -x /opt/etc/init.d/S05crond ]; then
 elif [ -x /opt/etc/init.d/S10cron ]; then
     cron_file="/opt/etc/crontabs/root"; cron_init="/opt/etc/init.d/S10cron"
 else
-    opkg install cron >> "$LOG" 2>&1 </dev/null || fail cron "Не удалось установить cron."
+    run_limited 300 "установка cron" opkg install cron >> "$LOG" 2>&1 </dev/null || fail cron "Не удалось установить cron."
     cron_file="/opt/etc/crontabs/root"; cron_init="/opt/etc/init.d/S10cron"
 fi
 for f in /opt/var/spool/cron/crontabs/root /opt/etc/crontabs/root; do
@@ -318,16 +378,18 @@ for f in /opt/var/spool/cron/crontabs/root /opt/etc/crontabs/root; do
 done
 mkdir -p "$(dirname "$cron_file")"
 echo "$cron_line" >> "$cron_file"
-"$cron_init" restart >> "$LOG" 2>&1 </dev/null || "$cron_init" start >> "$LOG" 2>&1 </dev/null
+run_limited 60 "перезапуск cron" "$cron_init" restart >> "$LOG" 2>&1 </dev/null \
+    || run_limited 60 "запуск cron" "$cron_init" start >> "$LOG" 2>&1 </dev/null
 pidof crond >/dev/null 2>&1 || fail cron "cron не запустился ($cron_init)."
 ok cron "каждые 5 минут ($cron_file)"
 
 # --- 7. first run ----------------------------------------------------------------------
 
 say "Первый запуск агента и Xray"
-"$AGENT_DIR/agent.sh" </dev/null || true
+run_limited 300 "первый запуск агента" "$AGENT_DIR/agent.sh" </dev/null \
+    || warn "первый запуск агента завершился с ошибкой или дольше 5 минут — cron повторит через 5 минут"
 if ! pidof xray >/dev/null 2>&1; then
-    xkeen -start >> "$LOG" 2>&1 </dev/null || true
+    run_limited 120 "запуск XKeen" xkeen -start >> "$LOG" 2>&1 </dev/null || true
 fi
 sleep 3
 if pidof xray >/dev/null 2>&1; then
