@@ -367,3 +367,16 @@ def test_self_test_inbounds_route_each_probe_to_its_server() -> None:
     assert rules[1]["outboundTag"] == "proxy-aaaaaaaa"
     # no proxies (unpaid) -> no probe listeners either
     assert "inbounds" not in build_outbounds([_host()], vless_uuid="x", subscription_active=False)
+
+
+def test_hosts_outside_the_customers_squads_are_swapped_for_granted_ones() -> None:
+    from src.application.services.router_config import hosts_within_squads
+
+    de = _host(uuid="de-host", remark="DE", squad_uuids=("sq-premium",))
+    nl = _host(uuid="nl-host", remark="NL", squad_uuids=("sq-default",))
+    kept, warning = hosts_within_squads([de], ("sq-default",), [de, nl])
+    assert [h.remark for h in kept] == ["NL"]
+    assert warning and "DE" in warning
+    # granted, or squads unknown on either side -> untouched, no warning
+    assert hosts_within_squads([nl], ("sq-default",)) == ([nl], None)
+    assert hosts_within_squads([de], ()) == ([de], None)

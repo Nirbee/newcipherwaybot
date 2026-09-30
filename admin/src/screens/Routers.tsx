@@ -33,6 +33,7 @@ type ConfigInfo = {
   servers: string[];
   warning: string | null;
   tags?: Record<string, string>;
+  split_rules?: number;
 } | null;
 
 type RouterDevice = {
@@ -193,6 +194,14 @@ function VpnCheck({ vpn, info }: { vpn: VpnVerdict; info: ConfigInfo }) {
           </span>
         </div>
       ))}
+      {info && info.source !== "none" && info.split_rules !== undefined && (
+        <div className="row dim" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span>Сплит-туннель (российское — напрямую)</span>
+          <span className="mono">
+            {info.split_rules > 0 ? `${info.split_rules} правил` : "нет — всё через VPN"}
+          </span>
+        </div>
+      )}
       {vpn?.direct_ip && (
         <div className="row dim" style={{ justifyContent: "space-between", fontSize: 12 }}>
           <span>Без VPN (провайдер роутера)</span>
