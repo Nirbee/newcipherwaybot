@@ -164,14 +164,14 @@ xk_fail() {
 }
 
 run_xkeen_install() {
-    # $@ = xkeen arguments (-i full install, -ux Xray core only)
+    # $@ = the command to run: XKeen's bootstrap (which ends in `xkeen -i`) or `xkeen -ux`
     fifo="/tmp/cw-xkeen.in"
     rm -f "$fifo"
     mkfifo "$fifo" || { xk_fail "Не удалось создать канал для ответов установщику XKeen."; return 1; }
     : > "$XK_LOG"
     # No autoinstall_mode: it would take the newest Xray; the release question is answered
     # with the pinned version instead.
-    xkeen "$@" < "$fifo" > "$XK_LOG" 2>&1 &
+    "$@" < "$fifo" > "$XK_LOG" 2>&1 &
     xk_pid=$!
     exec 3> "$fifo"      # keeps the channel open: XKeen waits for an answer instead of EOF
 
@@ -238,7 +238,7 @@ if command -v xkeen >/dev/null 2>&1 && [ -x /opt/sbin/xray ] && [ -f /opt/etc/in
     if [ -n "$cur_xray" ] && [ "v${cur_xray#v}" != "$XRAY_VERSION" ]; then
         say "Xray на роутере $cur_xray, на серверах ${XRAY_VERSION#v} — ставлю ту же версию"
         XK_SOFT=1
-        if run_xkeen_install -ux && [ "v$(/opt/sbin/xray version 2>/dev/null | head -n 1 | awk '{print $2}')" = "$XRAY_VERSION" ]; then
+        if run_xkeen_install xkeen -ux && [ "v$(/opt/sbin/xray version 2>/dev/null | head -n 1 | awk '{print $2}')" = "$XRAY_VERSION" ]; then
             ok xkeen "уже был; Xray заменён на $XRAY_VERSION"
         else
             warn "Xray остался версии $cur_xray — замена не удалась, подробности в админке"
@@ -259,11 +259,13 @@ else
     [ "$got" = "1" ] || curl -fsSL -m 60 "$xk_boot" -o /tmp/xkeen-install.sh 2>>"$LOG" \
         || fail xkeen "Не удалось скачать установщик XKeen (GitHub недоступен у этого провайдера)."
     printf '    скачиваю XKeen %s…\n' "$XKEEN_VERSION"
-    sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION" >> "$LOG" 2>&1 </dev/null \
-        || fail xkeen "Не удалось скачать XKeen $XKEEN_VERSION (GitHub недоступен у этого провайдера). Подробности: $LOG"
+    # XKeen's bootstrap unpacks XKeen and then itself `exec`s `xkeen -i` — so it runs under
+    # the answering loop too (fed /dev/null it looped on «Некорректный ввод» forever).
+    run_xkeen_install sh /tmp/xkeen-install.sh --legacy "$XKEEN_VERSION"
 
-    run_xkeen_install -i
-
+    if [ ! -x /opt/sbin/xkeen ]; then
+        fail xkeen "Не удалось скачать XKeen $XKEEN_VERSION (GitHub недоступен у этого провайдера). Подробности отправлены в админ-панель."
+    fi
     if [ ! -x /opt/sbin/xray ] || [ ! -f /opt/etc/init.d/S05xkeen ]; then
         fail xkeen "XKeen установился не полностью (нет /opt/sbin/xray или S05xkeen) — скорее всего, не скачался Xray. Подробности отправлены в админ-панель."
     fi
