@@ -172,22 +172,24 @@ else
 fi
 
 # Answer for one XKeen question, chosen by its text ($1 = XKeen's output since the previous
-# answer). Nothing = a question this installer doesn't know -> stop and report it, instead of
-# the old fixed answer list running out and XKeen printing «Некорректный ввод» forever.
+# answer). Matched on the question's HEADER line, not on its «Ваш выбор:» prompt: XKeen asks with
+# `read -p`, and the router's shell prints that prompt only to a real terminal — through our
+# answer channel it never appears (the field hang: stuck under «0. Пропустить загрузку ядра…»).
+# Phrases are the exact headers of XKeen 2.0 (checked against its source), specific enough that
+# XKeen's follow-up messages («Выполнен пропуск настройки автообновления») don't match them.
+# Nothing = a question this installer doesn't know.
 xkeen_answer() {
     case "$1" in
-        *"Выберите час"*) echo 4 ;;
-        *"Выберите минуту"*) echo 0 ;;
-        *"Выберите день"*) echo 0 ;;                         # no geo-file auto-update schedule
-        *"ядро проксирования"*) echo 1 ;;                     # Xray
         *"Введите версию Xray"*) echo "$XRAY_VERSION" ;;     # same core as the VPN nodes
         *"порядковый номер релиза"*) echo 9 ;;                # 9 = type the version
+        *"Выберите ядро проксирования"*) echo 1 ;;            # Xray
         *"номера действий через пробел"*) echo 0 ;;           # GeoSite/GeoIP: skip
-        *"автообновления"*) echo 0 ;;
-        *"российские IP-адреса"*) echo 1 ;;
-        *"автозагрузку"*) echo 1 ;;                            # start XKeen on boot
-        *"IPv6"*) echo 0 ;;                                    # leave IPv6 as it is
-        *"Продолжить установку"*) echo 1 ;;
+        *"номер действия для автообновления"*) echo 0 ;;      # no geo-file auto-update
+        *"Выберите день"*) echo 0 ;;                          # (auto-update time) cancel
+        *"Добавить XKeen в автозагрузку"*) echo 1 ;;          # start XKeen on boot
+        *"исключить российские IP-адреса"*) echo 1 ;;
+        *"Текущее состояние IPv6"*) echo 0 ;;                 # leave IPv6 as it is
+        *"Инициирована установка XKeen"*|*"Продолжить установку"*) echo 1 ;;
         *) ;;
     esac
 }
@@ -224,45 +226,44 @@ run_xkeen_install() {
                 "$(strip_ansi < "$XK_LOG" | grep -v '^[[:space:]]*$' | tail -n 1)"
         fi
 
-        # XKeen is waiting at a question: output ends in ": " and stopped growing ("strict").
-        # A prompt of another shape (ends in "?", ")", "]" … with no newline) is "loose": it is
-        # answered only when the text is a known question — otherwise the silence watchdog
-        # below stops the install with the question's text instead of waiting 20 minutes.
-        prompt=""
+        # Output stopped growing: XKeen may be waiting for an answer. Its prompt itself is
+        # usually invisible (see xkeen_answer), so the question is recognised by its header.
         if [ "$stable" -ge 2 ] && [ "$size" != "$answered_at" ]; then
-            if [ "$(tail -c 2 "$XK_LOG" 2>/dev/null)" = ": " ]; then
-                prompt=strict
-            elif [ "$stable" -ge 4 ] && [ -n "$(tail -c 1 "$XK_LOG" 2>/dev/null)" ] \
-                && tail -c 300 "$XK_LOG" | strip_ansi | tail -n 1 \
-                    | grep -q '[]:?)>][[:space:]]*$'; then
-                prompt=loose
-            fi
-        fi
-        if [ "$prompt" = "loose" ] && [ -z "$(xkeen_answer "$(tail -c +$((answered_at + 1)) "$XK_LOG" | strip_ansi | tail -n 25)")" ]; then
-            prompt=""
-        fi
-        if [ -n "$prompt" ]; then
             ctx="$(tail -c +$((answered_at + 1)) "$XK_LOG" | strip_ansi | tail -n 25)"
-            # The question came back with «Некорректный ввод»: XKeen rejected our answer
-            # (its menu changed). Stop now rather than answering the same thing forever.
+            last="$(printf '%s\n' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 1)"
+            ans=""
+            unknown=""
+            # «Некорректный ввод» after one of our answers: XKeen rejected it (menu changed).
             if [ "$answers" -gt 0 ] && printf '%s' "$ctx" | grep -q "$XK_NOISE"; then
                 kill_tree "$xk_pid"
                 exec 3>&-
                 tail -c 3000 "$XK_LOG" | strip_ansi >> "$LOG"
-                xk_fail "XKeen не принял ответ установщика на вопрос «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | grep -v "$XK_NOISE" | tail -n 2 | tr '\n' ' ')». Подробности отправлены в админ-панель."; return 1
+                xk_fail "XKeen не принял ответ установщика: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')». Подробности отправлены в админ-панель."; return 1
             fi
             ans="$(xkeen_answer "$ctx")"
-            if [ -z "$ans" ] || [ "$answers" -ge 20 ]; then
+            if [ -z "$ans" ]; then
+                # A visible prompt («…: ») or a menu (last line «  N. …») that has sat silent for
+                # 30 s is a question this installer doesn't know — say so now, with its text.
+                if [ "$(tail -c 2 "$XK_LOG" 2>/dev/null)" = ": " ]; then
+                    unknown=1
+                elif [ "$stable" -ge 30 ] && printf '%s' "$last" | grep -q '^[[:space:]]*[0-9][0-9]*\. '; then
+                    unknown=1
+                fi
+            fi
+            if [ -n "$unknown" ] || { [ -n "$ans" ] && [ "$answers" -ge 20 ]; }; then
                 kill_tree "$xk_pid"
                 exec 3>&-
                 printf '%s\n' "$ctx" >> "$LOG"
-                xk_fail "XKeen задал вопрос, на который у установщика нет ответа: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')». Текст вопроса отправлен в админ-панель."; return 1
+                xk_fail "XKeen задал вопрос, на который у установщика нет ответа: «$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 6 | tr '\n' ' ')». Текст вопроса отправлен в админ-панель."; return 1
             fi
-            echo "$ans" >&3
-            answers=$((answers + 1))
-            answered_at="$size"
-            printf '    %s → %s\n' "$(printf '%s' "$ctx" | grep -v '^[[:space:]]*$' | tail -n 1 | sed 's/[[:space:]]*$//')" "$ans"
-            echo ">>> answer: $ans" >> "$LOG"
+            if [ -n "$ans" ]; then
+                echo "$ans" >&3
+                answers=$((answers + 1))
+                answered_at="$size"
+                q="$(printf '%s\n' "$ctx" | grep -v '^[[:space:]]*$' | grep -v '^[[:space:]]*[0-9][0-9]*\. ' | tail -n 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+                printf '    %s → %s\n' "$q" "$ans"
+                echo ">>> answer: $ans" >> "$LOG"
+            fi
         fi
 
         # XKeen rejected an answer (its menu changed): stop now, not after 15 minutes.
