@@ -429,6 +429,8 @@ def test_vpn_verdict_reads_the_agent_self_test() -> None:
     # the field failure: probe got out, but with the router's own ISP address
     leak = vpn_verdict(_selftest({"ok": True, "ip": "91.0.0.1", "big": "ok"}))
     assert leak and leak["state"] == "direct" and "напрямую" in leak["text"]
+    # the server passed on its own, so this is Xray's health check, not a dead server
+    assert "серверы отвечают" in leak["text"]
     slow = vpn_verdict(
         _selftest({"ok": True, "ip": "132.0.0.9", "big": "оборвалось на 16384 байт"})
     )

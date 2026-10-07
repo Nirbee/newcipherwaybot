@@ -570,10 +570,18 @@ def vpn_verdict(
         # Same address as the router itself, or no single server passed while the balancer
         # did — either way it can only have gone out through the direct fallback.
         state = "direct"
-        text = (
-            "VPN не работает: все серверы недоступны, трафик идёт напрямую "
-            f"с адреса провайдера {own_ip or exit_ip}"
-        )
+        if server_ips:
+            # Servers pass on their own, yet the balancer went direct: Xray's health check
+            # judged them dead — a different fault from servers actually being down.
+            text = (
+                "VPN не работает: серверы отвечают, но Xray на роутере счёл их недоступными "
+                f"и пускает трафик напрямую с адреса провайдера {own_ip or exit_ip}"
+            )
+        else:
+            text = (
+                "VPN не работает: все серверы недоступны, трафик идёт напрямую "
+                f"с адреса провайдера {own_ip or exit_ip}"
+            )
     elif not own_ip and exit_ip not in server_ips:
         state = "unknown"
         text = (

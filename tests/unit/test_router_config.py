@@ -83,7 +83,7 @@ def test_inactive_subscription_gets_freedom_only_no_uuid_leaked() -> None:
     cfg = build_outbounds([_host()], vless_uuid=VLESS_UUID, subscription_active=False)
     tags = [o["tag"] for o in cfg["outbounds"]]
     assert tags == ["direct", "block"]
-    assert "observatory" not in cfg
+    assert "observatory" not in cfg and "burstObservatory" not in cfg
     assert "routing" not in cfg
     assert VLESS_UUID not in json.dumps(cfg)
 
@@ -92,7 +92,7 @@ def test_no_eligible_hosts_also_collapses_to_freedom_only() -> None:
     cfg = build_outbounds([], vless_uuid=VLESS_UUID, subscription_active=True)
     tags = [o["tag"] for o in cfg["outbounds"]]
     assert tags == ["direct", "block"]
-    assert "observatory" not in cfg
+    assert "observatory" not in cfg and "burstObservatory" not in cfg
 
 
 def test_hysteria_hosts_are_filtered_out() -> None:
@@ -380,3 +380,18 @@ def test_hosts_outside_the_customers_squads_are_swapped_for_granted_ones() -> No
     # granted, or squads unknown on either side -> untouched, no warning
     assert hosts_within_squads([nl], ("sq-default",)) == ([nl], None)
     assert hosts_within_squads([de], ()) == ([de], None)
+
+
+def test_balancer_health_uses_burst_observatory_not_single_probe() -> None:
+    """Field failure: the plain observatory marked both servers dead on one failed 5 s probe
+    and kept them dead for 5 minutes — all traffic went direct while both servers worked.
+    burstObservatory only marks a server dead when all of its recent pings failed."""
+    cfg = build_outbounds([_host()], vless_uuid=VLESS_UUID, subscription_active=True)
+    assert "observatory" not in cfg
+    burst = cfg["burstObservatory"]
+    assert burst["subjectSelector"] == ["proxy-"]
+    ping = burst["pingConfig"]
+    assert ping["sampling"] >= 3
+    assert ping["timeout"] == "10s"
+    assert ping["destination"].startswith("https://")
+    assert cfg["routing"]["balancers"][0]["strategy"] == {"type": "leastPing"}

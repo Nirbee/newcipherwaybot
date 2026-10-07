@@ -156,10 +156,20 @@ def build_outbounds(
     if proxy_tags:
         # Server picked the (1-2) candidates; the router's own observatory/balancer only
         # needs to pick the better of THOSE by live ping — cheap even with just one candidate.
-        config["observatory"] = {
+        # burstObservatory, not the plain one: the plain observatory marks a server dead on ONE
+        # failed probe (5 s timeout) and keeps it dead until the next probe 5 minutes later —
+        # a single hiccup on both servers sent every connection direct (VPN off) for minutes,
+        # while both servers passed the agent's own self-test (field, router «TEST»). Here a
+        # server is dead only when ALL of its last 3 pings failed (Xray: Alive = All != Fail),
+        # each pinged ~once a minute with a 10 s timeout.
+        config["burstObservatory"] = {
             "subjectSelector": ["proxy-"],
-            "probeUrl": "https://www.gstatic.com/generate_204",
-            "probeInterval": "5m",
+            "pingConfig": {
+                "destination": "https://www.gstatic.com/generate_204",
+                "interval": "1m",
+                "sampling": 3,
+                "timeout": "10s",
+            },
         }
         balancer: dict[str, Any] = {
             "tag": _BALANCER_TAG,
