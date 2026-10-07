@@ -503,3 +503,40 @@ async def test_broken_vpn_alerts_once_after_two_reports_and_again_on_recovery(
 
     row = (await http.get("/api/admin/routers", headers=await _login(http))).json()["items"][0]
     assert row["vpn"]["state"] == "ok"
+
+
+async def test_hwid_stub_subscription_falls_back_to_panel_servers_quietly(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Under a HWID device limit Remnawave answers our device-less request with an «App not
+    supported» stub: no servers, routing intact. The router then gets panel-built servers (they
+    work) plus the stub's split rules, and no false «params may be wrong» warning."""
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-de", remark="DE", address="203.0.113.1")]
+    container.remnawave_client.subscription_json = [
+        {
+            "remarks": "App not supported",
+            "outbounds": [
+                {"tag": "direct", "protocol": "freedom"},
+                {"tag": "block", "protocol": "blackhole"},
+            ],
+            "routing": {
+                "rules": [
+                    {"type": "field", "domain": ["domain:ru"], "outboundTag": "direct"},
+                    {"type": "field", "network": "tcp,udp", "balancerTag": "auto"},
+                ],
+                "balancers": [{"tag": "auto", "selector": ["proxy"], "fallbackTag": "direct"}],
+            },
+        }
+    ]
+    device_id, token = await _create_device(http, container, telegram_id=33, host_uuids=["host-de"])
+    res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    proxies = [o for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
+    assert [o["settings"]["vnext"][0]["address"] for o in proxies] == ["203.0.113.1"]
+    split = [r for r in res.json()["routing"]["rules"] if "inboundTag" not in r]
+    assert split[0]["domain"] == ["domain:ru"]
+
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=await _login(http))).json()
+    assert detail["config_info"]["source"] == "panel"
+    assert detail["config_info"]["warning"] is None
+    assert detail["config_info"]["split_rules"] == 2

@@ -435,3 +435,34 @@ def config_etag(config: dict[str, Any]) -> str:
     If-None-Match can skip re-sending an unchanged config."""
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def hosts_within_squads(
+    assigned: Sequence[PanelHost],
+    user_squads: Sequence[str],
+    candidates: Sequence[PanelHost] = (),
+) -> tuple[list[PanelHost], str | None]:
+    """Keep only assigned servers the customer's internal squads grant (a node rejects the UUID
+    on any other inbound), topping up from ``candidates`` (the admin's router allowlist) that
+    the squads do grant. Unknown squad data on either side = no filtering (can't judge)."""
+    granted = set(user_squads)
+
+    def allowed(h: PanelHost) -> bool:
+        return not granted or not h.squad_uuids or bool(granted & set(h.squad_uuids))
+
+    kept = [h for h in assigned if allowed(h)]
+    missing = [h.remark or h.address for h in assigned if not allowed(h)]
+    if not missing:
+        return kept, None
+    for h in candidates:
+        if len(kept) >= len(assigned):
+            break
+        if h.is_disabled or h.protocol != "vless" or not allowed(h):
+            continue
+        if all(h.uuid != k.uuid for k in kept):
+            kept.append(h)
+    used = ", ".join(h.remark for h in kept) or "нет подходящих"
+    return kept, (
+        f"Сервер(ы) {', '.join(missing)} не входят в сквады подписки клиента — нода не пустила бы "
+        f"его ключ. Использую: {used}."
+    )

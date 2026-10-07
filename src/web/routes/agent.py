@@ -32,6 +32,7 @@ from src.application.services.router_config import (
     RoutingTemplate,
     build_outbounds,
     config_etag,
+    hosts_within_squads,
     proxies_from_subscription,
     routing_template_from_subscription,
     select_subscription_outbounds,
@@ -420,6 +421,7 @@ async def get_config(
     all_hosts: list[Any] = []
     template: RoutingTemplate | None = None
     payload: Any = None
+    user_squads: tuple[str, ...] = ()
     if panel_ref is not None:
         # Same telegram_id-attachment every other panel_ref caller needs (see client.py's
         # _v3_id): a uuid/short_id-only ref can't resolve on a v3 panel without it.
@@ -437,6 +439,7 @@ async def get_config(
             log.warning("agent config: panel unavailable", device_id=device.id, error=str(exc))
             raise HTTPException(503, "panel temporarily unavailable") from exc
         vless_uuid = (panel_user.vless_uuid if panel_user else None) or ""
+        user_squads = tuple(panel_user.internal_squads) if panel_user else ()
         payload = await _subscription_payload(
             container, sub.id, panel_user.subscription_url if panel_user else None
         )
@@ -445,10 +448,14 @@ async def get_config(
     # Servers come from the customer's own subscription (the exact outbounds their Happ uses,
     # and only servers their squads grant). Rebuilding from panel host data is the fallback for
     # when the subscription page can't be read at all.
+    # With a HWID device limit on, Remnawave answers a request without a device id (ours — a
+    # router must not take one of the customer's device slots) with an «App not supported»
+    # stub: routing and DNS intact, but no servers. Then the servers are built from panel data
+    # (proven on a live router) and checked against the customer's squads directly.
     sub_proxies = proxies_from_subscription(payload) if payload else []
     subscription_outbounds = None
+    eligible = await _eligible_hosts(container)
     if sub_proxies:
-        eligible = await _eligible_hosts(container)
         pick = select_subscription_outbounds(
             sub_proxies, hosts, preferred=[h for h in all_hosts if h.uuid in eligible]
         )
@@ -460,17 +467,16 @@ async def get_config(
             "tags": pick.tags,
         }
     else:
+        hosts, squad_warning = hosts_within_squads(
+            hosts, user_squads, [h for h in all_hosts if h.uuid in eligible]
+        )
         info = {
             "source": "panel",
             "servers": [h.remark for h in hosts],
             "tags": {f"proxy-{h.uuid[:8]}": h.remark for h in hosts},
-            "warning": (
-                "Подписку клиента (формат Happ) прочитать не удалось — параметры серверов "
-                "собраны из панели и могут не совпадать с рабочими."
-                if panel_ref is not None and sub.status.is_usable
-                else None
-            ),
+            "warning": squad_warning,
         }
+    info["split_rules"] = len(template.rules) if template else 0
     if not sub.status.is_usable:
         info = {"source": "none", "servers": [], "warning": "Подписка не активна — VPN выключен."}
     await _redis_set(
