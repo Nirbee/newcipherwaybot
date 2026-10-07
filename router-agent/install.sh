@@ -194,7 +194,11 @@ xkeen_answer() {
     esac
 }
 
-strip_ansi() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'; }
+# Colour codes out of XKeen's output, so question headers match as plain text. The ESC byte is
+# made with printf: the router's busybox sed doesn't understand «\x1b» (it left the colours in,
+# so «Выберите ядро проксирования» never matched and the install stopped as an unknown question).
+ESC="$(printf '\033')"
+strip_ansi() { tr -d '\r' | sed "s/${ESC}\[[0-9;]*[A-Za-z]//g; s/${ESC}[()][A-Za-z0-9]//g"; }
 
 # Hard failure on a fresh install; with XK_SOFT=1 (only swapping the Xray core on a working
 # router) a warning, and the router keeps the core it has.
