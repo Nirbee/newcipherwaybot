@@ -393,7 +393,10 @@ async def test_config_takes_servers_from_subscription_and_flags_a_foreign_one(
     node rejected the UUID and everything left via direct. Now the router gets the servers the
     customer's subscription really has, and the card says what was substituted."""
     http, container = client
-    container.remnawave_client.hosts = [_host("host-de", remark="DE", address="203.0.113.1")]
+    container.remnawave_client.hosts = [
+        _host("host-de", remark="DE", address="203.0.113.1"),
+        _host("host-nl", remark="NL", address="203.0.113.2"),  # in the panel, not assigned
+    ]
     container.remnawave_client.subscription_json = [_sub_server("🇳🇱 NL", "203.0.113.2")]
     device_id, token = await _create_device(http, container, telegram_id=30, host_uuids=["host-de"])
 
@@ -408,6 +411,43 @@ async def test_config_takes_servers_from_subscription_and_flags_a_foreign_one(
     assert info["source"] == "subscription"
     assert info["servers"] == ["🇳🇱 NL"]
     assert "DE" in info["warning"]
+
+
+async def test_app_not_supported_stub_server_is_never_used(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Field failure: after the hosts were rebuilt, Remnawave's «App not supported» stub came
+    with a dummy server; the router took it for a real one and every connection was reset.
+    Stub servers are dropped and the assigned panel host is used instead."""
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-de", remark="DE", address="203.0.113.1")]
+    stub = _sub_server("App not supported", "0.0.0.0")
+    container.remnawave_client.subscription_json = [stub]
+    device_id, token = await _create_device(http, container, telegram_id=32, host_uuids=["host-de"])
+
+    res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
+    proxies = [o for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
+    assert [o["settings"]["vnext"][0]["address"] for o in proxies] == ["203.0.113.1"]
+
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=await _login(http))).json()
+    assert detail["config_info"]["source"] == "panel"
+    assert detail["config_info"]["servers"] == ["DE"]
+
+
+def test_stub_filter_keeps_real_servers() -> None:
+    from src.application.services.router_config import SubscriptionProxy
+    from src.web.routes.agent import real_subscription_proxies
+
+    def sp(remark: str, address: str) -> SubscriptionProxy:
+        return SubscriptionProxy(remark=remark, address=address, port=443, outbound={})
+
+    hosts = [_host("host-de", address="203.0.113.1")]
+    got = real_subscription_proxies(
+        [sp("DE", "203.0.113.1"), sp("App not supported", "203.0.113.1"), sp("?", "0.0.0.0")],
+        hosts,
+    )
+    assert [p.remark for p in got] == ["DE"]
 
 
 def _selftest(balancer: dict, direct_ip: str = "91.0.0.1") -> dict:

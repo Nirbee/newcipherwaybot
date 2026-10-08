@@ -334,6 +334,21 @@ async def _subscription_payload(
     return json.loads(stale) if stale else None
 
 
+def real_subscription_proxies(proxies: list[Any], panel_hosts: list[Any]) -> list[Any]:
+    """Drop the servers of Remnawave's «App not supported» stub. Depending on the panel's
+    subscription template the stub carries no server at all or a dummy one named «App not
+    supported» — field: after hosts were rebuilt (self steal) the router took that dummy for a
+    real server and every connection was reset. A real server of the customer's subscription is
+    always one of the panel's hosts, so anything else is dropped (and the panel fallback builds
+    the servers instead)."""
+    known = {(h.address, h.port) for h in panel_hosts}
+    return [
+        p
+        for p in proxies
+        if "not supported" not in p.remark.lower() and (not known or (p.address, p.port) in known)
+    ]
+
+
 async def _eligible_hosts(container: AppContainer) -> set[str]:
     async with container.uow() as uow:
         row = await uow.bot_config.find_one(key="ROUTER_ELIGIBLE_HOSTS")
@@ -452,7 +467,9 @@ async def get_config(
     # router must not take one of the customer's device slots) with an «App not supported»
     # stub: routing and DNS intact, but no servers. Then the servers are built from panel data
     # (proven on a live router) and checked against the customer's squads directly.
-    sub_proxies = proxies_from_subscription(payload) if payload else []
+    sub_proxies = real_subscription_proxies(
+        proxies_from_subscription(payload) if payload else [], all_hosts
+    )
     subscription_outbounds = None
     eligible = await _eligible_hosts(container)
     if sub_proxies:
