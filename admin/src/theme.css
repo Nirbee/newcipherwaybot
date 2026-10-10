@@ -1550,3 +1550,12 @@ hr.sep {
   overflow: auto;
   margin: 0;
 }
+.vpn-cands summary {
+  cursor: pointer;
+  font-size: 12px;
+  margin: 2px 0 4px;
+}
+.vpn-cands .row {
+  font-size: 12px;
+  padding: 2px 0;
+}

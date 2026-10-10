@@ -16,7 +16,7 @@
 
 set -eu
 
-AGENT_VERSION="4"
+AGENT_VERSION="5"
 
 CONF_FILE="${CIPHERWAY_AGENT_CONF:-/opt/etc/cipherway-agent/agent.conf}"
 SELF="/opt/etc/cipherway-agent/agent.sh"
@@ -267,6 +267,10 @@ self_test() {
             "$TARGET" 2>/dev/null | while read -r t_tag t_port; do
             if [ "$t_tag" = "cwtest-routed" ]; then
                 probe routed "$t_port" "https://api.ipify.org"
+            elif [ "${t_tag#cwtest-cand-}" != "$t_tag" ]; then
+                # Candidate server (AUTO routers): light probe only — the server just needs to
+                # know it passes and how fast; no 256 KB download per candidate every 5 min.
+                probe "${t_tag#cwtest-}" "$t_port" "$API_BASE/api/agent/ip"
             else
                 probe "${t_tag#cwtest-}" "$t_port"
             fi

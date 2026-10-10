@@ -29,17 +29,23 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from src.application.services.router_config import (
+    CANDIDATE_PREFIX,
+    MAX_CANDIDATES,
+    ProbeScore,
     RoutingTemplate,
+    autotune,
     build_outbounds,
+    candidate_tag,
     config_etag,
     hosts_within_squads,
     is_stub_subscription,
     proxies_from_subscription,
+    proxy_tag,
     routing_template_from_subscription,
     safe_split_template,
     select_subscription_outbounds,
 )
-from src.core.enums import RouterDeviceStatus
+from src.core.enums import RouterDeviceMode, RouterDeviceStatus
 from src.core.logging import get_logger
 from src.infrastructure.database.models.router_device import RouterDevice
 from src.infrastructure.di import AppContainer
@@ -501,6 +507,30 @@ async def get_config(
             "warning": squad_warning,
         }
     info["split_rules"] = len(template.rules) if template else 0
+
+    # AUTO routers: a light probe through other allowlisted servers the customer's squads grant,
+    # so the heartbeat can move the router to what works best from its ISP (autotune()).
+    candidates: list[Any] = []
+    if device.mode is RouterDeviceMode.AUTO:
+        assigned = {h.uuid for h in hosts}
+        granted = set(user_squads)
+        candidates = [
+            h
+            for h in all_hosts
+            if h.uuid in eligible
+            and h.uuid not in assigned
+            and not h.is_disabled
+            and h.protocol == "vless"
+            and (not granted or not h.squad_uuids or granted & set(h.squad_uuids))
+        ][:MAX_CANDIDATES]
+    info["tag_hosts"] = {
+        **{proxy_tag(h.uuid): h.uuid for h in hosts},
+        **{candidate_tag(h.uuid): h.uuid for h in candidates},
+    }
+    info["tags"] = {
+        **(info.get("tags") or {}),
+        **{candidate_tag(h.uuid): h.remark for h in candidates},
+    }
     if not sub.status.is_usable:
         info = {"source": "none", "servers": [], "warning": "Подписка не активна — VPN выключен."}
     await _redis_set(
@@ -513,6 +543,7 @@ async def get_config(
         subscription_active=sub.status.is_usable,
         template=template,
         subscription_outbounds=subscription_outbounds,
+        candidates=candidates,
     )
     etag = config_etag(config)
 
@@ -582,6 +613,7 @@ def vpn_verdict(
     direct = by_name.get("direct") or {}
     balancer = by_name.get("balancer")
     servers = [t for name, t in by_name.items() if name.startswith("proxy-")]
+    candidates = [t for name, t in by_name.items() if name.startswith(CANDIDATE_PREFIX)]
     direct_ip = str(direct.get("ip") or "")
     own_ip = direct_ip or str(isp_ip or "")
     server_ips = {str(t.get("ip")) for t in servers if t.get("ok") and t.get("ip")}
@@ -653,7 +685,111 @@ def vpn_verdict(
         "direct_ip": direct_ip,
         "routed": routed,
         "servers": servers,
+        "candidates": candidates,
     }
+
+
+def _probe_scores(
+    diagnostics: dict[str, Any] | None, tag_hosts: dict[str, str]
+) -> dict[str, ProbeScore]:
+    """The agent's per-server probes (assigned «proxy-*» and candidate «cand-*») keyed by host."""
+    scores: dict[str, ProbeScore] = {}
+    for t in (diagnostics or {}).get("self_test") or []:
+        if not isinstance(t, dict):
+            continue
+        host_uuid = tag_hosts.get(str(t.get("name")))
+        if not host_uuid:
+            continue
+        try:
+            secs = float(t.get("secs") or "") if t.get("ok") else None
+        except ValueError:
+            secs = None
+        big = str(t.get("big") or "")
+        scores[host_uuid] = ProbeScore(
+            host_uuid=host_uuid,
+            ok=bool(t.get("ok")),
+            secs=secs,
+            big_ok=None if not big else big == "ok",
+        )
+    return scores
+
+
+async def autotune_note(container: AppContainer, device_id: int) -> dict[str, Any] | None:
+    raw = await _redis_get(container, f"agent:tune:{device_id}")
+    return json.loads(raw) if raw else None
+
+
+async def _autotune_device(
+    container: AppContainer, device_id: int, diagnostics: dict[str, Any] | None
+) -> None:
+    """Smart AUTO assignment from the router's own probes (owner's request): least-connections
+    at creation knows nothing about the customer's ISP. See router_config.autotune()."""
+    info = await config_info(container, device_id) or {}
+    tag_hosts = info.get("tag_hosts") or {}
+    scores = _probe_scores(diagnostics, tag_hosts)
+    if not scores:
+        return
+    key = f"agent:tune:{device_id}"
+    state = await autotune_note(container, device_id) or {}
+    streaks: dict[str, int] = {
+        u: (int((state.get("streaks") or {}).get(u, 0)) + 1 if not sc.healthy else 0)
+        for u, sc in scores.items()
+    }
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+        if device is None or device.mode is not RouterDeviceMode.AUTO:
+            return
+        decision = autotune(
+            device.primary_host_uuid,
+            device.backup_host_uuid,
+            scores,
+            streaks,
+            tuned=bool(state.get("tuned")),
+        )
+        note = state.get("note")
+        at = state.get("at")
+        if decision is not None:
+            names = info.get("tags") or {}
+
+            def label(host_uuid: str | None) -> str:
+                if not host_uuid:
+                    return "нет"
+                for tag, u in tag_hosts.items():
+                    if u == host_uuid and tag in names:
+                        sc = scores.get(host_uuid)
+                        speed = f" ({sc.secs:.2f} с)" if sc and sc.secs is not None else ""
+                        return f"{names[tag]}{speed}"
+                return host_uuid[:8]
+
+            changed = (decision.primary, decision.backup) != (
+                device.primary_host_uuid,
+                device.backup_host_uuid,
+            )
+            if changed:
+                device.primary_host_uuid = decision.primary
+                device.backup_host_uuid = decision.backup
+                await uow.commit()
+            note = (
+                f"{decision.reason}. Основной: {label(decision.primary)}, "
+                f"резервный: {label(decision.backup)}" + ("" if changed else " — без изменений")
+            )
+            at = dt.datetime.now(dt.UTC).isoformat()
+            if changed:
+                log.info("router autotune", device_id=device_id, reason=decision.reason)
+    await _redis_set(
+        container,
+        key,
+        json.dumps(
+            {
+                "tuned": bool(state.get("tuned")) or decision is not None,
+                "streaks": streaks,
+                "note": note,
+                "at": at,
+            },
+            ensure_ascii=False,
+        ),
+        30 * 86400,
+    )
 
 
 async def _alert_on_vpn_change(
@@ -726,6 +862,7 @@ async def heartbeat(
         await uow.commit()
     if stored:
         await _alert_on_vpn_change(container, fresh, vpn_verdict(diagnostics, fresh.external_ip))
+        await _autotune_device(container, device.id, diagnostics)
 
 
 @router.post("/install-report", status_code=204)

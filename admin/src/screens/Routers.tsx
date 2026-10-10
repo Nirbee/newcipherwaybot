@@ -27,6 +27,7 @@ type VpnVerdict = {
   exit_ip?: string;
   direct_ip?: string;
   routed?: ProbeResult | null;
+  candidates?: ProbeResult[];
   servers: ProbeResult[];
 } | null;
 type ConfigInfo = {
@@ -76,6 +77,7 @@ type RouterDetail = RouterDevice & {
   install_code: string | null;
   config_info: ConfigInfo;
   recommended_xray: string;
+  autotune: { note: string; at: string | null } | null;
 };
 
 function QrImage({ text }: { text: string }) {
@@ -212,6 +214,24 @@ function VpnCheck({ vpn, info }: { vpn: VpnVerdict; info: ConfigInfo }) {
           </span>
         </div>
       ))}
+      {vpn?.candidates && vpn.candidates.length > 0 && (
+        <details className="vpn-cands">
+          <summary className="dim">
+            Другие серверы для авто-выбора ({vpn.candidates.filter((c) => c.ok).length} из{" "}
+            {vpn.candidates.length} проходят)
+          </summary>
+          {vpn.candidates.map((c) => (
+            <div key={c.name} className="row dim" style={{ justifyContent: "space-between", gap: 10 }}>
+              <span>
+                {c.ok ? "✅" : "❌"} {names[c.name] ?? c.name}
+              </span>
+              <span className="mono" style={{ fontSize: 11.5, textAlign: "right", wordBreak: "break-all" }}>
+                {c.ok ? `${Number(c.secs || 0).toFixed(2)} с` : c.error || "нет ответа"}
+              </span>
+            </div>
+          ))}
+        </details>
+      )}
       {info && info.source !== "none" && info.split_rules !== undefined && (
         <div className="row dim" style={{ justifyContent: "space-between", fontSize: 12 }}>
           <span>Сплит-туннель (российское — напрямую)</span>
@@ -935,6 +955,24 @@ export default function Routers() {
               </Field>
               <Field label="Проверка VPN">
                 <VpnCheck vpn={detail.data.vpn} info={detail.data.config_info} />
+                {detail.data.mode === "auto" && (
+                  <div className="dim" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.45 }}>
+                    🤖 Авто-выбор:{" "}
+                    {detail.data.autotune
+                      ? `${detail.data.autotune.note}${detail.data.autotune.at ? ` · ${dtTime(detail.data.autotune.at)}` : ""}`
+                      : "ждёт первой проверки с роутера (агент версии 5)"}
+                    <div>
+                      Основной используется всегда, резервный — только если основной не отвечает.
+                      Сервер меняется сам, если не проходит 2 проверки подряд.
+                    </div>
+                  </div>
+                )}
+                {detail.data.mode === "force" && (
+                  <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>
+                    Вручную: основной используется всегда, резервный — только если основной не
+                    отвечает. Сервер сам не меняется.
+                  </div>
+                )}
               </Field>
               {detail.data.claim_url && (
                 <Field label={t.routersClaimTitle}>

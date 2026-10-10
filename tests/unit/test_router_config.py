@@ -395,4 +395,103 @@ def test_balancer_health_uses_burst_observatory_not_single_probe() -> None:
     assert ping["sampling"] >= 3
     assert ping["timeout"] == "10s"
     assert ping["destination"].startswith("https://")
-    assert cfg["routing"]["balancers"][0]["strategy"] == {"type": "leastPing"}
+    # single server: priority strategy with nothing to weigh
+    assert cfg["routing"]["balancers"][0]["strategy"] == {
+        "type": "leastLoad",
+        "settings": {"expected": 1},
+    }
+
+
+def test_primary_wins_while_alive_backup_carries_a_huge_weight() -> None:
+    """Owner's request: «основной» must mean it — leastPing sent traffic to whichever server
+    pinged faster. leastLoad ranks by deviation × sqrt(weight): the backup's 1e10 weight makes
+    it lose to any live primary, while a dead primary drops out and the backup takes over."""
+    cfg = build_outbounds(
+        [
+            _host(uuid="aaaaaaaa-primary", address="203.0.113.1"),
+            _host(uuid="bbbbbbbb-backup", address="203.0.113.2"),
+        ],
+        vless_uuid=VLESS_UUID,
+        subscription_active=True,
+    )
+    strategy = cfg["routing"]["balancers"][0]["strategy"]
+    assert strategy["type"] == "leastLoad"
+    assert strategy["settings"]["expected"] == 1
+    assert strategy["settings"]["costs"] == [
+        {"regexp": False, "match": "proxy-bbbbbbbb", "value": 1e10}
+    ]
+
+
+# --- smart AUTO assignment -------------------------------------------------------------------
+
+
+def _score(uuid: str, ok: bool = True, secs: float | None = 0.3, big: bool | None = None):
+    from src.application.services.router_config import ProbeScore
+
+    return ProbeScore(host_uuid=uuid, ok=ok, secs=secs if ok else None, big_ok=big)
+
+
+def test_first_check_moves_the_router_to_the_fastest_working_servers() -> None:
+    from src.application.services.router_config import autotune
+
+    scores = {
+        "nl": _score("nl", secs=0.9, big=True),
+        "fi": _score("fi", secs=0.2),
+        "de": _score("de", ok=False),
+        "us": _score("us", secs=0.5),
+    }
+    d = autotune("nl", "de", scores, {"de": 1}, tuned=False)
+    assert d and (d.primary, d.backup) == ("fi", "us")
+
+
+def test_a_working_primary_is_never_swapped_for_a_faster_one() -> None:
+    from src.application.services.router_config import autotune
+
+    scores = {"nl": _score("nl", secs=0.9), "fi": _score("fi", secs=0.1)}
+    assert autotune("nl", "fi", scores, {}, tuned=True) is None
+
+
+def test_primary_failing_twice_hands_over_to_a_healthy_backup() -> None:
+    from src.application.services.router_config import autotune
+
+    scores = {
+        "nl": _score("nl", ok=False),
+        "fi": _score("fi", secs=0.4),
+        "us": _score("us", secs=0.2),
+    }
+    assert autotune("nl", "fi", scores, {"nl": 1}, tuned=True) is None  # one bad report: wait
+    d = autotune("nl", "fi", scores, {"nl": 2}, tuned=True)
+    assert d and (d.primary, d.backup) == ("fi", "us")
+
+
+def test_throttled_server_counts_as_failing_and_backup_is_replaced() -> None:
+    """A server that answers small probes but cuts large downloads (ISP «16 KB» throttling)
+    is not healthy."""
+    from src.application.services.router_config import autotune
+
+    scores = {
+        "fi": _score("fi", secs=0.2, big=True),
+        "nl": _score("nl", secs=0.3, big=False),
+        "us": _score("us", secs=0.6),
+    }
+    d = autotune("fi", "nl", scores, {"nl": 2}, tuned=True)
+    assert d and (d.primary, d.backup) == ("fi", "us")
+    # nothing healthy to move to -> leave it alone
+    assert autotune("fi", "nl", {"nl": _score("nl", ok=False)}, {"nl": 2}, tuned=True) is None
+
+
+def test_candidates_are_probe_only_never_in_the_balancer() -> None:
+    cfg = build_outbounds(
+        [_host(uuid="aaaaaaaa-primary", address="203.0.113.1")],
+        vless_uuid=VLESS_UUID,
+        subscription_active=True,
+        candidates=[_host(uuid="cccccccc-cand", address="203.0.113.3")],
+    )
+    tags = [o["tag"] for o in cfg["outbounds"]]
+    assert "cand-cccccccc" in tags
+    assert cfg["routing"]["balancers"][0]["selector"] == ["proxy-"]
+    assert cfg["burstObservatory"]["subjectSelector"] == ["proxy-"]
+    listeners = {i["tag"]: i["port"] for i in cfg["inbounds"]}
+    assert "cwtest-cand-cccccccc" in listeners
+    rule = [r for r in cfg["routing"]["rules"] if r.get("inboundTag") == ["cwtest-cand-cccccccc"]]
+    assert rule and rule[0]["outboundTag"] == "cand-cccccccc"

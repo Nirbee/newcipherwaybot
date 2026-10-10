@@ -641,3 +641,57 @@ async def test_stub_subscription_never_steers_routing_or_dns(
     routed = [i for i in cfg["inbounds"] if i["tag"] == "cwtest-routed"]
     assert routed and routed[0]["port"] == 10868
     assert not [r for r in rules if r.get("inboundTag") == ["cwtest-routed"]]
+
+
+async def test_auto_router_is_moved_to_what_works_from_its_isp(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Owner's request: AUTO routers start on least-connections servers, then the router's own
+    probes decide — fastest working server becomes the primary after the first check."""
+    http, container = client
+    container.remnawave_client.hosts = [
+        _host("nl-host-1", remark="NL", address="203.0.113.1"),
+        _host("fi-host-2", remark="FI", address="203.0.113.2"),
+        _host("us-host-3", remark="US", address="203.0.113.3"),
+    ]
+    device_id, token = await _create_device(
+        http, container, telegram_id=35, host_uuids=["nl-host-1", "fi-host-2", "us-host-3"]
+    )
+    auth = {"Authorization": f"Bearer {token}"}
+    cfg = (await http.get("/api/agent/config", headers=auth)).json()
+    proxies = sorted(o["tag"] for o in cfg["outbounds"] if o["tag"].startswith("proxy-"))
+    cands = [o["tag"] for o in cfg["outbounds"] if o["tag"].startswith("cand-")]
+    assert len(proxies) == 2 and len(cands) == 1  # the third allowlisted server is probed only
+
+    def probe(tag: str, ok: bool, secs: str = "") -> dict:
+        return {
+            "name": tag,
+            "ok": ok,
+            "ip": "x" if ok else "",
+            "secs": secs,
+            "big": "",
+            "error": "",
+        }
+
+    by_tag = {
+        "proxy-nl-host-": "nl",
+        "proxy-fi-host-": "fi",
+        "proxy-us-host-": "us",
+        "cand-nl-host-": "nl",
+        "cand-fi-host-": "fi",
+        "cand-us-host-": "us",
+    }
+    speeds = {"nl": "0.90", "fi": "0.80", "us": "0.10"}  # the candidate is the fastest
+    tests = [probe(t, True, speeds[by_tag[t]]) for t in [*proxies, *cands]]
+    container.redis.store.pop(f"agent:hb:{device_id}", None)
+    res = await http.post(
+        "/api/agent/heartbeat",
+        headers=auth,
+        json={"diagnostics": {"agent_version": "5", "self_test": tests}},
+    )
+    assert res.status_code == 204
+
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=await _login(http))).json()
+    assert detail["primary_host_uuid"] == "us-host-3"
+    assert "первая проверка" in detail["autotune"]["note"]
+    assert "US (0.10 с)" in detail["autotune"]["note"]

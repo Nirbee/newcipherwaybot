@@ -38,6 +38,7 @@ from src.web.routes.admin._common import OkOut, audit, iso
 from src.web.routes.admin.deps import AdminIdentity, require_admin
 from src.web.routes.agent import (
     ROUTER_XRAY_VERSION,
+    autotune_note,
     config_info,
     current_install_code,
     drop_install_code,
@@ -492,6 +493,10 @@ async def get_device(
     detail["install_code"] = await current_install_code(container, device.id)
     detail["config_info"] = await config_info(container, device.id)
     detail["recommended_xray"] = ROUTER_XRAY_VERSION
+    tune = await autotune_note(container, device.id)
+    detail["autotune"] = (
+        {"note": tune.get("note"), "at": tune.get("at")} if tune and tune.get("note") else None
+    )
     detail["install_report"] = device.install_report
     detail["diagnostics"] = device.diagnostics
     detail["subscription"] = summary

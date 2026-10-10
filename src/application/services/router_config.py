@@ -167,6 +167,7 @@ def build_outbounds(
     subscription_active: bool,
     template: RoutingTemplate | None = None,
     subscription_outbounds: Sequence[dict[str, Any]] | None = None,
+    candidates: Sequence[PanelHost] = (),
 ) -> dict[str, Any]:
     """``hosts`` must already be the small candidate set picked for ONE router (its primary +
     optional backup) — never a whole squad.
@@ -196,7 +197,21 @@ def build_outbounds(
                     proxies.append(outbound)
     proxy_tags = [str(o["tag"]) for o in proxies if str(o.get("tag", "")).startswith("proxy-")]
 
-    config: dict[str, Any] = {"outbounds": [*proxies, _DIRECT, _BLOCK]}
+    # AUTO routers also get a light probe through other allowlisted servers («cand-*»): never
+    # in the balancer or its health check, only measured by the agent so the server can move
+    # the router to whatever actually works best from the customer's ISP (see autotune()).
+    cand_outbounds: list[dict[str, Any]] = []
+    if subscription_active and proxy_tags:
+        for host in candidates:
+            if host.is_disabled or host.protocol != "vless":
+                continue
+            outbound = _proxy_outbound(host, vless_uuid)
+            if outbound is not None:
+                outbound["tag"] = candidate_tag(host.uuid)
+                cand_outbounds.append(outbound)
+    cand_tags = [str(o["tag"]) for o in cand_outbounds]
+
+    config: dict[str, Any] = {"outbounds": [*proxies, *cand_outbounds, _DIRECT, _BLOCK]}
     if proxy_tags:
         # Server picked the (1-2) candidates; the router's own observatory/balancer only
         # needs to pick the better of THOSE by live ping — cheap even with just one candidate.
@@ -218,7 +233,7 @@ def build_outbounds(
         balancer: dict[str, Any] = {
             "tag": _BALANCER_TAG,
             "selector": ["proxy-"],
-            "strategy": {"type": "leastPing"},
+            "strategy": _priority_strategy(proxy_tags),
         }
         routing: dict[str, Any] = {"balancers": [balancer]}
         rules: list[dict[str, Any]] = []
@@ -233,11 +248,34 @@ def build_outbounds(
             if template.dns:
                 config["dns"] = template.dns
         rules.append({"type": "field", "network": "tcp,udp", "balancerTag": _BALANCER_TAG})
-        inbounds, test_rules = _self_test_plumbing(proxy_tags)
+        inbounds, test_rules = _self_test_plumbing([*proxy_tags, *cand_tags])
         config["inbounds"] = inbounds
         routing["rules"] = test_rules + rules
         config["routing"] = routing
     return config
+
+
+# Weight that makes a backup lose to a live primary in practice. Xray's leastLoad ranks live
+# servers by RTT deviation × sqrt(weight) (app/router/strategy_leastload.go): sqrt(1e10) = 1e5,
+# so the backup is only picked while the primary is out of the health check — or jitters a
+# hundred thousand times worse. Deviation is in nanoseconds, so it's never exactly 0.
+_BACKUP_WEIGHT = 1e10
+
+
+def _priority_strategy(proxy_tags: Sequence[str]) -> dict[str, Any]:
+    """Primary first, backup only when the primary is down (owner's request: «основной» must
+    mean it — leastPing kept sending traffic to whichever server pinged faster). The first tag
+    is the primary; each further one weighs more. With none alive the balancer's fallbackTag
+    (direct) still keeps the customer online."""
+    costs = [
+        {"regexp": False, "match": tag, "value": _BACKUP_WEIGHT * i}
+        for i, tag in enumerate(proxy_tags)
+        if i > 0
+    ]
+    settings: dict[str, Any] = {"expected": 1}
+    if costs:
+        settings["costs"] = costs
+    return {"type": "leastLoad", "settings": settings}
 
 
 def _self_test_plumbing(
@@ -523,3 +561,90 @@ def hosts_within_squads(
         f"Сервер(ы) {', '.join(missing)} не входят в сквады подписки клиента — нода не пустила бы "
         f"его ключ. Использую: {used}."
     )
+
+
+# --- smart AUTO assignment ------------------------------------------------------------------
+
+CANDIDATE_PREFIX = "cand-"
+MAX_CANDIDATES = 6
+
+
+def candidate_tag(host_uuid: str) -> str:
+    return f"{CANDIDATE_PREFIX}{host_uuid[:8]}"
+
+
+def proxy_tag(host_uuid: str) -> str:
+    return f"proxy-{host_uuid[:8]}"
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeScore:
+    host_uuid: str
+    ok: bool
+    secs: float | None
+    big_ok: bool | None  # None = not measured (candidates get only the light probe)
+
+    @property
+    def healthy(self) -> bool:
+        return self.ok and self.big_ok is not False
+
+
+@dataclass(frozen=True, slots=True)
+class AutotuneDecision:
+    primary: str | None
+    backup: str | None
+    reason: str
+
+
+def autotune(
+    primary: str | None,
+    backup: str | None,
+    scores: dict[str, ProbeScore],
+    fail_streaks: dict[str, int],
+    *,
+    tuned: bool,
+) -> AutotuneDecision | None:
+    """Server choice for an AUTO router from its own probes (one report's ``scores`` by host
+    uuid, ``fail_streaks`` = consecutive unhealthy reports per host incl. this one).
+
+    - first report with results (``tuned`` False): fastest healthy server becomes the primary,
+      the next one the backup — least-connections at creation knew nothing about this ISP;
+    - afterwards only on failure: a primary (or backup) unhealthy 2 reports in a row is
+      replaced by the fastest healthy alternative. A working primary is never swapped for a
+      slightly faster one — no flapping on latency noise, no restarts for nothing.
+    Returns None when nothing should change."""
+
+    def healthy_by_speed(exclude: set[str | None]) -> list[str]:
+        ranked = [
+            s
+            for s in scores.values()
+            if s.healthy and fail_streaks.get(s.host_uuid, 0) == 0 and s.host_uuid not in exclude
+        ]
+        ranked.sort(key=lambda s: (s.secs if s.secs is not None else 99.0, s.host_uuid))
+        return [s.host_uuid for s in ranked]
+
+    if not tuned:
+        best = healthy_by_speed(set())
+        if not best:
+            return None
+        new_primary = best[0]
+        new_backup = best[1] if len(best) > 1 else (backup if backup != new_primary else None)
+        if (new_primary, new_backup) == (primary, backup):
+            return AutotuneDecision(primary, backup, "первая проверка с роутера: назначенные серверы и так лучшие")
+        return AutotuneDecision(new_primary, new_backup, "первая проверка с роутера: выбраны самые быстрые рабочие серверы")
+
+    if primary is not None and fail_streaks.get(primary, 0) >= 2:
+        best = healthy_by_speed({primary})
+        if not best:
+            return None
+        # a healthy backup is the natural successor; else the fastest healthy one
+        new_primary = backup if backup in best else best[0]
+        rest = [u for u in best if u != new_primary]
+        return AutotuneDecision(new_primary, rest[0] if rest else None, "основной сервер не прошёл 2 проверки подряд")
+
+    if backup is not None and fail_streaks.get(backup, 0) >= 2:
+        best = healthy_by_speed({primary, backup})
+        if not best:
+            return None
+        return AutotuneDecision(primary, best[0], "резервный сервер не прошёл 2 проверки подряд")
+    return None
