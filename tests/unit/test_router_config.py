@@ -84,7 +84,11 @@ def test_inactive_subscription_gets_freedom_only_no_uuid_leaked() -> None:
     tags = [o["tag"] for o in cfg["outbounds"]]
     assert tags == ["direct", "block"]
     assert "observatory" not in cfg and "burstObservatory" not in cfg
-    assert "routing" not in cfg
+    # explicit «everything direct»: without it XKeen's own template routing takes over and
+    # sends traffic to its placeholder proxy (field: router lost internet when a trial ended)
+    assert cfg["routing"] == {
+        "rules": [{"type": "field", "network": "tcp,udp", "outboundTag": "direct"}]
+    }
     assert VLESS_UUID not in json.dumps(cfg)
 
 
@@ -227,7 +231,9 @@ def test_build_with_template_puts_split_rules_before_catch_all() -> None:
 def test_inactive_subscription_ignores_template() -> None:
     tpl = routing_template_from_subscription(HAPP_SUBSCRIPTION)
     cfg = build_outbounds([_host()], vless_uuid=VLESS_UUID, subscription_active=False, template=tpl)
-    assert "routing" not in cfg
+    assert cfg["routing"]["rules"] == [
+        {"type": "field", "network": "tcp,udp", "outboundTag": "direct"}
+    ]
     assert "dns" not in cfg
 
 

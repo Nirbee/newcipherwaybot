@@ -16,7 +16,7 @@
 
 set -eu
 
-AGENT_VERSION="5"
+AGENT_VERSION="6"
 
 CONF_FILE="${CIPHERWAY_AGENT_CONF:-/opt/etc/cipherway-agent/agent.conf}"
 SELF="/opt/etc/cipherway-agent/agent.sh"
@@ -336,6 +336,45 @@ send_heartbeat() {
 
 # --- main ------------------------------------------------------------------------------
 
+# --- watchdog: never let a bad config strand the router ---------------------------------
+# On XKeen the router's own traffic can go through Xray too. A config that breaks routing
+# (field: a «VPN off» config left XKeen's template routing pointing at its placeholder proxy;
+# another time a hand-edited fallback) took the internet down for everyone — this agent
+# included, so no fix from the server could ever arrive. Fail open: when the server has been
+# unreachable 2 runs in a row AND nothing else answers either while Xray is up, stop XKeen,
+# fetch the config again over the plain connection and let it start Xray back up. If only
+# our server is down but the internet works, nothing is touched.
+
+internet_ok() {
+    curl -sS -m 8 -o /dev/null https://ya.ru 2>/dev/null \
+        || curl -sS -m 8 -o /dev/null https://www.google.com 2>/dev/null
+}
+
+watchdog() {
+    if [ "$1" != "000" ]; then
+        rm -f "$STATE_DIR/net_fail"
+        return 0
+    fi
+    fails="$(cat "$STATE_DIR/net_fail" 2>/dev/null || echo 0)"
+    fails=$((fails + 1))
+    echo "$fails" > "$STATE_DIR/net_fail"
+    if [ "$fails" -lt 2 ] || ! is_xray_running || internet_ok; then
+        return 0
+    fi
+    log "WATCHDOG: no server and no internet for $fails runs with Xray up — stopping XKeen (fail-open)"
+    touch "$STATE_DIR/stopped_by_agent"
+    if command -v xkeen >/dev/null 2>&1; then
+        xkeen -stop >> "$LOG_FILE" 2>&1 </dev/null || true
+    elif [ -x /opt/etc/init.d/S05xkeen ]; then
+        /opt/etc/init.d/S05xkeen stop >> "$LOG_FILE" 2>&1 </dev/null || true
+    fi
+    # Retry right away with a full fetch (no etag), so the fresh config restarts Xray.
+    rm -f "$STATE_DIR/net_fail" "$ETAG_FILE" "$STATE_DIR/headers.tmp" "$STATE_DIR/body.tmp"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    trap - EXIT INT TERM
+    exec sh "$SELF"
+}
+
 main() {
     rotate_log_if_needed
     acquire_lock
@@ -372,6 +411,10 @@ main() {
         -H "Authorization: Bearer $TOKEN" \
         -H "If-None-Match: \"$inm\"" \
         "$API_BASE/api/agent/config" 2>>"$LOG_FILE" || echo "000")"
+
+    # curl prints 000 on a network failure and `|| echo` appends another: normalise.
+    case "$http_code" in 000*) http_code="000" ;; esac
+    watchdog "$http_code"
 
     case "$http_code" in
         200)
@@ -410,6 +453,15 @@ main() {
 
     if [ "$NEED_RESTART" = "1" ]; then
         restart_xray || true
+    fi
+
+    # Back from a watchdog stop: the server answered, so bring the VPN back (a fresh config
+    # was just applied — the etag was dropped — and that restarts Xray; start it otherwise).
+    if [ -f "$STATE_DIR/stopped_by_agent" ] && { [ "$http_code" = "200" ] || [ "$http_code" = "304" ]; }; then
+        is_xray_running || restart_xray || true
+        rm -f "$STATE_DIR/stopped_by_agent"
+        LAST_ERROR="${LAST_ERROR:-VPN временно выключался агентом: с включённым Xray роутер терял интернет. Конфиг получен заново, VPN включён.}"
+        log "WATCHDOG: server reachable again, VPN back on"
     fi
 
     advertised="$(grep -i '^x-agent-version:' "$headers_tmp" 2>/dev/null | sed 's/^[^:]*: *//; s/[[:space:]]*$//')"

@@ -252,6 +252,14 @@ def build_outbounds(
         config["inbounds"] = inbounds
         routing["rules"] = test_rules + rules
         config["routing"] = routing
+    else:
+        # «VPN off» (unpaid / no server) must still SAY where traffic goes. Without a routing
+        # section of ours, XKeen's own 05_routing.json stays in force and sends everything to
+        # its template proxy — field: a trial ran out and the router lost internet entirely,
+        # its agent included, so the renewal could never reach it.
+        config["routing"] = {
+            "rules": [{"type": "field", "network": "tcp,udp", "outboundTag": "direct"}]
+        }
     return config
 
 
