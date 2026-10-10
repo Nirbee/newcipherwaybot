@@ -593,8 +593,9 @@ def test_clients_path_probe_outranks_the_server_probes() -> None:
 
     good_balancer = {"ok": True, "ip": "132.0.0.9", "big": "ok"}
 
-    def with_routed(routed: dict) -> dict:
+    def with_routed(routed: dict, agent_version: str = "4") -> dict:
         diag = _selftest(good_balancer)
+        diag["agent_version"] = agent_version
         diag["self_test"].append({"name": "routed", **routed})
         return diag
 
@@ -604,6 +605,9 @@ def test_clients_path_probe_outranks_the_server_probes() -> None:
     assert leak and leak["state"] == "direct" and "устройств" in leak["text"]
     fine = vpn_verdict(with_routed({"ok": True, "ip": "132.0.0.9"}))
     assert fine and fine["state"] == "ok"
+    # a v3 agent mid self-update probes this path against our .ru server (direct by design)
+    stale = vpn_verdict(with_routed({"ok": True, "ip": "91.0.0.1"}, agent_version="3"))
+    assert stale and stale["state"] == "ok" and stale["routed"] is None
 
 
 async def test_stub_subscription_never_steers_routing_or_dns(

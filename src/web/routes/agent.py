@@ -623,6 +623,15 @@ def vpn_verdict(
     # Agent v4+: the probe that travels the clients' own path (split rules, DNS). It outranks
     # the server probes — field: those passed while no device on the network opened a page.
     routed = by_name.get("routed")
+    try:
+        agent_version = int(str((diagnostics or {}).get("agent_version") or "0"))
+    except ValueError:
+        agent_version = 0
+    if agent_version < 4:
+        # v3 probes every cwtest-* listener against our own .ru server, which the split rules
+        # rightly send direct — its «routed» result reads as a leak. Seen once, during the
+        # fleet's self-update to v4; only v4+ probes this path against a foreign address.
+        routed = None
     if routed is not None and state in ("ok", "slow", "unknown"):
         routed_ip = str(routed.get("ip") or "")
         if not routed.get("ok"):
