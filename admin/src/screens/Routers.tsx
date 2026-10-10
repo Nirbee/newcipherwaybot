@@ -26,6 +26,7 @@ type VpnVerdict = {
   text: string;
   exit_ip?: string;
   direct_ip?: string;
+  routed?: ProbeResult | null;
   servers: ProbeResult[];
 } | null;
 type ConfigInfo = {
@@ -188,6 +189,16 @@ function VpnCheck({ vpn, info }: { vpn: VpnVerdict; info: ConfigInfo }) {
       )}
       {info?.warning && (
         <div style={{ color: "var(--warn)", fontSize: 12.5 }}>⚠️ {info.warning}</div>
+      )}
+      {vpn?.routed && (
+        <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+          <span>{vpn.routed.ok ? "✅" : "❌"} Устройства в сети (путь клиента)</span>
+          <span className="mono" style={{ fontSize: 11.5, textAlign: "right", wordBreak: "break-all" }}>
+            {vpn.routed.ok
+              ? `${vpn.routed.ip} · ${Number(vpn.routed.secs || 0).toFixed(2)} с`
+              : vpn.routed.error || "нет ответа"}
+          </span>
+        </div>
       )}
       {vpn?.servers.map((s) => (
         <div key={s.name} className="row" style={{ justifyContent: "space-between", gap: 10 }}>

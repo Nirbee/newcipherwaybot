@@ -33,8 +33,10 @@ from src.application.services.router_config import (
     build_outbounds,
     config_etag,
     hosts_within_squads,
+    is_stub_subscription,
     proxies_from_subscription,
     routing_template_from_subscription,
+    safe_split_template,
     select_subscription_outbounds,
 )
 from src.core.enums import RouterDeviceStatus
@@ -458,7 +460,12 @@ async def get_config(
         payload = await _subscription_payload(
             container, sub.id, panel_user.subscription_url if panel_user else None
         )
-        template = routing_template_from_subscription(payload) if payload else None
+        if payload and is_stub_subscription(payload):
+            # A stub's routing/DNS aren't the customer's template — field: a router took them,
+            # its own probes passed, and its clients couldn't open any page.
+            template = safe_split_template()
+        else:
+            template = routing_template_from_subscription(payload) if payload else None
 
     # Servers come from the customer's own subscription (the exact outbounds their Happ uses,
     # and only servers their squads grant). Rebuilding from panel host data is the fallback for
@@ -612,11 +619,30 @@ def vpn_verdict(
         )
     else:
         state, text = "ok", f"VPN работает, выход через {exit_ip}"
+
+    # Agent v4+: the probe that travels the clients' own path (split rules, DNS). It outranks
+    # the server probes — field: those passed while no device on the network opened a page.
+    routed = by_name.get("routed")
+    if routed is not None and state in ("ok", "slow", "unknown"):
+        routed_ip = str(routed.get("ip") or "")
+        if not routed.get("ok"):
+            state = "fail"
+            text = (
+                "Устройства в сети не выходят в интернет через роутер (серверы при этом "
+                f"отвечают): {routed.get('error') or 'нет ответа'}"
+            )
+        elif own_ip and routed_ip == own_ip:
+            state = "direct"
+            text = (
+                "VPN не работает для устройств в сети: их трафик идёт напрямую "
+                f"с адреса провайдера {own_ip}"
+            )
     return {
         "state": state,
         "text": text,
         "exit_ip": exit_ip,
         "direct_ip": direct_ip,
+        "routed": routed,
         "servers": servers,
     }
 

@@ -16,7 +16,7 @@
 
 set -eu
 
-AGENT_VERSION="3"
+AGENT_VERSION="4"
 
 CONF_FILE="${CIPHERWAY_AGENT_CONF:-/opt/etc/cipherway-agent/agent.conf}"
 SELF="/opt/etc/cipherway-agent/agent.sh"
@@ -217,9 +217,13 @@ xkeen_version() {
 # The large download catches ISPs that freeze connections to foreign hosts after ~16 KB.
 
 probe() {
-    # $1 = name, $2 = socks port ("" = straight from the router, no VPN)
+    # $1 = name, $2 = socks port ("" = straight from the router, no VPN),
+    # $3 = address-echo URL instead of our server, which also skips the big download. The
+    #      clients'-path probe needs a foreign one: our .ru server is, correctly, reached
+    #      direct by the split rules.
     p_name="$1"
     p_port="$2"
+    p_url="${3:-$API_BASE/api/agent/ip}"
     p_proxy=""
     [ -n "$p_port" ] && p_proxy="--socks5-hostname 127.0.0.1:$p_port"
     p_ip=""
@@ -228,10 +232,12 @@ probe() {
     # shellcheck disable=SC2086
     p_res="$(curl -sS -m 10 $p_proxy -H "Authorization: Bearer $TOKEN" \
         -o "$STATE_DIR/probe.out" -w '%{http_code} %{time_total}' \
-        "$API_BASE/api/agent/ip" 2>"$STATE_DIR/probe.err")" || true
+        "$p_url" 2>"$STATE_DIR/probe.err")" || true
     p_code="${p_res%% *}"
     p_secs="${p_res#* }"
-    if [ "$p_code" = "200" ]; then
+    if [ "$p_code" = "200" ] && [ -n "${3:-}" ]; then
+        p_ip="$(head -c 64 "$STATE_DIR/probe.out" | tr -d '\r\n ')"
+    elif [ "$p_code" = "200" ]; then
         p_ip="$(head -c 64 "$STATE_DIR/probe.out" | tr -d '\r\n ')"
         # shellcheck disable=SC2086
         p_bres="$(curl -sS -m 20 $p_proxy -H "Authorization: Bearer $TOKEN" \
@@ -259,7 +265,11 @@ self_test() {
         probe direct ""
         jq -r '.inbounds[]? | select(.tag | startswith("cwtest-")) | "\(.tag) \(.port)"' \
             "$TARGET" 2>/dev/null | while read -r t_tag t_port; do
-            probe "${t_tag#cwtest-}" "$t_port"
+            if [ "$t_tag" = "cwtest-routed" ]; then
+                probe routed "$t_port" "https://api.ipify.org"
+            else
+                probe "${t_tag#cwtest-}" "$t_port"
+            fi
         done
     } | jq -s '.'
 }

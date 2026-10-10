@@ -353,6 +353,7 @@ def test_self_test_inbounds_route_each_probe_to_its_server() -> None:
     )
     ports = {i["tag"]: i["port"] for i in cfg["inbounds"]}
     assert ports == {
+        "cwtest-routed": 10868,
         "cwtest-balancer": 10869,
         "cwtest-proxy-aaaaaaaa": 10870,
         "cwtest-proxy-bbbbbbbb": 10871,

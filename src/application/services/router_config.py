@@ -33,7 +33,51 @@ _NON_PROXY_PROTOCOLS = {"freedom", "blackhole", "dns", "loopback"}
 # Routed first, so no split-tunnel rule can send a probe direct.
 TEST_BALANCER_PORT = 10869
 TEST_PORT_BASE = 10870
+# A probe that gets NO routing rule of its own, so it travels exactly the path a LAN device's
+# traffic does (split rules, domain strategy, DNS). The per-server/balancer probes skip all of
+# that — a router once reported «VPN works» while its clients couldn't open a single page.
+TEST_ROUTED_PORT = 10868
 _TEST_TAG_PREFIX = "cwtest-"
+
+# Split rules used when the subscription only returns Remnawave's «App not supported» stub
+# (HWID limit on, our request has no device id): the stub's routing/DNS are not the customer's
+# real template and must not steer a router. Local networks and Russian TLDs go direct,
+# everything else through the VPN; no DNS override, no domain strategy (fewest moving parts).
+SAFE_SPLIT_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "type": "field",
+        "ip": [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "100.64.0.0/10",
+            "fc00::/7",
+            "fe80::/10",
+        ],
+        "outboundTag": "direct",
+    },
+    {
+        "type": "field",
+        "domain": ["domain:ru", "domain:su", "domain:xn--p1ai"],
+        "outboundTag": "direct",
+    },
+)
+
+
+def is_stub_subscription(payload: Any) -> bool:
+    """Remnawave's placeholder answer («App not supported» / HWID) instead of a real
+    subscription."""
+    configs = payload if isinstance(payload, list) else [payload]
+    return any(
+        isinstance(c, dict) and "not supported" in str(c.get("remarks") or "").lower()
+        for c in configs
+    )
+
+
+def safe_split_template() -> RoutingTemplate:
+    return RoutingTemplate(rules=SAFE_SPLIT_RULES, fallback_tag="direct")
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +252,10 @@ def _self_test_plumbing(
             "settings": {"auth": "noauth", "udp": False},
         }
 
-    inbounds = [socks(f"{_TEST_TAG_PREFIX}balancer", TEST_BALANCER_PORT)]
+    inbounds = [
+        socks(f"{_TEST_TAG_PREFIX}routed", TEST_ROUTED_PORT),  # no rule: the clients' path
+        socks(f"{_TEST_TAG_PREFIX}balancer", TEST_BALANCER_PORT),
+    ]
     rules: list[dict[str, Any]] = [
         {
             "type": "field",

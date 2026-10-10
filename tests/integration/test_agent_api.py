@@ -575,10 +575,65 @@ async def test_hwid_stub_subscription_falls_back_to_panel_servers_quietly(
     res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
     proxies = [o for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
     assert [o["settings"]["vnext"][0]["address"] for o in proxies] == ["203.0.113.1"]
+    # the stub's own rules are not trusted: the built-in split (local nets + RU TLDs) is used
     split = [r for r in res.json()["routing"]["rules"] if "inboundTag" not in r]
-    assert split[0]["domain"] == ["domain:ru"]
+    assert split[1]["domain"] == ["domain:ru", "domain:su", "domain:xn--p1ai"]
 
     detail = (await http.get(f"/api/admin/routers/{device_id}", headers=await _login(http))).json()
     assert detail["config_info"]["source"] == "panel"
     assert detail["config_info"]["warning"] is None
     assert detail["config_info"]["split_rules"] == 2
+
+
+def test_clients_path_probe_outranks_the_server_probes() -> None:
+    """Field: servers and balancer passed, the card said «VPN works», and no device on the
+    network could open a page (fixed only by `xkeen -stop`). The routed probe follows the
+    clients' path and decides."""
+    from src.web.routes.agent import vpn_verdict
+
+    good_balancer = {"ok": True, "ip": "132.0.0.9", "big": "ok"}
+
+    def with_routed(routed: dict) -> dict:
+        diag = _selftest(good_balancer)
+        diag["self_test"].append({"name": "routed", **routed})
+        return diag
+
+    broken = vpn_verdict(with_routed({"ok": False, "ip": "", "error": "curl: (28) timeout"}))
+    assert broken and broken["state"] == "fail" and "Устройства в сети" in broken["text"]
+    leak = vpn_verdict(with_routed({"ok": True, "ip": "91.0.0.1"}))
+    assert leak and leak["state"] == "direct" and "устройств" in leak["text"]
+    fine = vpn_verdict(with_routed({"ok": True, "ip": "132.0.0.9"}))
+    assert fine and fine["state"] == "ok"
+
+
+async def test_stub_subscription_never_steers_routing_or_dns(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-de", remark="DE", address="203.0.113.1")]
+    container.remnawave_client.subscription_json = [
+        {
+            "remarks": "App not supported",
+            "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+            "dns": {"servers": ["https://10.255.255.1/dns-query"]},
+            "routing": {
+                "domainStrategy": "IPOnDemand",
+                "rules": [{"type": "field", "network": "tcp,udp", "outboundTag": "block"}],
+            },
+        }
+    ]
+    _device_id, token = await _create_device(
+        http, container, telegram_id=34, host_uuids=["host-de"]
+    )
+    cfg = (await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})).json()
+    assert "dns" not in cfg
+    assert "domainStrategy" not in cfg["routing"]
+    rules = cfg["routing"]["rules"]
+    assert all(r.get("outboundTag") != "block" for r in rules)  # the stub's block-all is gone
+    split = [r for r in rules if "inboundTag" not in r]
+    assert {"domain": ["domain:ru", "domain:su", "domain:xn--p1ai"]}.items() <= split[1].items()
+    assert split[-1]["balancerTag"] == "balancer"
+    # the clients'-path probe listener has no rule of its own
+    routed = [i for i in cfg["inbounds"] if i["tag"] == "cwtest-routed"]
+    assert routed and routed[0]["port"] == 10868
+    assert not [r for r in rules if r.get("inboundTag") == ["cwtest-routed"]]
