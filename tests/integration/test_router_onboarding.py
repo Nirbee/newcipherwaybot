@@ -31,8 +31,9 @@ class _RecordingNotifier:
 
     async def notify_admins(self, text: str, *, topic: str | None = None) -> None: ...
 
-    async def notify_admins_document(self, document: object, *, caption: str | None = None) -> None:
-        ...
+    async def notify_admins_document(
+        self, document: object, *, caption: str | None = None
+    ) -> None: ...
 
     async def aclose(self) -> None: ...
 
@@ -41,12 +42,24 @@ async def _router_plans(container: ApiTestContainer) -> tuple[int, int]:
     """Base router plan (trial target) and a pricier family variant."""
     async with container.uow() as uow:
         base, _ = await make_plan(
-            uow, code="router-base", name="Роутер", price_minor=50000, days=30,
-            category=PlanCategory.ROUTER, device_limit=1, order_index=1,
+            uow,
+            code="router-base",
+            name="Роутер",
+            price_minor=50000,
+            days=30,
+            category=PlanCategory.ROUTER,
+            device_limit=1,
+            order_index=1,
         )
         family, _ = await make_plan(
-            uow, code="router-plus2", name="Роутер + 2 чел.", price_minor=90000, days=30,
-            category=PlanCategory.ROUTER, device_limit=3, order_index=2,
+            uow,
+            code="router-plus2",
+            name="Роутер + 2 чел.",
+            price_minor=90000,
+            days=30,
+            category=PlanCategory.ROUTER,
+            device_limit=3,
+            order_index=2,
         )
         await container.bot_config.set_values(uow, {"BOT_USERNAME": "cipherway_bot"})
         await uow.commit()
@@ -429,3 +442,21 @@ async def test_short_install_code_serves_a_wrapper_and_dies_with_the_token(
     await http.post(f"/api/admin/routers/{body['id']}/revoke", headers=auth)
     gone = (await http.get(f"/i/{rotated['install_code']}")).text
     assert "exit 1" in gone and rotated["token"] not in gone
+
+
+async def test_technician_can_rename_a_router(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """The card's title is an inline field: a rename is a PATCH of the label."""
+    http, container = client
+    await _router_plans(container)
+    auth = await _login(http)
+    body = await _create_qr_router(http, auth)
+    res = await http.patch(
+        f"/api/admin/routers/{body['id']}", headers=auth, json={"label": "Ленина 5, кв. 12"}
+    )
+    assert res.status_code == 200, res.text
+    detail = (await http.get(f"/api/admin/routers/{body['id']}", headers=auth)).json()
+    assert detail["label"] == "Ленина 5, кв. 12"
+    blank = await http.patch(f"/api/admin/routers/{body['id']}", headers=auth, json={"label": ""})
+    assert blank.status_code == 422  # an empty name is refused, the old one stays

@@ -930,9 +930,35 @@ export default function Routers() {
         <Drawer onClose={() => setOpenId(null)}>
           {detail.data && (
             <div className="grid" style={{ gap: 14 }}>
-              <div className="h1" style={{ fontSize: 18 }}>
-                {detail.data.label}
-              </div>
+              {/* Technicians rename routers here (address, family name…) so they don't lose
+                  track of which one is which; saved on Enter or when the field loses focus. */}
+              <label className="rt-title" title="Нажмите, чтобы переименовать">
+                <input
+                  key={detail.data.id}
+                  className="rt-title-input"
+                  defaultValue={detail.data.label}
+                  maxLength={128}
+                  aria-label={t.routersLabel}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.currentTarget.blur();
+                    if (e.key === "Escape") {
+                      e.currentTarget.value = detail.data?.label ?? "";
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  onBlur={(e) => {
+                    const value = e.currentTarget.value.trim();
+                    if (!value) {
+                      e.currentTarget.value = detail.data?.label ?? "";
+                      return;
+                    }
+                    if (value !== detail.data?.label) void patchDevice(detail.data!.id, { label: value });
+                  }}
+                />
+                <span className="rt-title-pen" aria-hidden>
+                  ✎
+                </span>
+              </label>
               <Field label={t.routersSub}>
                 <div className="grid" style={{ gap: 6, fontSize: 13 }}>
                   <div>{subLine(detail.data.subscription)}</div>
