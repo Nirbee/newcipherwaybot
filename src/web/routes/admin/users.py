@@ -206,6 +206,12 @@ async def user_detail(
             if user.current_subscription_id
             else None
         )
+        if sub is not None and sub.status.is_usable:
+            # The stored usage only moves on panel webhooks / the customer's own screens —
+            # the card showed 114 MB while Remnawave had 625 MB. Live value (cached 60 s,
+            # stored value if the panel is slow), same as the bot and the cabinet.
+            await container.traffic.refresh_used_bytes(sub, telegram_id=user.telegram_id)
+            await uow.commit()
         txs = await uow.transactions.list_recent(user_id, limit=10)
         invited = await uow.users.count(referred_by_id=user_id)
         earned_minor = await uow.referral_earnings.total_minor(user_id)

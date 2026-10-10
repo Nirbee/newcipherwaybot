@@ -301,3 +301,32 @@ async def test_bot_ignores_free_text_in_miniapp_mode_without_open_ticket(
     await tickets.user_message(_Msg(), container, user, _State())  # type: ignore[arg-type]
     async with container.uow() as uow:
         assert await uow.tickets.list(user_id=user.id) == []
+
+
+async def test_user_card_shows_live_traffic_from_the_panel(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Field: the card said 114 MB while Remnawave had 625 MB — the stored number only moves
+    on panel webhooks and the customer's own screens. Opening the card now pulls it live."""
+    import dataclasses
+
+    http, container = client
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=84445495)
+        plan, _ = await make_plan(uow, code="traffic-live")
+        await uow.commit()
+        req = PurchaseRequest(
+            user_id=user.id, plan_id=plan.id, duration_days=30, currency=Currency.RUB
+        )
+        sub = await container.subscriptions.grant(uow, user=user, plan=plan, req=req)
+        user.current_subscription_id = sub.id
+        await uow.commit()
+        user_id, panel_uuid = user.id, sub.remnawave_uuid
+
+    fake = container.remnawave_client
+    key = next(k for k, u in fake.users.items() if str(u.uuid) == str(panel_uuid))
+    fake.users[key] = dataclasses.replace(fake.users[key], traffic_used_bytes=655_947_776)
+
+    detail = (await http.get(f"/api/admin/users/{user_id}", headers=await _login(http))).json()
+    assert detail["traffic_used_bytes"] == 655_947_776
+    assert detail["subscription"]["traffic_used_bytes"] == 655_947_776
