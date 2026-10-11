@@ -22,7 +22,7 @@ type ProbeResult = {
   error: string;
 };
 type VpnVerdict = {
-  state: "ok" | "direct" | "slow" | "fail" | "unknown" | "none";
+  state: "ok" | "direct" | "slow" | "fail" | "unknown" | "none" | "expired";
   text: string;
   exit_ip?: string;
   direct_ip?: string;
@@ -157,6 +157,7 @@ const VPN_COLOR: Record<string, string> = {
   direct: "var(--bad-ink)",
   fail: "var(--bad-ink)",
   none: "var(--muted)",
+  expired: "var(--muted)",
 };
 
 function VpnBadge({ vpn }: { vpn: VpnVerdict }) {
@@ -168,7 +169,9 @@ function VpnBadge({ vpn }: { vpn: VpnVerdict }) {
         ? "VPN медленно"
         : vpn.state === "unknown"
           ? "VPN не проверен"
-          : "VPN не работает";
+          : vpn.state === "expired"
+            ? "VPN выкл. — не оплачено"
+            : "VPN не работает";
   return (
     <div className="vpn-badge" style={{ color: VPN_COLOR[vpn.state] }} title={vpn.text}>
       {label}

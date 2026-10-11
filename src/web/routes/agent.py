@@ -531,7 +531,8 @@ async def get_config(
         **(info.get("tags") or {}),
         **{candidate_tag(h.uuid): h.remark for h in candidates},
     }
-    if not sub.status.is_usable:
+    live = subscription_live(sub)
+    if not live:
         info = {"source": "none", "servers": [], "warning": "Подписка не активна — VPN выключен."}
     await _redis_set(
         container, f"agent:cfginfo:{device.id}", json.dumps(info, ensure_ascii=False), 86400
@@ -540,7 +541,7 @@ async def get_config(
     config = build_outbounds(
         hosts,
         vless_uuid=vless_uuid,
-        subscription_active=sub.status.is_usable,
+        subscription_active=live,
         template=template,
         subscription_outbounds=subscription_outbounds,
         candidates=candidates,
@@ -589,8 +590,25 @@ async def probe_blob(_device: RouterDevice = Depends(require_device)) -> Respons
     )
 
 
+def subscription_live(sub: Any) -> bool:
+    """Paid/trial and not past its end date. The stored status flips a little after the
+    panel expires a user (webhook / sweep); in between the panel already rejects the UUID, so
+    the end date is checked directly — field: a trial ended, the node cut every connection,
+    and the router still got a VPN config and a red «all servers down»."""
+    if sub is None or not sub.status.is_usable:
+        return False
+    expire_at = sub.expire_at
+    if expire_at is None:
+        return True
+    if expire_at.tzinfo is None:
+        expire_at = expire_at.replace(tzinfo=dt.UTC)
+    return expire_at > dt.datetime.now(dt.UTC)
+
+
 def vpn_verdict(
-    diagnostics: dict[str, Any] | None, isp_ip: str | None = None
+    diagnostics: dict[str, Any] | None,
+    isp_ip: str | None = None,
+    sub_live: bool | None = None,
 ) -> dict[str, Any] | None:
     """Plain-language verdict from the agent's self-test (agent v3+), or None without one.
 
@@ -606,6 +624,17 @@ def vpn_verdict(
     address when that probe itself failed — without either, a balancer that fell back to
     direct would otherwise read as "VPN works".
     """
+    if sub_live is False:
+        # Not a fault: unpaid means VPN off and plain internet (config routes direct).
+        return {
+            "state": "expired",
+            "text": "Подписка закончилась — VPN выключен, интернет у клиента идёт напрямую",
+            "exit_ip": "",
+            "direct_ip": "",
+            "routed": None,
+            "servers": [],
+            "candidates": [],
+        }
     tests = (diagnostics or {}).get("self_test")
     if not isinstance(tests, list) or not tests:
         return None
@@ -797,7 +826,7 @@ async def _alert_on_vpn_change(
 ) -> None:
     """One message to the «alerts» topic when a router's VPN breaks (confirmed by two reports
     in a row, so a restart's first seconds don't page anyone) and one when it recovers."""
-    if verdict is None or verdict["state"] in ("none", "unknown"):
+    if verdict is None or verdict["state"] in ("none", "unknown", "expired"):
         return
     key = f"agent:vpn:{device.id}"
     prev_raw = await _redis_get(container, key)
@@ -860,8 +889,11 @@ async def heartbeat(
         if stored:
             fresh.diagnostics = diagnostics
         await uow.commit()
+        live = subscription_live(await uow.subscriptions.get(fresh.subscription_id))
     if stored:
-        await _alert_on_vpn_change(container, fresh, vpn_verdict(diagnostics, fresh.external_ip))
+        await _alert_on_vpn_change(
+            container, fresh, vpn_verdict(diagnostics, fresh.external_ip, live)
+        )
         await _autotune_device(container, device.id, diagnostics)
 
 

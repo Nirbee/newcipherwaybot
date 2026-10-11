@@ -39,6 +39,7 @@ from src.web.routes.admin.deps import AdminIdentity, require_admin
 from src.web.routes.agent import (
     ROUTER_XRAY_VERSION,
     autotune_note,
+    subscription_live,
     config_info,
     current_install_code,
     drop_install_code,
@@ -98,7 +99,7 @@ def _sub_summary(sub: Any) -> dict[str, Any] | None:
     }
 
 
-def _row(device: RouterDevice, sub_label: str | None) -> dict[str, Any]:
+def _row(device: RouterDevice, sub_label: str | None, sub: Any = None) -> dict[str, Any]:
     return {
         "id": device.id,
         "label": device.label,
@@ -117,7 +118,11 @@ def _row(device: RouterDevice, sub_label: str | None) -> dict[str, Any]:
         "external_ip": device.external_ip,
         "last_error": device.last_error,
         # Agent v3 self-test: does traffic really leave through a VPN server?
-        "vpn": vpn_verdict(device.diagnostics, device.external_ip),
+        "vpn": vpn_verdict(
+            device.diagnostics,
+            device.external_ip,
+            subscription_live(sub) if sub is not None else None,
+        ),
         "note": device.note,
         "created_at": iso(device.created_at),
     }
@@ -204,7 +209,14 @@ async def set_eligible_hosts(
 async def list_devices(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
     async with container.uow() as uow:
         devices = await uow.router_devices.list(limit=500)
-        rows = [_row(d, await _subscription_label(uow, d.subscription_id)) for d in devices]
+        rows = [
+            _row(
+                d,
+                await _subscription_label(uow, d.subscription_id),
+                await uow.subscriptions.get(d.subscription_id),
+            )
+            for d in devices
+        ]
     return {"items": rows}
 
 
@@ -481,13 +493,14 @@ async def get_device(
         if device is None:
             raise HTTPException(404, "device not found")
         label = await _subscription_label(uow, device.subscription_id)
-        summary = _sub_summary(await uow.subscriptions.get(device.subscription_id))
+        sub = await uow.subscriptions.get(device.subscription_id)
+        summary = _sub_summary(sub)
         bot_username = await _bot_username(container, uow)
     try:
         hosts = await container.remnawave_client.get_hosts()
     except Exception:
         hosts = []
-    detail = _row(device, label)
+    detail = _row(device, label, sub)
     # The short install command stays available from the card for its 24h lifetime, so a
     # technician who closed the token window can still read it off the phone.
     detail["install_code"] = await current_install_code(container, device.id)

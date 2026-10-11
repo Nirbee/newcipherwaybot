@@ -695,3 +695,46 @@ async def test_auto_router_is_moved_to_what_works_from_its_isp(
     assert detail["primary_host_uuid"] == "us-host-3"
     assert "первая проверка" in detail["autotune"]["note"]
     assert "US (0.10 с)" in detail["autotune"]["note"]
+
+
+async def test_past_end_date_means_vpn_off_and_no_alarm_before_the_status_flips(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    """Field: a trial ended, the panel already cut the UUID, but the stored status had not
+    flipped yet — the router still got VPN config and the card went red «all servers down»."""
+    import datetime as dt
+
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-a")]
+    device_id, token = await _create_device(http, container, telegram_id=36, host_uuids=["host-a"])
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+        sub = await uow.subscriptions.get(device.subscription_id)
+        sub.expire_at = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=5)  # status still ACTIVE
+        await uow.commit()
+
+    auth = {"Authorization": f"Bearer {token}"}
+    cfg = (await http.get("/api/agent/config", headers=auth)).json()
+    assert [o["tag"] for o in cfg["outbounds"]] == ["direct", "block"]
+    assert cfg["routing"]["rules"] == [
+        {"type": "field", "network": "tcp,udp", "outboundTag": "direct"}
+    ]
+
+    sent: list[str] = []
+
+    async def fake_report(_container, code: str, text: str, **_kw) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr("src.infrastructure.services.reports.send_topic_report", fake_report)
+    dead = {"ok": False, "ip": "", "error": "curl: (35) unexpected eof"}
+    for _ in range(3):
+        container.redis.store.pop(f"agent:hb:{device_id}", None)
+        await http.post(
+            "/api/agent/heartbeat",
+            headers=auth,
+            json={"diagnostics": _selftest(dead)},
+        )
+    assert sent == []  # unpaid is not an outage
+    row = (await http.get("/api/admin/routers", headers=await _login(http))).json()["items"][0]
+    assert row["vpn"]["state"] == "expired"
