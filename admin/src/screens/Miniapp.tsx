@@ -288,41 +288,6 @@ export default function Miniapp() {
     patchUi({ buttons_extra: (cfg?.ui.buttons_extra ?? []).filter((_, j) => j !== i) });
   }
 
-  function patchLanding(p: Partial<UiLanding>) {
-    setCfg((c) => (c ? { ...c, ui: { ...c.ui, landing: { ...(c.ui.landing ?? {}), ...p } } } : c));
-    setDirty(true);
-  }
-  function addFeature() {
-    patchLanding({ features: [...(cfg?.ui.landing?.features ?? []), { id: newId("f"), icon: "", title: "", text: "" }] });
-  }
-  function patchFeature(i: number, field: keyof UiFeature, value: string) {
-    setCfg((c) => {
-      if (!c) return c;
-      const features = [...(c.ui.landing?.features ?? [])];
-      features[i] = { ...features[i], [field]: value };
-      return { ...c, ui: { ...c.ui, landing: { ...(c.ui.landing ?? {}), features } } };
-    });
-    setDirty(true);
-  }
-  function removeFeature(i: number) {
-    patchLanding({ features: (cfg?.ui.landing?.features ?? []).filter((_, j) => j !== i) });
-  }
-  function addFaq() {
-    patchLanding({ faq: [...(cfg?.ui.landing?.faq ?? []), { id: newId("q"), q: "", a: "" }] });
-  }
-  function patchFaq(i: number, field: keyof UiFaq, value: string) {
-    setCfg((c) => {
-      if (!c) return c;
-      const faq = [...(c.ui.landing?.faq ?? [])];
-      faq[i] = { ...faq[i], [field]: value };
-      return { ...c, ui: { ...c.ui, landing: { ...(c.ui.landing ?? {}), faq } } };
-    });
-    setDirty(true);
-  }
-  function removeFaq(i: number) {
-    patchLanding({ faq: (cfg?.ui.landing?.faq ?? []).filter((_, j) => j !== i) });
-  }
-
   async function save(publish = false) {
     if (!cfg) return;
     try {
@@ -664,116 +629,11 @@ export default function Miniapp() {
                 </div>
               </div>
 
-              {/* public marketing site (served at /) — same theme, own copy */}
-              <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-                <div className="row spread" style={{ marginBottom: 4 }}>
-                  <span className="caps">🌐 {t.landing}</span>
-                  <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
-                    <input
-                      type="checkbox"
-                      checked={cfg.ui.landing?.enabled !== false}
-                      onChange={(e) => patchLanding({ enabled: e.target.checked })}
-                    />
-                    {t.landingEnabled}
-                  </label>
-                </div>
-                <div className="dim" style={{ fontSize: 12, marginBottom: 10 }}>{t.landingHint}</div>
-                <div className="grid" style={{ gap: 10 }}>
-                  <Field label={t.landingTarget}>
-                    <select
-                      className="input"
-                      value={cfg.ui.landing?.cta_target ?? "web"}
-                      onChange={(e) => patchLanding({ cta_target: e.target.value })}
-                    >
-                      <option value="web">{t.landingTargetWeb}</option>
-                      <option value="bot">{t.landingTargetBot}</option>
-                    </select>
-                  </Field>
-                  <Field label={t.landingHeadline}>
-                    <input
-                      className="input"
-                      value={cfg.ui.landing?.headline ?? ""}
-                      placeholder={t.landingHeadlinePh}
-                      maxLength={120}
-                      onChange={(e) => patchLanding({ headline: e.target.value })}
-                    />
-                  </Field>
-                  <Field label={t.landingSub}>
-                    <textarea
-                      className="input"
-                      style={{ minHeight: 44, resize: "vertical" }}
-                      value={cfg.ui.landing?.subheadline ?? ""}
-                      placeholder={t.landingSubPh}
-                      maxLength={300}
-                      onChange={(e) => patchLanding({ subheadline: e.target.value })}
-                    />
-                  </Field>
-
-                  <div className="row spread">
-                    <span className="caps">{t.landingFeatures}</span>
-                    <button className="btn secondary sm" onClick={addFeature}>+ {t.add}</button>
-                  </div>
-                  {(cfg.ui.landing?.features ?? []).map((f, i) => (
-                    <div key={f.id} className="row" style={{ gap: 6 }}>
-                      <input
-                        className="input"
-                        style={{ width: 46, textAlign: "center" }}
-                        placeholder="⚡"
-                        value={f.icon}
-                        maxLength={8}
-                        onChange={(e) => patchFeature(i, "icon", e.target.value)}
-                      />
-                      <input
-                        className="input"
-                        style={{ flex: "1 1 110px" }}
-                        placeholder={t.blockTitle}
-                        value={f.title}
-                        maxLength={60}
-                        onChange={(e) => patchFeature(i, "title", e.target.value)}
-                      />
-                      <input
-                        className="input"
-                        style={{ flex: "2 1 150px" }}
-                        placeholder={t.blockText}
-                        value={f.text}
-                        maxLength={200}
-                        onChange={(e) => patchFeature(i, "text", e.target.value)}
-                      />
-                      <button className="btn danger sm" title={t.remove} onClick={() => removeFeature(i)}>✕</button>
-                    </div>
-                  ))}
-                  {!(cfg.ui.landing?.features ?? []).length && (
-                    <div className="dim" style={{ fontSize: 12 }}>{t.landingFeaturesHint}</div>
-                  )}
-
-                  <div className="row spread">
-                    <span className="caps">{t.landingFaq}</span>
-                    <button className="btn secondary sm" onClick={addFaq}>+ {t.add}</button>
-                  </div>
-                  {(cfg.ui.landing?.faq ?? []).map((q, i) => (
-                    <div key={q.id} className="grid" style={{ gap: 4 }}>
-                      <div className="row" style={{ gap: 6 }}>
-                        <input
-                          className="input"
-                          style={{ flex: 1 }}
-                          placeholder={t.landingFaqQ}
-                          value={q.q}
-                          maxLength={160}
-                          onChange={(e) => patchFaq(i, "q", e.target.value)}
-                        />
-                        <button className="btn danger sm" title={t.remove} onClick={() => removeFaq(i)}>✕</button>
-                      </div>
-                      <textarea
-                        className="input"
-                        style={{ minHeight: 40, resize: "vertical" }}
-                        placeholder={t.landingFaqA}
-                        value={q.a}
-                        maxLength={600}
-                        onChange={(e) => patchFaq(i, "a", e.target.value)}
-                      />
-                    </div>
-                  ))}
-                </div>
+              {/* The public site's copy moved to its own tab («Сайт») with the cabinet/e-mail
+                  settings and the links to hand out; it still shares this theme. */}
+              <div className="dim" style={{ borderTop: "1px solid var(--border)", paddingTop: 12, fontSize: 12.5 }}>
+                🌐 Тексты и настройки сайта для продажи — во вкладке{" "}
+                <a href="#/site" style={{ color: "var(--accent)" }}>«Сайт»</a>. Тема сайта — та же, что здесь.
               </div>
 
               {dirty && (

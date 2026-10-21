@@ -120,6 +120,20 @@ class ApiTestContainer:
             enabled=False, url="", app_version="test", install_id="test"
         )
 
+    async def build_mailer(self):  # type: ignore[no-untyped-def]
+        """Same as AppContainer.build_mailer: SMTP settings from the hot-reload config."""
+        from src.infrastructure.services.mailer import Mailer
+
+        async with self.uow() as uow:
+            cfg = self.bot_config
+            return Mailer(
+                host=str(await cfg.value(uow, "SMTP_HOST") or ""),
+                port=int(await cfg.value(uow, "SMTP_PORT") or 587),
+                user=str(await cfg.value(uow, "SMTP_USER") or ""),
+                password=str(await cfg.value(uow, "SMTP_PASSWORD") or ""),
+                from_addr=str(await cfg.value(uow, "SMTP_FROM") or ""),
+            )
+
     def uow(self) -> UnitOfWork:
         return UnitOfWork(self._session_factory)
 

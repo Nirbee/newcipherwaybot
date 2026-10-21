@@ -150,6 +150,7 @@ export default function Layout() {
     { group: t.gConstructor, icon: "🧱", path: "/bot-buttons", label: t.botButtons },
     { icon: "🖼️", path: "/bot-images", label: t.botImages },
     { icon: "📱", path: "/miniapp", label: t.miniapp },
+    { icon: "🌐", path: "/site", label: t.site },
     { group: t.gMarketing, icon: "📣", path: "/broadcasts", label: t.broadcasts },
     { icon: "⏰", path: "/smart", label: t.smart },
     { icon: "🔔", path: "/notifications", label: t.notifications },

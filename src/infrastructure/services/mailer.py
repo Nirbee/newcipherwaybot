@@ -42,12 +42,24 @@ class Mailer:
         msg["Subject"] = subject
         msg["From"] = self._from
         msg["To"] = to
+        # 465 is implicit TLS (Yandex, Mail.ru, many hosts offer only that); 587/25 = STARTTLS.
+        if self._port == 465:
+            with smtplib.SMTP_SSL(self._host, self._port, timeout=15) as smtp:
+                if self._user:
+                    smtp.login(self._user, self._password)
+                smtp.send_message(msg)
+            return
         with smtplib.SMTP(self._host, self._port, timeout=15) as smtp:
             if self._tls:
                 smtp.starttls()
             if self._user:
                 smtp.login(self._user, self._password)
             smtp.send_message(msg)
+
+    async def send_strict(self, to: str, subject: str, body: str) -> None:
+        """Like send(), but raises — for the admin's «test e-mail», which must show the real
+        SMTP error (wrong password, blocked port…) instead of a silent False."""
+        await asyncio.to_thread(self._send_sync, to, subject, body)
 
     async def send(self, to: str, subject: str, body: str) -> bool:
         if not self.configured:

@@ -30,6 +30,7 @@ router = APIRouter(prefix="/admins")
 SCOPABLE_SCREENS = (
     "routers", "users", "servers", "settings", "stats", "broadcasts", "notifications",
     "reminders", "campaigns", "partners", "sales", "ai-support", "blacklist", "miniapp",
+    "site",
 )
 _PROTECTED_ROLES = (Role.OWNER, Role.DEV)  # never editable/revocable through this screen
 
