@@ -450,3 +450,38 @@ async def test_user_search_finds_people_by_every_number_shown_on_them(
     for q in ("75", "user_5072755730", "5072755730", "50727", f"id{bot_id}", "sub_KLknosdBaC"):
         assert bot_id in await found(q), q
     assert bot_id not in await found("id75") or bot_id == 75  # «id» = the bot's own number only
+
+
+async def test_card_shows_the_panel_side_and_sync_reenables_a_disabled_panel_user(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Field: bot «Активна до 13.11», Remnawave DISABLED (user_5072755730). The card now
+    shows the panel's name/number/status and the mismatch; «sync» turns the panel user back on."""
+    import dataclasses
+
+    http, container = client
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=5072755730)
+        plan, _ = await make_plan(uow, code="card-panel")
+        await uow.commit()
+        req = PurchaseRequest(
+            user_id=user.id, plan_id=plan.id, duration_days=30, currency=Currency.RUB
+        )
+        sub = await container.subscriptions.grant(uow, user=user, plan=plan, req=req)
+        user.current_subscription_id = sub.id
+        await uow.commit()
+        user_id, panel_uuid = user.id, sub.remnawave_uuid
+
+    fake = container.remnawave_client
+    key = next(k for k, u in fake.users.items() if str(u.uuid) == str(panel_uuid))
+    fake.users[key] = dataclasses.replace(
+        fake.users[key], is_enabled=False, status="DISABLED", username="user_5072755730"
+    )
+    auth = await _login(http)
+    panel = (await http.get(f"/api/admin/users/{user_id}", headers=auth)).json()["panel"]
+    assert panel["username"] == "user_5072755730" and panel["status"] == "DISABLED"
+    assert any("DISABLED" in m for m in panel["mismatch"])
+
+    res = await http.post(f"/api/admin/users/{user_id}/sync", headers=auth)
+    assert res.status_code == 200, res.text
+    assert fake.users[key].is_enabled is True

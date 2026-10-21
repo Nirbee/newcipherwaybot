@@ -1654,3 +1654,6 @@ hr.sep {
     white-space: normal;
   }
 }
+.ud-section.ud-warn {
+  border-color: var(--warn);
+}

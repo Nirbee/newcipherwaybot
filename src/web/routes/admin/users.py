@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import datetime as dt
 from dataclasses import replace
@@ -310,6 +311,47 @@ async def panel_sync_import(
     return summary
 
 
+async def _panel_view(
+    container: AppContainer, sub: Subscription | None, telegram_id: int | None
+) -> dict[str, Any] | None:
+    """Remnawave's side of this subscription, with what disagrees with the bot."""
+    if sub is None or sub.panel_ref is None:
+        return None
+    ref = replace(sub.panel_ref, telegram_id=telegram_id)
+    try:
+        panel = await asyncio.wait_for(container.remnawave_client.get_user(ref), timeout=2.5)
+    except Exception as exc:
+        return {"error": f"панель не ответила: {str(exc)[:120]}"}
+    if panel is None:
+        return {"error": "в панели такого пользователя нет — подписка ссылается на удалённого"}
+    status = panel.status or ("ACTIVE" if panel.is_enabled else "DISABLED")
+    mismatch: list[str] = []
+    bot_live = sub.status.is_usable
+    if bot_live and status != "ACTIVE":
+        mismatch.append(f"в боте подписка рабочая, а в панели {status}")
+    if not bot_live and status == "ACTIVE":
+        mismatch.append("в панели активен, а в боте подписка не рабочая")
+    if sub.expire_at and panel.expire_at:
+        bot_end = sub.expire_at if sub.expire_at.tzinfo else sub.expire_at.replace(tzinfo=dt.UTC)
+        if abs((bot_end - panel.expire_at).total_seconds()) > 86400:
+            mismatch.append(
+                f"срок: в боте до {bot_end:%d.%m.%Y}, в панели до {panel.expire_at:%d.%m.%Y}"
+            )
+    if (sub.device_limit or 0) != (panel.device_limit or 0):
+        mismatch.append(
+            f"лимит устройств: в боте {sub.device_limit or '∞'}, в панели {panel.device_limit or '∞'}"
+        )
+    return {
+        "username": panel.username,
+        "panel_id": panel.panel_id,
+        "status": status,
+        "expire_at": iso(panel.expire_at),
+        "device_limit": panel.device_limit,
+        "traffic_used_bytes": panel.traffic_used_bytes,
+        "mismatch": mismatch,
+    }
+
+
 @router.get("/{user_id}")
 async def user_detail(
     user_id: int, container: AppContainer = Depends(get_container)
@@ -323,17 +365,19 @@ async def user_detail(
             if user.current_subscription_id
             else None
         )
-        if sub is not None and sub.status.is_usable:
-            # The stored usage only moves on panel webhooks / the customer's own screens —
-            # the card showed 114 MB while Remnawave had 625 MB. Live value (cached 60 s,
-            # stored value if the panel is slow), same as the bot and the cabinet.
-            await container.traffic.refresh_used_bytes(sub, telegram_id=user.telegram_id)
+        # The person as Remnawave has them — shown next to the bot's view so the two can be
+        # compared at a glance (panel username like «user_5072755730», number, status). Also
+        # the live traffic: the stored number only moves on webhooks / the customer's screens.
+        panel_info = await _panel_view(container, sub, user.telegram_id)
+        if sub is not None and panel_info is not None and "traffic_used_bytes" in panel_info:
+            sub.traffic_used_bytes = int(panel_info["traffic_used_bytes"])
             await uow.commit()
         txs = await uow.transactions.list_recent(user_id, limit=10)
         invited = await uow.users.count(referred_by_id=user_id)
         earned_minor = await uow.referral_earnings.total_minor(user_id)
 
         detail = _row(user, sub)
+        detail["panel"] = panel_info
         detail.update(
             {
                 "referral_code": user.referral_code,
@@ -641,6 +685,12 @@ async def sync_user(
             raise HTTPException(400, "у пользователя нет подписки на панели")  # noqa: RUF001
         try:
             await container.subscriptions.push_limits(uow, sub, telegram_id=user.telegram_id)
+            if sub.status.is_usable:
+                # Limits alone left a hand-disabled panel user DISABLED while the bot said
+                # «Активна» (field: user_5072755730). The bot is the source of truth.
+                await container.remnawave_client.enable_user(
+                    replace(sub.panel_ref, telegram_id=user.telegram_id)
+                )
         except RemnawaveError as exc:
             raise HTTPException(502, f"panel error: {exc}") from exc
         await audit(uow, identity, "user.sync", f"user:{user_id}")

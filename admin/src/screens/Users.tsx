@@ -25,7 +25,18 @@ type Row = {
   last_seen_at: string | null;
 };
 
+type PanelView = {
+  username?: string;
+  panel_id?: number | null;
+  status?: string;
+  expire_at?: string | null;
+  device_limit?: number | null;
+  mismatch?: string[];
+  error?: string;
+} | null;
+
 type Detail = Row & {
+  panel?: PanelView;
   is_trial_available: boolean;
   referral_code: string;
   referral_invited: number;
@@ -435,6 +446,56 @@ export default function Users() {
                       </div>
                     )}
                   </div>
+
+                  {d.panel && (
+                    <div className={`ud-section${d.panel.mismatch?.length || d.panel.error ? " ud-warn" : ""}`}>
+                      <div className="ud-title">В панели Remnawave</div>
+                      {d.panel.error ? (
+                        <div style={{ color: "var(--warn)", fontSize: 13 }}>⚠️ {d.panel.error}</div>
+                      ) : (
+                        <>
+                          <div className="kv">
+                            <div>
+                              <span className="muted">Имя в панели</span>
+                              <span className="mono">
+                                {d.panel.username}
+                                {d.panel.panel_id != null ? ` · №${d.panel.panel_id}` : ""}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="muted">Статус</span>
+                              <span
+                                style={{
+                                  color: d.panel.status === "ACTIVE" ? "var(--good-ink)" : "var(--bad-ink)",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {d.panel.status}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="muted">До</span>
+                              <span>{d.panel.expire_at ? dt(d.panel.expire_at) : "—"}</span>
+                            </div>
+                          </div>
+                          {d.panel.mismatch && d.panel.mismatch.length > 0 && (
+                            <div style={{ marginTop: 8, fontSize: 12.5, color: "var(--warn)", lineHeight: 1.45 }}>
+                              {d.panel.mismatch.map((m) => (
+                                <div key={m}>⚠️ Расходится: {m}</div>
+                              ))}
+                              <button
+                                className="btn secondary sm"
+                                style={{ marginTop: 8 }}
+                                onClick={() => act.mutate({ path: "/sync" })}
+                              >
+                                ⟳ Привести панель к боту
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   <div className="ud-section">
                     <div className="ud-title">Устройства (HWID)</div>
