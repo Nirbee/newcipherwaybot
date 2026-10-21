@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import ColumnElement, Select, func, or_, select
+from sqlalchemy import ColumnElement, Select, String, func, or_, select
 from sqlalchemy import delete as sa_delete
 
 from src.application.services.ids import generate_referral_code
@@ -59,16 +59,33 @@ def _list_stmt(status_filter: str, q: str) -> Select[Any]:
             Subscription.status.in_(_SUB_FILTERS[status_filter]),
         )
     if q:
+        q = q.strip()
         needle = f"%{_like_escape(q.lstrip('@').lower())}%"
         clauses: list[ColumnElement[bool]] = [
             func.lower(func.coalesce(User.username, "")).like(needle),
             func.lower(func.coalesce(User.first_name, "")).like(needle),
             func.lower(func.coalesce(User.last_name, "")).like(needle),
+            # the subscription code — also what panel usernames «sub_<code>» are made of
+            func.lower(func.coalesce(Subscription.short_id, "")).like(
+                f"%{_like_escape(q.lower().removeprefix('sub_'))}%"
+            ),
         ]
-        # `q.isascii()` guards int(): unicode digits like '²' pass str.isdigit() but
-        # int('²') raises ValueError, which would 500 the whole user search.
-        if q.isascii() and q.isdigit():
-            clauses.append(User.telegram_id == int(q))
+        # People are looked up by every number the admin can see on them: the bot's «id75»,
+        # the Remnawave user number, the Telegram ID (or its start), and the Telegram ID inside
+        # a panel username like «user_5072755730».
+        # `isascii()` guards int(): unicode digits like '²' pass str.isdigit() but int('²')
+        # raises ValueError, which would 500 the whole user search.
+        low = q.lower()
+        digits = low.removeprefix("id").removeprefix("user_").removeprefix("tg:")
+        if digits.isascii() and digits.isdigit() and len(digits) <= 18:
+            number = int(digits)
+            clauses.append(User.telegram_id == number)
+            if len(digits) >= 4:
+                clauses.append(func.cast(User.telegram_id, String).like(f"{digits}%"))
+            if not low.startswith(("user_", "tg:")) and number < 2**31:
+                clauses.append(User.id == number)
+                if not low.startswith("id"):
+                    clauses.append(Subscription.remnawave_id == number)
         stmt = stmt.where(or_(*clauses))
     return stmt
 

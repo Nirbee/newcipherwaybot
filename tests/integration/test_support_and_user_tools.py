@@ -420,3 +420,33 @@ async def test_panel_only_users_are_adopted_without_touching_the_panel(
         vip = await uow.users.find_one(first_name="VIP-777")  # no Telegram: findable by name
         vip_sub = await uow.subscriptions.get(vip.current_subscription_id)
         assert vip.telegram_id is None and vip_sub.status.name == "DISABLED"
+
+
+async def test_user_search_finds_people_by_every_number_shown_on_them(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Field: «75» (the Remnawave number) and «user_5072755730» (the panel username) found
+    nobody — search only knew @username, names and the exact Telegram ID."""
+    from src.infrastructure.database.models.subscription import Subscription
+
+    http, container = client
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=5072755730)
+        await uow.commit()
+        sub = Subscription(user_id=user.id, remnawave_id=75, short_id="KLknosdBaC")
+        await uow.subscriptions.add(sub)
+        await uow.session.flush()
+        user.current_subscription_id = sub.id
+        await uow.commit()
+        bot_id = user.id
+
+    auth = await _login(http)
+
+    async def found(q: str) -> list[int]:
+        res = await http.get("/api/admin/users", headers=auth, params={"q": q})
+        assert res.status_code == 200, res.text
+        return [r["id"] for r in res.json()["items"]]
+
+    for q in ("75", "user_5072755730", "5072755730", "50727", f"id{bot_id}", "sub_KLknosdBaC"):
+        assert bot_id in await found(q), q
+    assert bot_id not in await found("id75") or bot_id == 75  # «id» = the bot's own number only
