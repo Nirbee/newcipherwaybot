@@ -1170,17 +1170,31 @@ async def send_expiry_reminders() -> int:
     live = [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIAL]
     at_expiry = [*live, SubscriptionStatus.LIMITED, SubscriptionStatus.EXPIRED]
 
-    # (hours_before, text, button_enabled, telegram_id, expire_ts, plan_name)
-    targets: list[tuple[int, str, bool, int, int, str]] = []
+    # (hours_before, text, button_enabled, telegram_id, expire_ts, plan_name, has_email)
+    targets: list[tuple[int, str, bool, int, int, str, bool]] = []
     async with container.uow() as uow:
         steps = [s for s in await uow.reminders.ordered() if s.enabled]
-        miniapp_url = str(await container.bot_config.value(uow, "SUBSCRIPTION_MINI_APP_URL") or "")
+        cfg = container.bot_config
+        miniapp_url = str(await cfg.value(uow, "SUBSCRIPTION_MINI_APP_URL") or "")
+        # «Привяжите почту» hint: only when people can actually use it — the site lets them in
+        # (web cabinet on) and the link code can reach them (mail configured).
+        email_hint = bool(await cfg.value(uow, "WEB_CABINET_ENABLED")) and bool(
+            await cfg.value(uow, "SMTP_HOST") and await cfg.value(uow, "SMTP_FROM")
+        )
         await uow.commit()
+        # once per expiry, on the earliest step (the one with the most time left to act)
+        hint_step = max((s.hours_before for s in steps if s.hours_before > 0), default=None)
+        site = (container.settings.web.public_url or "").strip().rstrip("/")
         for step in steps:
             boundary = now + dt.timedelta(hours=step.hours_before)
             rows = (
                 await uow.session.execute(
-                    select(User.telegram_id, Subscription.expire_at, Subscription.plan_snapshot)
+                    select(
+                        User.telegram_id,
+                        Subscription.expire_at,
+                        Subscription.plan_snapshot,
+                        User.email_verified,
+                    )
                     .join(Subscription, Subscription.id == User.current_subscription_id)
                     .where(
                         User.telegram_id.is_not(None),
@@ -1190,7 +1204,7 @@ async def send_expiry_reminders() -> int:
                     )
                 )
             ).all()
-            for tg, exp, snap in rows:
+            for tg, exp, snap, email_ok in rows:
                 targets.append(
                     (
                         step.hours_before,
@@ -1199,6 +1213,7 @@ async def send_expiry_reminders() -> int:
                         int(tg),
                         int(exp.timestamp()),
                         str((snap or {}).get("name") or ""),
+                        bool(email_ok),
                     )
                 )
 
@@ -1207,7 +1222,7 @@ async def send_expiry_reminders() -> int:
     sent = 0
     bot = Bot(token=container.settings.bot.token)
     try:
-        for hours, text, button, tg_id, exp_ts, plan in targets:
+        for hours, text, button, tg_id, exp_ts, plan, has_email in targets:
             if not await container.redis.set(
                 f"exprem:{hours}:{tg_id}:{exp_ts}", "1", nx=True, ex=604800
             ):
@@ -1217,13 +1232,32 @@ async def send_expiry_reminders() -> int:
                 .replace("{time}", _human_hours(hours))
                 .replace("{plan}", plan)
             )
-            markup = None
+            rows_kb: list[list[InlineKeyboardButton]] = []
             if button and miniapp_url.startswith("https://"):
-                markup = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="Продлить", web_app=WebAppInfo(url=miniapp_url))]
-                    ]
+                rows_kb.append(
+                    [InlineKeyboardButton(text="Продлить", web_app=WebAppInfo(url=miniapp_url))]
                 )
+            if email_hint and hours == hint_step and not has_email:
+                # Without the VPN Telegram may not open at all — prepare a way in that doesn't
+                # need it: an e-mail login, and the site's renew-by-@username page.
+                body += (
+                    "\n\n💡 Привяжите почту в мини-приложении (вкладка «Кабинет» → «Привязать "
+                    "почту») — тогда войдёте в кабинет на сайте и продлите подписку, даже если "
+                    "Telegram без VPN не откроется."
+                )
+                if site:
+                    body += f"\nПродлить на сайте по @username: {site}/web/?renew=1"
+                if miniapp_url.startswith("https://"):
+                    sep = "&" if "?" in miniapp_url else "?"
+                    rows_kb.append(
+                        [
+                            InlineKeyboardButton(
+                                text="✉️ Привязать почту",
+                                web_app=WebAppInfo(url=f"{miniapp_url}{sep}tab=account"),
+                            )
+                        ]
+                    )
+            markup = InlineKeyboardMarkup(inline_keyboard=rows_kb) if rows_kb else None
             try:
                 await bot.send_message(tg_id, body, reply_markup=markup)
                 sent += 1
