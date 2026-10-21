@@ -29,6 +29,7 @@ type Preview = {
   duplicates: {
     panel_username: string;
     panel_id: number | null;
+    user_id: number;
     keep: { id: number; status: string };
     extra: { id: number; status: string; from_import: boolean }[];
   }[];
@@ -47,7 +48,13 @@ const STATUS_RU: Record<string, string> = {
   EXPIRED: "истекла",
 };
 
-export function PanelSyncButton({ onDone }: { onDone: () => void }) {
+export function PanelSyncButton({
+  onDone,
+  onOpenUser,
+}: {
+  onDone: () => void;
+  onOpenUser?: (userId: number) => void;
+}) {
   const { toast } = useApp();
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<Preview | null>(null);
@@ -125,6 +132,18 @@ export function PanelSyncButton({ onDone }: { onDone: () => void }) {
                   <div className="dim" style={{ fontSize: 12, margin: "6px 0" }}>
                     {data.duplicates.map((d) => (
                       <div key={d.panel_username}>
+                        {onOpenUser && (
+                          <button
+                            className="btn secondary sm"
+                            style={{ padding: "1px 8px", marginRight: 6 }}
+                            onClick={() => {
+                              setOpen(false);
+                              onOpenUser(d.user_id);
+                            }}
+                          >
+                            Открыть
+                          </button>
+                        )}
                         <span className="mono">{d.panel_username}</span>
                         {d.panel_id != null ? ` · №${d.panel_id}` : ""} — оставить подписку #{d.keep.id}{" "}
                         ({d.keep.status}), лишние:{" "}

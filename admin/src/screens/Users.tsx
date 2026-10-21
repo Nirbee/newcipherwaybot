@@ -228,7 +228,10 @@ export default function Users() {
       <div className="page-head">
         <h1 className="h1">{t.users}</h1>
         <div className="actions">
-          <PanelSyncButton onDone={() => void qc.invalidateQueries({ queryKey: ["users"] })} />
+          <PanelSyncButton
+            onDone={() => void qc.invalidateQueries({ queryKey: ["users"] })}
+            onOpenUser={(id) => setSelId(id)}
+          />
           <button
             className="btn secondary"
             onClick={() => {

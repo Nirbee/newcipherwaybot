@@ -560,3 +560,67 @@ async def test_a_2x_era_subscription_is_recognised_by_its_link_and_duplicates_ar
         assert kept.remnawave_id == 75  # recognised directly from now on
         assert len(await uow.subscriptions.list(remnawave_id=75)) == 1
     assert dataclasses.is_dataclass(panel)
+
+
+async def test_repair_keeps_the_bot_original_and_drops_the_import_copy_when_both_expired(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """Field: 15 pairs, both EXPIRED; the import's copy had become «current» and was kept, the
+    original (bought in the bot) was marked extra and never deleted — repair removed 0."""
+    from src.application.dto.panel import PanelUser
+    from src.infrastructure.database.models.subscription import Subscription
+
+    http, container = client
+    past = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
+    link = "https://sub.example/api/sub/NL015code"
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=None)
+        await uow.commit()
+        original = Subscription(
+            user_id=user.id,
+            short_id="orig000004",
+            status=SubscriptionStatus.EXPIRED,
+            expire_at=past,
+            subscription_url=link,
+        )
+        copy = Subscription(
+            user_id=user.id,
+            short_id="copy000084",
+            status=SubscriptionStatus.EXPIRED,
+            expire_at=past,
+            remnawave_id=28,
+            subscription_url=link,
+            plan_snapshot={"name": "Из панели", "source": "panel"},
+        )
+        await uow.subscriptions.add(original)
+        await uow.subscriptions.add(copy)
+        await uow.session.flush()
+        user.current_subscription_id = copy.id  # the import made its copy current
+        await uow.commit()
+        user_id, original_id, copy_id = user.id, original.id, copy.id
+
+    container.remnawave_client.users["panel-28"] = PanelUser(
+        uuid=None,
+        panel_id=28,
+        short_id="NL015code",
+        username="NL-015",
+        is_enabled=False,
+        status="EXPIRED",
+        expire_at=past,
+        traffic_limit_bytes=0,
+        traffic_used_bytes=0,
+        device_limit=None,
+        subscription_url=link,
+    )
+    auth = await _login(http)
+    dupes = (await http.get("/api/admin/users/panel-sync", headers=auth)).json()["duplicates"]
+    assert dupes[0]["keep"]["id"] == original_id and dupes[0]["user_id"] == user_id
+    assert (await http.post("/api/admin/users/panel-sync/repair", headers=auth)).json() == {
+        "removed": 1,
+        "skipped": 0,
+    }
+    async with container.uow() as uow:
+        assert await uow.subscriptions.get(copy_id) is None
+        owner = await uow.users.get(user_id)
+        assert owner.current_subscription_id == original_id
+        assert (await uow.subscriptions.get(original_id)).remnawave_id == 28

@@ -224,6 +224,7 @@ class Duplicate:
         return {
             "panel_username": self.panel.username,
             "panel_id": self.panel.panel_id,
+            "user_id": self.keep.user_id,
             "keep": {"id": self.keep.id, "status": self.keep.status.value},
             "extra": [
                 {
@@ -252,14 +253,16 @@ async def find_duplicates(uow: UnitOfWork, panel_users: list[PanelUser]) -> list
             owner = await uow.users.get(s.user_id)
             if owner is not None and owner.current_subscription_id == s.id:
                 currents.add(s.id)
-        # keep: someone's current AND working one, else a working one, else the newest current
+
+        # keep: a working one first; then the ORIGINAL over the import's copy (field: 15
+        # pairs, both expired — the import's copy had become «current» and was kept, while the
+        # original bought in the bot was marked extra and, rightly, never deleted -> repair did
+        # nothing); then the current one; then the newest.
+        def from_import(s: Subscription) -> bool:
+            return (s.plan_snapshot or {}).get("source") == "panel"
+
         group.sort(
-            key=lambda s: (
-                s.id in currents and s.status.is_usable,
-                s.status.is_usable,
-                s.id in currents,
-                s.id,
-            ),
+            key=lambda s: (s.status.is_usable, not from_import(s), s.id in currents, s.id),
             reverse=True,
         )
         out.append(Duplicate(p, group[0], group[1:]))
@@ -281,6 +284,8 @@ async def repair_duplicates(uow: UnitOfWork, dupes: list[Duplicate]) -> dict[str
             owner = await uow.users.get(extra.user_id)
             if owner is not None and owner.current_subscription_id == extra.id:
                 owner.current_subscription_id = d.keep.id if d.keep.user_id == owner.id else None
+                # written before the delete: users.current_subscription_id references it
+                await uow.session.flush()
             await uow.session.delete(extra)
             removed += 1
     await uow.session.flush()
