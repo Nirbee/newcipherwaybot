@@ -20,7 +20,13 @@ type PanelOnly = {
   tag: string | null;
   description: string | null;
 };
-type Preview = { panel_total: number; bot_total: number; items: PanelOnly[] };
+type Preview = {
+  panel_total: number;
+  panel_linked: number;
+  bot_total: number;
+  bot_without_subscription: number;
+  items: PanelOnly[];
+};
 type Result = {
   users_created: number;
   users_matched: number;
@@ -96,9 +102,14 @@ export function PanelSyncButton({ onDone }: { onDone: () => void }) {
             <div className="dim">Загружаю пользователей панели…</div>
           ) : (
             <div className="grid" style={{ gap: 12 }}>
-              <div style={{ fontSize: 13 }}>
-                В панели <b>{data.panel_total}</b>, в боте <b>{data.bot_total}</b>. Только в панели:{" "}
-                <b>{data.items.length}</b>.
+              <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                В панели <b>{data.panel_total}</b> — из них в боте <b>{data.panel_linked}</b>, только
+                в панели <b>{data.items.length}</b>.
+                <div className="dim" style={{ fontSize: 12 }}>
+                  Всего в боте {data.bot_total} человек, из них {data.bot_without_subscription} без
+                  подписки (запускали бота, но не покупали, или заготовки роутеров, ждущие QR) —
+                  поэтому в боте людей может быть больше, чем в панели.
+                </div>
               </div>
               {result && (
                 <div className="sync-result">

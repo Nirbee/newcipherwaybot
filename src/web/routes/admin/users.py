@@ -213,9 +213,16 @@ async def panel_sync_preview(container: AppContainer = Depends(get_container)) -
     async with container.uow() as uow:
         missing = await find_panel_only(uow, panel_users)
         bot_total = await uow.users.count()
+        # Bot users the panel has no account for: started the bot but never bought, or a
+        # router placeholder still waiting for its QR — why «bot» can exceed «panel».
+        no_sub = await uow.session.scalar(
+            select(func.count()).select_from(User).where(User.current_subscription_id.is_(None))
+        )
     return {
         "panel_total": len(panel_users),
+        "panel_linked": len(panel_users) - len(missing),
         "bot_total": bot_total,
+        "bot_without_subscription": int(no_sub or 0),
         "items": [m.as_dict() for m in missing],
     }
 
