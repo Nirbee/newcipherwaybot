@@ -53,6 +53,9 @@ def _base_url(container: AppContainer) -> str:
 
 
 async def _site_state(container: AppContainer) -> dict[str, Any]:
+    from src.infrastructure.services.mailer import mail_verified
+
+    verified = await mail_verified(container.redis, await container.build_mailer())
     async with container.uow() as uow:
         values = {k: await container.bot_config.value(uow, k) for k in _KEYS}
         cfg = await uow.miniapp.get_or_create()
@@ -72,6 +75,8 @@ async def _site_state(container: AppContainer) -> dict[str, Any]:
         "landing": landing,
         "settings": settings,
         "mail_ready": bool(values["SMTP_HOST"] and values["SMTP_FROM"]),
+        # a test letter went out with exactly these settings
+        "mail_verified": verified,
     }
 
 
@@ -144,6 +149,12 @@ async def test_email(
         )
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    from src.infrastructure.services.mailer import MAIL_VERIFIED_KEY
+
+    try:
+        await container.redis.set(MAIL_VERIFIED_KEY, mailer.fingerprint)
+    except Exception:
+        pass
     async with container.uow() as uow:
         await audit(uow, identity, "site.test_email", None, to=body.to)
         await uow.commit()

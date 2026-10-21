@@ -79,10 +79,16 @@ async def test_test_email_reports_the_real_smtp_error(
         sent.append(to)
 
     monkeypatch.setattr(mailer_mod.Mailer, "send_strict", ok)
+    state = (await http.get("/api/admin/site", headers=auth)).json()
+    assert state["mail_ready"] is True and state["mail_verified"] is False  # not proven yet
     res = (
         await http.post("/api/admin/site/test-email", headers=auth, json={"to": "a@b.ru"})
     ).json()
     assert res == {"ok": True} and sent == ["a@b.ru"]
+    assert (await http.get("/api/admin/site", headers=auth)).json()["mail_verified"] is True
+    # any change of the mail settings needs a new test letter
+    await http.patch("/api/admin/site", headers=auth, json={"settings": {"SMTP_PORT": 2525}})
+    assert (await http.get("/api/admin/site", headers=auth)).json()["mail_verified"] is False
 
 
 async def _customer_with_sub(container: ApiTestContainer, *, username: str, telegram_id: int):

@@ -28,6 +28,7 @@ type SiteState = {
   template: string;
   landing: Landing;
   mail_ready: boolean;
+  mail_verified: boolean;
   settings: {
     WEB_CABINET_ENABLED: boolean;
     CABINET_URL: string;
@@ -376,10 +377,11 @@ export default function Site() {
                   onChange={() => setVal("CABINET_EMAIL_VERIFICATION", !vals.CABINET_EMAIL_VERIFICATION)}
                 />
               </div>
-              {Boolean(vals.CABINET_EMAIL_VERIFICATION) && !d.mail_ready && (
+              {Boolean(vals.CABINET_EMAIL_VERIFICATION) && !d.mail_verified && (
                 <div className="site-warn" style={{ margin: 0 }}>
-                  ⚠️ Подтверждение включено, а почта не настроена — письма не уйдут и новые пользователи не
-                  смогут войти. Настройте почту ниже или выключите подтверждение.
+                  ⚠️ Подтверждение включено, а почта ещё не прошла проверку тестовым письмом — письма
+                  могут не дойти, и новые пользователи не смогут войти. Настройте почту и отправьте
+                  тестовое письмо, или выключите подтверждение.
                 </div>
               )}
               <Field label="Адрес личного кабинета">
@@ -397,8 +399,12 @@ export default function Site() {
           <div className="card">
             <div className="row spread">
               <span className="caps">✉️ Почта для писем</span>
-              <span className={`cap-pill`} style={{ color: d.mail_ready ? "var(--good-ink)" : "var(--warn)" }}>
-                {d.mail_ready ? "настроена" : "не настроена"}
+              <span
+                className="cap-pill"
+                style={{ color: d.mail_verified ? "var(--good-ink)" : "var(--warn)" }}
+                title={d.mail_verified ? "Тестовое письмо ушло с этими настройками" : ""}
+              >
+                {d.mail_verified ? "работает ✓" : d.mail_ready ? "не проверена" : "не настроена"}
               </span>
             </div>
             <div className="dim" style={{ fontSize: 12, margin: "6px 0 10px" }}>

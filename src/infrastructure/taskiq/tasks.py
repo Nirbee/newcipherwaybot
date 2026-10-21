@@ -1172,15 +1172,19 @@ async def send_expiry_reminders() -> int:
 
     # (hours_before, text, button_enabled, telegram_id, expire_ts, plan_name, has_email)
     targets: list[tuple[int, str, bool, int, int, str, bool]] = []
+    # «Привяжите почту» needs proven mail delivery — a test letter went out with the current
+    # settings; filled-in SMTP fields aren't enough (the hosting may block outbound mail and
+    # the link code would never arrive). Checked before the DB session below.
+    from src.infrastructure.services.mailer import mail_verified
+
+    mail_ok = await mail_verified(container.redis, await container.build_mailer())
     async with container.uow() as uow:
         steps = [s for s in await uow.reminders.ordered() if s.enabled]
         cfg = container.bot_config
         miniapp_url = str(await cfg.value(uow, "SUBSCRIPTION_MINI_APP_URL") or "")
         # «Привяжите почту» hint: only when people can actually use it — the site lets them in
-        # (web cabinet on) and the link code can reach them (mail configured).
-        email_hint = bool(await cfg.value(uow, "WEB_CABINET_ENABLED")) and bool(
-            await cfg.value(uow, "SMTP_HOST") and await cfg.value(uow, "SMTP_FROM")
-        )
+        # (web cabinet on) and the link code can reach them (mail proven above).
+        email_hint = mail_ok and bool(await cfg.value(uow, "WEB_CABINET_ENABLED"))
         await uow.commit()
         # once per expiry, on the earliest step (the one with the most time left to act)
         hint_step = max((s.hours_before for s in steps if s.hours_before > 0), default=None)

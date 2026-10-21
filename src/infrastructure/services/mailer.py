@@ -7,6 +7,7 @@ never raises into the request path. Off unless SMTP host + from-address are set.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import smtplib
 import socket
 from email.mime.text import MIMEText
@@ -81,6 +82,13 @@ class Mailer:
     def configured(self) -> bool:
         return bool(self._host and self._from)
 
+    @property
+    def fingerprint(self) -> str:
+        """Identifies these exact settings: a successful test letter is remembered against
+        it, so any change of server/port/login/password/sender needs a new test."""
+        raw = "|".join((self._host, str(self._port), self._user, self._password, self._from))
+        return hashlib.sha256(raw.encode()).hexdigest()
+
     def _send_sync(self, to: str, subject: str, body: str) -> None:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
@@ -114,3 +122,21 @@ class Mailer:
             log.warning("email send failed", to=to, error=str(exc))
             return False
         return True
+
+
+MAIL_VERIFIED_KEY = "mail:verified"
+
+
+async def mail_verified(redis: object, mailer: Mailer) -> bool:
+    """True once a test letter went out with the CURRENT settings. «Fields filled» isn't
+    enough: the hosting may block outbound SMTP (field), and then every code / hint that
+    promises an e-mail would be a lie."""
+    if not mailer.configured:
+        return False
+    try:
+        stored = await redis.get(MAIL_VERIFIED_KEY)  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    if isinstance(stored, bytes):
+        stored = stored.decode()
+    return stored == mailer.fingerprint

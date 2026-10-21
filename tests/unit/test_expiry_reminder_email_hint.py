@@ -1,5 +1,5 @@
 """Expiry reminder: «Привяжите почту» — once per expiry, only to people without an e-mail,
-and only when the site and the mailer can actually serve it."""
+and only when the site is on and mail delivery was proven by a test letter."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from src.core.enums import SubscriptionStatus
 from src.infrastructure.database.models.reminder_step import ReminderStep
 from src.infrastructure.database.models.subscription import Subscription
 from src.infrastructure.database.uow import UnitOfWork
+from src.infrastructure.services.mailer import MAIL_VERIFIED_KEY, Mailer
 from src.infrastructure.taskiq import tasks
 from tests.factories import make_user
 
@@ -27,6 +28,9 @@ class _FakeRedis:
             return False
         self.store[key] = value
         return True
+
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
 
 
 class _FakeBot:
@@ -59,11 +63,23 @@ async def _sub(uow: UnitOfWork, *, telegram_id: int, hours_left: float, email: b
 
 
 @pytest.fixture
-def env(uow: UnitOfWork, monkeypatch: pytest.MonkeyPatch) -> BotConfigService:
+def env(uow: UnitOfWork, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     cfg = BotConfigService(None)
+
+    async def build_mailer() -> Mailer:  # same as AppContainer.build_mailer
+        async with uow:
+            return Mailer(
+                host=str(await cfg.value(uow, "SMTP_HOST") or ""),
+                port=int(await cfg.value(uow, "SMTP_PORT") or 587),
+                user=str(await cfg.value(uow, "SMTP_USER") or ""),
+                password=str(await cfg.value(uow, "SMTP_PASSWORD") or ""),
+                from_addr=str(await cfg.value(uow, "SMTP_FROM") or ""),
+            )
+
     container = SimpleNamespace(
         uow=lambda: uow,
         bot_config=cfg,
+        build_mailer=build_mailer,
         redis=_FakeRedis(),
         settings=SimpleNamespace(
             bot=SimpleNamespace(token="42:TEST"),
@@ -73,14 +89,14 @@ def env(uow: UnitOfWork, monkeypatch: pytest.MonkeyPatch) -> BotConfigService:
     monkeypatch.setattr(tasks, "get_container", lambda: cast("object", container))
     monkeypatch.setattr("aiogram.Bot", _FakeBot)
     _FakeBot.sent = []
-    return cfg
+    return container
 
 
-async def _setup(uow: UnitOfWork, cfg: BotConfigService, *, mail: bool) -> None:
+async def _setup(uow: UnitOfWork, env: SimpleNamespace, *, mail: bool, verified: bool) -> None:
     async with uow:
         uow.session.add(ReminderStep(hours_before=24, text="Истекает через {time}", enabled=True))
         uow.session.add(ReminderStep(hours_before=1, text="Остался час", enabled=True))
-        await cfg.set_values(
+        await env.bot_config.set_values(
             uow,
             {
                 "WEB_CABINET_ENABLED": True,
@@ -92,12 +108,14 @@ async def _setup(uow: UnitOfWork, cfg: BotConfigService, *, mail: bool) -> None:
         await _sub(uow, telegram_id=1002, hours_left=23.95, email=True)  # 24h step, has e-mail
         await _sub(uow, telegram_id=1003, hours_left=0.95, email=False)  # 1h step: no repeat
         await uow.commit()
+    if verified:  # a test letter went out with exactly these settings
+        env.redis.store[MAIL_VERIFIED_KEY] = (await env.build_mailer()).fingerprint
 
 
 async def test_hint_goes_once_to_people_without_email(
-    uow: UnitOfWork, env: BotConfigService
+    uow: UnitOfWork, env: SimpleNamespace
 ) -> None:
-    await _setup(uow, env, mail=True)
+    await _setup(uow, env, mail=True, verified=True)
     assert await tasks.send_expiry_reminders() == 3
     by_id = {chat: (text, markup) for chat, text, markup in _FakeBot.sent}
 
@@ -111,7 +129,17 @@ async def test_hint_goes_once_to_people_without_email(
     assert "Привяжите почту" not in by_id[1003][0]  # only the earliest step carries it
 
 
-async def test_no_hint_while_mail_is_not_configured(uow: UnitOfWork, env: BotConfigService) -> None:
-    await _setup(uow, env, mail=False)
+async def test_no_hint_while_mail_is_not_configured(uow: UnitOfWork, env: SimpleNamespace) -> None:
+    await _setup(uow, env, mail=False, verified=False)
+    await tasks.send_expiry_reminders()
+    assert all("Привяжите почту" not in text for _c, text, _m in _FakeBot.sent)
+
+
+async def test_no_hint_while_mail_was_never_proven_by_a_test_letter(
+    uow: UnitOfWork, env: SimpleNamespace
+) -> None:
+    """Field: the hosting blocked outbound SMTP — fields filled, nothing ever delivered. The
+    hint (whose link code goes by e-mail) waits for a successful test letter."""
+    await _setup(uow, env, mail=True, verified=False)
     await tasks.send_expiry_reminders()
     assert all("Привяжите почту" not in text for _c, text, _m in _FakeBot.sent)
