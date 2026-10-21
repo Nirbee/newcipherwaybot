@@ -187,6 +187,9 @@
     [T.trust1, T.trust2, T.trust3].forEach(function (x) {
       trust.append(el("span", {}, [el("span", { class: "dot" }), x]));
     });
+    // Renewal by Telegram @username works only through the web cabinet.
+    var renew = $("#heroRenew");
+    if (renew) renew.hidden = !cfg.renew_enabled;
     var href = cabinetHref(cfg);
     ["#navCabinet", "#heroCabinet", "#ctaBandBtn", "#footCabinet"].forEach(function (sel) {
       var a = $(sel);

@@ -184,6 +184,11 @@ export default function Site() {
             url: cabinetUrl,
             hint: "Регистрация и вход по почте, покупка и ссылка на подписку — без Telegram",
           },
+          {
+            title: "Продление по @username",
+            url: `${cabinetUrl}?renew=1`,
+            hint: "Для тех, кто покупал в боте и забыл продлить: вводит @username, платит — VPN снова работает",
+          },
         ].map((l) => (
           <div key={l.title} className="card site-link">
             <span className="caps">{l.title}</span>

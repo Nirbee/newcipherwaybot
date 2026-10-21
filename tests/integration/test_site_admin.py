@@ -83,3 +83,90 @@ async def test_test_email_reports_the_real_smtp_error(
         await http.post("/api/admin/site/test-email", headers=auth, json={"to": "a@b.ru"})
     ).json()
     assert res == {"ok": True} and sent == ["a@b.ru"]
+
+
+async def _customer_with_sub(container: ApiTestContainer, *, username: str, telegram_id: int):
+    from src.application.dto.pricing import PurchaseRequest
+    from src.core.enums import Currency
+    from tests.factories import make_plan, make_user
+
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=telegram_id)
+        user.username = username
+        plan, _ = await make_plan(uow, code=f"renew-{telegram_id}", name="Стандартный")
+        await uow.commit()
+        req = PurchaseRequest(
+            user_id=user.id, plan_id=plan.id, duration_days=30, currency=Currency.RUB
+        )
+        sub = await container.subscriptions.grant(uow, user=user, plan=plan, req=req)
+        user.current_subscription_id = sub.id
+        await uow.commit()
+        return user.id, plan.id
+
+
+async def test_renew_by_telegram_username_without_login(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    """A customer whose VPN ran out can't open Telegram: on the site they type their @username
+    and pay; the SAME subscription is renewed. Only a masked handle and the plan are shown."""
+    from src.web.routes import cabinet as cabinet_routes
+
+    http, container = client
+    user_id, plan_id = await _customer_with_sub(
+        container, username="kxmirrr", telegram_id=5072755730
+    )
+    auth = await _login(http)
+
+    # off until the web cabinet is enabled
+    assert (
+        await http.post("/api/cabinet/public/renew/lookup", json={"who": "@kxmirrr"})
+    ).status_code == 403
+    await http.patch(
+        "/api/admin/site", headers=auth, json={"settings": {"WEB_CABINET_ENABLED": True}}
+    )
+
+    for who in ("@KxMirrr", "https://t.me/kxmirrr", "5072755730"):
+        res = await http.post("/api/cabinet/public/renew/lookup", json={"who": who})
+        assert res.status_code == 200, (who, res.text)
+    found = res.json()
+    assert found["who"] == "@kx•••rr" and "kxmirrr" not in str(found)  # masked, nothing else leaked
+    assert found["active"] is True and found["plan_name"] == "Стандартный"
+    assert found["items"][0]["id"] == plan_id  # their plan first
+    assert "subscription_url" not in str(found)
+
+    missing = await http.post("/api/cabinet/public/renew/lookup", json={"who": "@nobody_here"})
+    assert missing.status_code == 404
+
+    captured: dict = {}
+
+    async def fake_pay(container_, user, req, method, *, return_url=None):
+        captured.update(
+            user=user.id,
+            plan=req.plan_id,
+            days=req.duration_days,
+            method=method,
+            ptype=req.purchase_type,
+            return_url=return_url,
+        )
+        return {"ok": True, "redirect_url": "https://pay.example/123"}
+
+    monkeypatch.setattr(cabinet_routes, "_pay_with_gateway", fake_pay)
+    bad = await http.post(
+        "/api/cabinet/public/renew/pay",
+        json={"token": "x" * 20, "plan_id": plan_id, "days": 30, "method": "yookassa"},
+    )
+    assert bad.status_code == 401
+    stars = await http.post(
+        "/api/cabinet/public/renew/pay",
+        json={"token": found["token"], "plan_id": plan_id, "days": 30, "method": "stars"},
+    )
+    assert stars.status_code == 400
+    paid = await http.post(
+        "/api/cabinet/public/renew/pay",
+        json={"token": found["token"], "plan_id": plan_id, "days": 30, "method": "yookassa"},
+    )
+    assert paid.json()["redirect_url"] == "https://pay.example/123"
+    assert captured["user"] == user_id and captured["ptype"].name == "RENEW"
+    assert (captured["return_url"] or "").endswith("/web/?renewed=1") or captured[
+        "return_url"
+    ] is None

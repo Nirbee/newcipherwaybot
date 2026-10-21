@@ -335,6 +335,140 @@ async def public_plans(container: AppContainer = Depends(get_container)) -> dict
     return {"currency": "RUB", "items": await _plan_items(container), "payment_methods": methods}
 
 
+# --- renew someone's subscription by Telegram @username (no login) -----------------------
+# For a customer whose VPN ran out and who therefore can't open Telegram/the bot: on the site
+# they (or anyone paying for them) type the @username, pay, and the SAME subscription is
+# extended — the app they already have starts working again, nothing to re-import. Paying for
+# someone grants nothing over their account, so no login is needed; the lookup reveals only a
+# masked handle, the plan name and active/expired.
+
+_RENEW_TTL = 30 * 60
+
+
+def _mask_handle(user: User) -> str:
+    name = user.username or ""
+    if name:
+        shown = (
+            name[:2] + "•" * max(1, len(name) - 4) + name[-2:] if len(name) > 4 else name[0] + "•••"
+        )
+        return "@" + shown
+    tid = str(user.telegram_id or "")
+    return f"ID •••{tid[-3:]}" if tid else "аккаунт"
+
+
+def _parse_who(raw: str) -> tuple[str | None, int | None]:
+    who = raw.strip()
+    for prefix in ("https://t.me/", "http://t.me/", "t.me/", "tg://resolve?domain="):
+        if who.lower().startswith(prefix):
+            who = who[len(prefix) :]
+    who = who.lstrip("@").strip()
+    if who.isascii() and who.isdigit() and 4 <= len(who) <= 15:
+        return None, int(who)
+    if 3 <= len(who) <= 64 and all(c.isalnum() or c == "_" for c in who) and who.isascii():
+        return who.lower(), None
+    return None, None
+
+
+class RenewLookupIn(BaseModel):
+    who: str = Field(..., min_length=2, max_length=80)
+
+
+async def _renew_gate(container: AppContainer, request: Request, bucket: str) -> None:
+    from src.web.routes.cabinet_auth import _client_ip, _rate_limit
+
+    async with container.uow() as uow:
+        if not bool(await container.bot_config.value(uow, "WEB_CABINET_ENABLED")):
+            raise HTTPException(403, "web cabinet is disabled")
+    await _rate_limit(container, bucket, _client_ip(request), limit=20, window=600)
+
+
+@router.post("/public/renew/lookup")
+async def renew_lookup(
+    body: RenewLookupIn, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    from sqlalchemy import func, select
+
+    from src.core.security import jwt_encode
+
+    await _renew_gate(container, request, "renew_lookup")
+    username, telegram_id = _parse_who(body.who)
+    if username is None and telegram_id is None:
+        raise HTTPException(400, "Укажите @username в Telegram или Telegram ID")
+    async with container.uow() as uow:
+        if telegram_id is not None:
+            user = await uow.users.find_one(telegram_id=telegram_id)
+        else:
+            user = await uow.session.scalar(
+                select(User).where(func.lower(User.username) == username).limit(1)
+            )
+        sub = (
+            await uow.subscriptions.get(user.current_subscription_id)
+            if user is not None and user.current_subscription_id
+            else None
+        )
+        methods = _gateway_methods(
+            await uow.payment_gateways.list(), container.gateway_factory.supported()
+        )
+    if user is None or user.telegram_id is None or sub is None:
+        raise HTTPException(
+            404,
+            "Не нашли подписку у этого пользователя. Проверьте @username — если его меняли, "
+            "введите Telegram ID (его показывает бот @userinfobot).",
+        )
+    plans = await _plan_items(container, user)
+    # the plan they are on first — renewing it is the usual case
+    plans.sort(key=lambda p: 0 if p.get("id") == sub.plan_id else 1)
+    token = jwt_encode(
+        {"sub": user.id, "type": "renew"}, container.settings.app.jwt_secret, _RENEW_TTL
+    )
+    return {
+        "token": token,
+        "who": _mask_handle(user),
+        "plan_name": (sub.plan_snapshot or {}).get("name"),
+        "current_plan_id": sub.plan_id,
+        "active": sub.status.is_usable,
+        "items": plans,
+        "payment_methods": methods,
+    }
+
+
+class RenewPayIn(BaseModel):
+    token: str = Field(..., min_length=10, max_length=2048)
+    plan_id: int
+    days: int = Field(..., ge=1, le=3650)
+    method: str = Field(..., min_length=2, max_length=32)
+
+
+@router.post("/public/renew/pay")
+async def renew_pay(
+    body: RenewPayIn, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    from src.core.security import jwt_decode
+
+    await _renew_gate(container, request, "renew_pay")
+    if body.method in ("balance", "stars"):
+        raise HTTPException(400, "оплата на сайте — только онлайн-способами")
+    payload = jwt_decode(body.token, container.settings.app.jwt_secret)
+    if not payload or payload.get("type") != "renew":
+        raise HTTPException(401, "Поиск устарел — найдите пользователя ещё раз")
+    async with container.uow() as uow:
+        user = await uow.users.get(int(payload["sub"]))
+        if user is None:
+            raise HTTPException(404, "пользователь не найден")
+        ptype, sub_id = await container.purchase.resolve_purchase_type(uow, user.id, body.plan_id)
+    req = PurchaseRequest(
+        user_id=user.id,
+        plan_id=body.plan_id,
+        duration_days=body.days,
+        currency=Currency.RUB,
+        purchase_type=ptype,
+        subscription_id=sub_id,
+    )
+    base = (container.settings.web.public_url or "").strip().rstrip("/")
+    return_url = f"{base}/web/?renewed=1" if base else None
+    return await _pay_with_gateway(container, user, req, body.method, return_url=return_url)
+
+
 @router.get("/public/landing")
 async def public_landing(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
     """Everything the public marketing site (served at ``/``) needs, unauthenticated:
@@ -366,6 +500,7 @@ async def public_landing(container: AppContainer = Depends(get_container)) -> di
         "features": landing.get("features") or [],
         "faq": landing.get("faq") or [],
         "cta_target": target,
+        "renew_enabled": web_enabled,  # «Продлить по @username» lives in the web cabinet
         "bot_username": bot_username,
         "cabinet_url": cabinet_url,
         "currency": "RUB",
@@ -583,7 +718,12 @@ async def purchase(
 
 
 async def _pay_with_gateway(
-    container: AppContainer, user: User, req: PurchaseRequest, method: str
+    container: AppContainer,
+    user: User,
+    req: PurchaseRequest,
+    method: str,
+    *,
+    return_url: str | None = None,
 ) -> dict[str, Any]:
     """Hosted payment: pending tx -> provider invoice -> redirect URL.
 
@@ -635,7 +775,7 @@ async def _pay_with_gateway(
                     description=f"{title} · {req.duration_days} дн.",
                     user_id=user.id,
                     telegram_id=user.telegram_id,
-                    return_url=miniapp_url or None,
+                    return_url=return_url or miniapp_url or None,
                     metadata={"form": form} if form else {},
                 )
             )

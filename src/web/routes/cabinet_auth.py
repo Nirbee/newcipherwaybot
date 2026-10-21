@@ -409,7 +409,12 @@ async def guest_purchase(
         fresh = await uow.users.get(user_id)
     if fresh is None:
         raise HTTPException(500, "guest user vanished")
-    result = await _pay_with_gateway(container, fresh, req, body.method)
+    # Back to the web cabinet (where the auto-login token is picked up), not the Telegram
+    # mini-app — a guest buying on the site may have no Telegram at all.
+    base = (container.settings.web.public_url or "").strip().rstrip("/")
+    result = await _pay_with_gateway(
+        container, fresh, req, body.method, return_url=f"{base}/web/" if base else None
+    )
     # Auto-login ONLY for an account THIS call just created. Reusing a pre-existing email must
     # never hand out a session for it — that would be account takeover by anyone who knows the
     # address (the guard mirrors register()'s 409 and oauth_callback()'s unverified-bind refusal).

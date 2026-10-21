@@ -179,10 +179,12 @@ function authView() {
     el("div", { class: `tab${authTab === "login" ? " on" : ""}`, onclick: () => { authTab = "login"; render(); } }, "Вход"),
     el("div", { class: `tab${authTab === "register" ? " on" : ""}`, onclick: () => { authTab = "register"; render(); } }, "Регистрация"),
     el("div", { class: `tab${authTab === "guest" ? " on" : ""}`, onclick: () => { authTab = "guest"; render(); } }, "Купить сразу"),
+    el("div", { class: `tab${authTab === "renew" ? " on" : ""}`, onclick: () => { authTab = "renew"; render(); } }, "Продлить"),
   ]);
   root.append(tabs);
 
   if (authTab === "guest") { root.append(guestCard()); return root; }
+  if (authTab === "renew") { root.append(renewCard()); return root; }
 
   const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "email" });
   const pass = el("input", { type: "password", placeholder: "Пароль", autocomplete: authTab === "login" ? "current-password" : "new-password" });
@@ -247,6 +249,69 @@ function guestCard() {
     }, true));
   });
   return card;
+}
+
+/* ---------- renew by Telegram @username (no login) ----------
+   For someone whose VPN ran out and who can't open Telegram: find the subscription by the
+   Telegram @username (or ID), pay, and the SAME subscription is extended — the VPN app they
+   already have starts working again by itself. Anyone may pay for someone; nothing about the
+   account is shown beyond a masked handle and the plan. */
+
+function renewCard() {
+  const who = el("input", { type: "text", placeholder: "@username или Telegram ID", autocomplete: "off" });
+  const card = el("div", { class: "card" }, [
+    el("h2", {}, "Продлить подписку"),
+    el("div", { class: "hint" },
+      "Покупали подписку в Telegram-боте и она закончилась? Укажите свой @username в Telegram — " +
+      "продлите её здесь, без входа и без Telegram. После оплаты VPN заработает в том же приложении."),
+    el("label", {}, "Telegram"), who,
+  ]);
+  const found = el("div", {});
+  const find = el("button", { class: "btn primary" }, "Найти подписку");
+  find.onclick = async () => {
+    const value = who.value.trim();
+    if (value.length < 2) return toast("Введите @username или Telegram ID");
+    find.disabled = true;
+    found.innerHTML = "";
+    try {
+      const d = await api("POST", `${C}/public/renew/lookup`, { who: value });
+      window.__pm__ = d.payment_methods || [];
+      found.append(
+        el("div", { class: "li", style: "margin-top:10px" }, [
+          el("span", { class: "muted" }, d.who),
+          el("span", { class: `pill ${d.active ? "ok" : "warn"}` }, d.active ? "Подписка активна" : "Подписка закончилась"),
+        ]),
+        d.plan_name ? el("div", { class: "hint" }, `Тариф: ${d.plan_name}. Выберите срок продления:`) : null,
+      );
+      if (!(d.items || []).length) {
+        found.append(el("div", { class: "hint" }, "Тарифы ещё не настроены."));
+      } else {
+        found.append(planPicker(d.items, async (planId, days, method) => {
+          try {
+            const r = await api("POST", `${C}/public/renew/pay`, { token: d.token, plan_id: planId, days, method });
+            if (r.redirect_url) window.location.href = r.redirect_url;
+            else if (r.paid_with === "free") toast("Готово — подписка продлена");
+          } catch (e) { toast(e.message); }
+        }, true));
+      }
+    } catch (e) {
+      found.append(el("div", { class: "hint", style: "color:var(--warn,#c98500)" }, e.message));
+    } finally {
+      find.disabled = false;
+    }
+  };
+  who.addEventListener("keydown", (e) => { if (e.key === "Enter") find.click(); });
+  card.append(find, found);
+  return card;
+}
+
+function renewedCard() {
+  return el("div", { class: "card" }, [
+    el("h2", {}, "Оплата принята ✓"),
+    el("div", { class: "hint" },
+      "Подписка продлится в течение минуты. Откройте своё VPN-приложение и обновите подписку " +
+      "(потяните список серверов вниз или нажмите «Обновить») — оно снова заработает."),
+  ]);
 }
 
 /* ---------- plan picker (shared by guest + cabinet) ---------- */
@@ -467,6 +532,16 @@ async function render() {
 
 async function boot() {
   const params = new URLSearchParams(location.search);
+  // /web/?renew=1 — straight to «Продлить» (the site's button); ?renewed=1 — back from paying.
+  if (params.get("renew") !== null || location.hash === "#renew") authTab = "renew";
+  if (params.get("renewed") !== null) {
+    await loadBrand();
+    const a = app();
+    a.innerHTML = "";
+    a.append(el("div", {}, [brand(), renewedCard()]));
+    history.replaceState({}, "", location.pathname);
+    return;
+  }
   // The provider can bounce back with an error instead of a code (user pressed «Отмена»,
   // redirect URI mismatch…). Say so — silently showing the login form again reads as
   // «авторизация не проходит».

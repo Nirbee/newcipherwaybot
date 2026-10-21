@@ -133,6 +133,9 @@ body[data-variant="h"] .card { border: 2px solid var(--line); box-shadow: 5px 5p
 .hero-title { font-size: clamp(34px, 5vw, 56px); line-height: 1.04; font-weight: 800; margin: 0 0 18px; letter-spacing: -0.02em; }
 .hero-sub { font-size: clamp(16px, 2vw, 19px); color: var(--sub); margin: 0 0 28px; max-width: 32em; }
 .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.hero-renew { display: inline-block; margin-top: 14px; color: var(--sub); font-size: 14px; text-decoration: underline; text-underline-offset: 3px; }
+.hero-renew:hover { color: inherit; }
+.hero-renew[hidden] { display: none; }
 .hero-trust { margin-top: 22px; display: flex; gap: 18px; flex-wrap: wrap; color: var(--sub); font-size: 14px; }
 .hero-trust span { display: inline-flex; align-items: center; gap: 6px; }
 
