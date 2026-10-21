@@ -161,6 +161,9 @@ def _to_panel_user(data: dict[str, Any]) -> PanelUser:
         tag=data.get("tag"),
         panel_id=panel_id,
         vless_uuid=data.get("vlessUuid"),
+        status=str(data.get("status") or "").upper() or None,
+        description=data.get("description"),
+        created_at=_parse_dt(data.get("createdAt")),
     )
 
 
@@ -520,6 +523,56 @@ class RemnawaveHttpClient:
         except RemnawaveError:
             return None
         return _to_panel_user(dict(data)) if data else None
+
+    async def list_users(self) -> list[PanelUser]:
+        """Every user on the panel. 3.x: cursor (keyset) pagination on /api/users/stream
+        (``cursor`` = previous ``nextCursor``, ``size`` <= 1000, ``hasMore``); 2.x: offset
+        pagination on /api/users (``start``/``size``, ``total``) — per the panel's contract."""
+        out: list[PanelUser] = []
+        seen: set[str] = set()
+
+        def take(rows: Any) -> int:
+            added = 0
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    user = _to_panel_user(row)
+                except ValueError:
+                    continue
+                key = str(user.panel_id or user.uuid)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(user)
+                added += 1
+            return added
+
+        if await self._is_v3():
+            cursor: str | None = None
+            for _ in range(200):  # hard stop: 200 pages x 500 users
+                params: dict[str, Any] = {"size": 500}
+                if cursor:
+                    params["cursor"] = cursor
+                data = await self._request("GET", _PATHS_V3["users_stream"], params=params)
+                rows = data.get("users") if isinstance(data, dict) else data
+                if not take(rows) or not isinstance(data, dict) or not data.get("hasMore"):
+                    break
+                cursor = data.get("nextCursor")
+                if not cursor:
+                    break
+            return out
+
+        start = 0
+        for _ in range(200):
+            data = await self._request("GET", _PATHS["users"], params={"start": start, "size": 500})
+            rows = data.get("users") if isinstance(data, dict) else data
+            added = take(rows)
+            total = int(data.get("total") or 0) if isinstance(data, dict) else 0
+            start += 500
+            if not added or start >= total:
+                break
+        return out
 
     async def get_user_by_telegram_id(self, telegram_id: int) -> PanelUser | None:
         try:

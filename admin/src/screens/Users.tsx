@@ -6,6 +6,7 @@ import { useNavigate } from "react-router";
 
 import { api, bytesFmt, dt, dtTime, money } from "../api/client";
 import { Drawer, Prog, Seg } from "../components/ui";
+import { PanelSyncButton } from "../components/PanelSync";
 import { useApp } from "../state/app";
 
 type Row = {
@@ -216,6 +217,7 @@ export default function Users() {
       <div className="page-head">
         <h1 className="h1">{t.users}</h1>
         <div className="actions">
+          <PanelSyncButton onDone={() => void qc.invalidateQueries({ queryKey: ["users"] })} />
           <button
             className="btn secondary"
             onClick={() => {

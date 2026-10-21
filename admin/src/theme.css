@@ -1597,3 +1597,60 @@ hr.sep {
     font-size: 18px; /* stays >=16px: no iOS zoom on focus */
   }
 }
+
+/* wide modal + panel sync list */
+.modal.wide {
+  width: min(760px, calc(100vw - 32px));
+}
+@media (max-width: 700px) {
+  .modal.wide {
+    width: 100vw;
+  }
+}
+.sync-result {
+  border-left: 3px solid var(--good-ink);
+  background: var(--panel2);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 13px;
+}
+.sync-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.sync-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+}
+.sync-row:first-child {
+  border-top: 0;
+}
+.sync-row:hover {
+  background: var(--hover);
+}
+.sync-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sync-meta {
+  font-size: 12px;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .sync-row {
+    grid-template-columns: auto 1fr;
+  }
+  .sync-meta {
+    grid-column: 2;
+    white-space: normal;
+  }
+}

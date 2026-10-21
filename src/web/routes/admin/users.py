@@ -165,8 +165,12 @@ async def create_user(
         )
         await uow.users.add(user)
         await audit(
-            uow, identity, "user.create_manual", f"user:{user.id}",
-            telegram_id=body.telegram_id, email=email,
+            uow,
+            identity,
+            "user.create_manual",
+            f"user:{user.id}",
+            telegram_id=body.telegram_id,
+            email=email,
         )
         await uow.commit()
         row = _row(user, None)
@@ -191,6 +195,95 @@ async def counters(container: AppContainer = Depends(get_container)) -> Counters
                 await uow.session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
             )
     return CountersOut(**out)
+
+
+# --- «Синхронизация с панелью»: adopt panel-only users ------------------------------------
+# Declared before /{user_id}: that int path would otherwise swallow «panel-sync» with a 422.
+
+
+@router.get("/panel-sync")
+async def panel_sync_preview(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+    """Who is in Remnawave but not in the bot. Read-only."""
+    from src.application.services.panel_import import find_panel_only
+
+    try:
+        panel_users = await container.remnawave_client.list_users()
+    except RemnawaveError as exc:
+        raise HTTPException(502, f"панель недоступна: {exc}") from exc
+    async with container.uow() as uow:
+        missing = await find_panel_only(uow, panel_users)
+        bot_total = await uow.users.count()
+    return {
+        "panel_total": len(panel_users),
+        "bot_total": bot_total,
+        "items": [m.as_dict() for m in missing],
+    }
+
+
+class PanelSyncIn(BaseModel):
+    keys: list[str] = Field(..., min_length=1, max_length=2000)
+
+
+async def _telegram_names(container: AppContainer, user_ids: list[int]) -> int:
+    """Best effort: name adopted people by their Telegram profile. Works for anyone who has
+    ever opened this bot (Telegram only shares chats with the bot); the rest show as «idN»
+    with their Telegram ID, like every other nameless user."""
+    token = container.settings.bot.token
+    if not token or not user_ids:
+        return 0
+    from aiogram import Bot
+
+    named = 0
+    bot = Bot(token=token)
+    try:
+        async with container.uow() as uow:
+            for uid in user_ids[:300]:
+                user = await uow.users.get(uid)
+                if user is None or not user.telegram_id:
+                    continue
+                try:
+                    chat = await bot.get_chat(user.telegram_id)
+                except Exception:
+                    continue
+                user.username = (chat.username or "")[:64] or user.username
+                user.first_name = (chat.first_name or "")[:128] or user.first_name
+                user.last_name = (chat.last_name or "")[:128] or user.last_name
+                named += 1
+            await uow.commit()
+    finally:
+        await bot.session.close()
+    return named
+
+
+@router.post("/panel-sync")
+async def panel_sync_import(
+    body: PanelSyncIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Adopt the picked panel users: bot user + subscription pointing at the SAME panel user.
+    The panel itself is not touched."""
+    from src.application.services.panel_import import adopt, find_panel_only
+
+    try:
+        panel_users = await container.remnawave_client.list_users()
+    except RemnawaveError as exc:
+        raise HTTPException(502, f"панель недоступна: {exc}") from exc
+    async with container.uow() as uow:
+        missing = await find_panel_only(uow, panel_users)
+        summary = await adopt(uow, missing, set(body.keys))
+        await audit(
+            uow,
+            identity,
+            "users.panel_sync",
+            None,
+            subscriptions=summary["subscriptions"],
+            users_created=summary["users_created"],
+        )
+        await uow.commit()
+    summary["named_from_telegram"] = await _telegram_names(container, summary["new_user_ids"])
+    summary.pop("new_user_ids", None)
+    return summary
 
 
 @router.get("/{user_id}")

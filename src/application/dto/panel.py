@@ -60,6 +60,11 @@ class PanelUser:
     # to build a router's outbound config (see PanelHost); everything else there comes from
     # get_hosts(), not from the user record.
     vless_uuid: str | None = None
+    # Raw panel status (ACTIVE / DISABLED / LIMITED / EXPIRED), free-text description and
+    # creation time — used when adopting panel-only users into the bot (panel_import).
+    status: str | None = None
+    description: str | None = None
+    created_at: dt.datetime | None = None
 
     @property
     def ref(self) -> PanelUserRef:

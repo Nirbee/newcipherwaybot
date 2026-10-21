@@ -330,3 +330,93 @@ async def test_user_card_shows_live_traffic_from_the_panel(
     detail = (await http.get(f"/api/admin/users/{user_id}", headers=await _login(http))).json()
     assert detail["traffic_used_bytes"] == 655_947_776
     assert detail["subscription"]["traffic_used_bytes"] == 655_947_776
+
+
+async def test_panel_only_users_are_adopted_without_touching_the_panel(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    """Remnawave had 88 users, the bot 79: people created by hand / by an earlier bot. The
+    admin adopts the picked ones — bot user + subscription on the SAME panel user."""
+    import dataclasses
+    import uuid as uuid_mod
+
+    from src.application.dto.panel import PanelUser
+    from src.web.routes.admin import users as users_routes
+
+    http, container = client
+    async with container.uow() as uow:  # one ordinary bot customer, already linked
+        user = await make_user(uow, telegram_id=111222333)
+        plan, _ = await make_plan(uow, code="sync-plan")
+        await uow.commit()
+        req = PurchaseRequest(
+            user_id=user.id, plan_id=plan.id, duration_days=30, currency=Currency.RUB
+        )
+        await container.subscriptions.grant(uow, user=user, plan=plan, req=req)
+        await uow.commit()
+
+    future = dt.datetime.now(dt.UTC) + dt.timedelta(days=23)
+    base = PanelUser(
+        uuid=None,
+        short_id="",
+        username="",
+        is_enabled=True,
+        expire_at=future,
+        traffic_limit_bytes=0,
+        traffic_used_bytes=0,
+        device_limit=None,
+        subscription_url=None,
+    )
+    tg_person = dataclasses.replace(
+        base,
+        uuid=uuid_mod.uuid4(),
+        panel_id=75,
+        short_id="oR0GVeEzehAbCdEf",
+        username="user_5072755730",
+        status="ACTIVE",
+        traffic_used_bytes=22_200_000_000,
+        device_limit=3,
+        internal_squads=("sq-default",),
+        subscription_url="https://sub.example/api/sub/oR0GVeEzehAbCdEf",
+    )
+    manual = dataclasses.replace(
+        base,
+        uuid=uuid_mod.uuid4(),
+        panel_id=96,
+        short_id="vip777shortuuid1",
+        username="VIP-777",
+        status="DISABLED",
+        is_enabled=False,
+    )
+    container.remnawave_client.users["panel-75"] = tg_person
+    container.remnawave_client.users["panel-96"] = manual
+
+    auth = await _login(http)
+    preview = (await http.get("/api/admin/users/panel-sync", headers=auth)).json()
+    items = {i["username"]: i for i in preview["items"]}
+    assert set(items) == {"user_5072755730", "VIP-777"}  # the bot's own customer isn't listed
+    assert items["user_5072755730"]["telegram_id"] == 5072755730  # read from the username
+    assert items["VIP-777"]["telegram_id"] is None
+
+    async def no_telegram(_container, _ids):  # no network in tests
+        return 0
+
+    monkeypatch.setattr(users_routes, "_telegram_names", no_telegram)
+    res = await http.post(
+        "/api/admin/users/panel-sync",
+        headers=auth,
+        json={"keys": [items["user_5072755730"]["key"], items["VIP-777"]["key"]]},
+    )
+    assert res.status_code == 200, res.text
+    summary = res.json()
+    assert (summary["users_created"], summary["subscriptions"]) == (2, 2)
+    assert (await http.get("/api/admin/users/panel-sync", headers=auth)).json()["items"] == []
+
+    async with container.uow() as uow:
+        adopted = await uow.users.find_one(telegram_id=5072755730)
+        sub = await uow.subscriptions.get(adopted.current_subscription_id)
+        assert sub.remnawave_id == 75 and sub.remnawave_uuid == tg_person.uuid
+        assert sub.status.is_usable and sub.device_limit == 3
+        assert sub.short_id == "oR0GVeEzehAbCdEf"
+        vip = await uow.users.find_one(first_name="VIP-777")  # no Telegram: findable by name
+        vip_sub = await uow.subscriptions.get(vip.current_subscription_id)
+        assert vip.telegram_id is None and vip_sub.status.name == "DISABLED"

@@ -134,6 +134,9 @@ class FakeRemnawaveClient:
     async def get_nodes(self) -> list[PanelNode]:
         return [PanelNode(uuid=uuid.uuid4(), name="node-1", is_online=True)]
 
+    async def list_users(self) -> list[PanelUser]:
+        return list(self.users.values())
+
     async def get_hosts(self) -> list[PanelHost]:
         return list(self.hosts)
 
