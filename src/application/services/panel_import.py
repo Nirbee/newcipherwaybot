@@ -72,19 +72,54 @@ class PanelOnlyUser:
         }
 
 
+def _url_code(url: str | None) -> str | None:
+    """The panel's short uuid at the end of a subscription link (…/api/sub/<code>)."""
+    if not url:
+        return None
+    code = url.rstrip("/").rsplit("/", 1)[-1]
+    return code or None
+
+
+def _panel_keys(p: PanelUser) -> set[str]:
+    keys = set()
+    if p.panel_id is not None:
+        keys.add(f"id:{p.panel_id}")
+    if p.uuid is not None:
+        keys.add(f"uuid:{p.uuid}")
+    if p.short_id:
+        keys.add(f"code:{p.short_id}")
+    code = _url_code(p.subscription_url)
+    if code:
+        keys.add(f"code:{code}")
+    return keys
+
+
+def _sub_keys(sub: Subscription) -> set[str]:
+    """Every way a bot subscription can name its panel user. The link code matters: a
+    subscription from the 2.x era knows its panel user by uuid, which 3.x payloads no longer
+    carry — matched by uuid alone it looked «panel-only» and got adopted a second time."""
+    keys = set()
+    if sub.remnawave_id is not None:
+        keys.add(f"id:{sub.remnawave_id}")
+    if sub.remnawave_uuid is not None:
+        keys.add(f"uuid:{sub.remnawave_uuid}")
+    if sub.short_id:
+        keys.add(f"code:{sub.short_id}")
+    code = _url_code(sub.subscription_url)
+    if code:
+        keys.add(f"code:{code}")
+    return keys
+
+
 async def find_panel_only(uow: UnitOfWork, panel_users: list[PanelUser]) -> list[PanelOnlyUser]:
-    """Panel users no bot subscription points at (by panel id, uuid or short uuid)."""
+    """Panel users no bot subscription points at (panel id, uuid, short uuid or link code)."""
     subs = await uow.subscriptions.list()
-    linked_ids = {s.remnawave_id for s in subs if s.remnawave_id is not None}
-    linked_uuids = {s.remnawave_uuid for s in subs if s.remnawave_uuid is not None}
-    linked_shorts = {s.short_id for s in subs}
+    linked: set[str] = set()
+    for sub in subs:
+        linked |= _sub_keys(sub)
     out: list[PanelOnlyUser] = []
     for p in panel_users:
-        if (
-            (p.panel_id is not None and p.panel_id in linked_ids)
-            or (p.uuid is not None and p.uuid in linked_uuids)
-            or (p.short_id and p.short_id in linked_shorts)
-        ):
+        if _panel_keys(p) & linked:
             continue
         tid = telegram_id_of(p)
         bot_user = await uow.users.find_one(telegram_id=tid) if tid else None
@@ -174,3 +209,79 @@ async def adopt(uow: UnitOfWork, candidates: list[PanelOnlyUser], keys: set[str]
     await uow.session.flush()
     summary["new_user_ids"] = [u.id for u in summary["new_user_ids"]]
     return summary
+
+
+# --- duplicates: two bot subscriptions on one panel user ---------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Duplicate:
+    panel: PanelUser
+    keep: Subscription
+    extra: list[Subscription]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "panel_username": self.panel.username,
+            "panel_id": self.panel.panel_id,
+            "keep": {"id": self.keep.id, "status": self.keep.status.value},
+            "extra": [
+                {
+                    "id": x.id,
+                    "status": x.status.value,
+                    "from_import": (x.plan_snapshot or {}).get("source") == "panel",
+                }
+                for x in self.extra
+            ],
+        }
+
+
+async def find_duplicates(uow: UnitOfWork, panel_users: list[PanelUser]) -> list[Duplicate]:
+    """Panel users more than one bot subscription points at. Dangerous, not cosmetic: a
+    non-working duplicate makes the 7-minute reconcile job disable the panel user again and
+    again, cutting off the person whose real subscription is paid."""
+    subs = list(await uow.subscriptions.list())
+    out: list[Duplicate] = []
+    for p in panel_users:
+        keys = _panel_keys(p)
+        group = [s for s in subs if _sub_keys(s) & keys]
+        if len(group) < 2:
+            continue
+        currents = set()
+        for s in group:
+            owner = await uow.users.get(s.user_id)
+            if owner is not None and owner.current_subscription_id == s.id:
+                currents.add(s.id)
+        # keep: someone's current AND working one, else a working one, else the newest current
+        group.sort(
+            key=lambda s: (
+                s.id in currents and s.status.is_usable,
+                s.status.is_usable,
+                s.id in currents,
+                s.id,
+            ),
+            reverse=True,
+        )
+        out.append(Duplicate(p, group[0], group[1:]))
+    return out
+
+
+async def repair_duplicates(uow: UnitOfWork, dupes: list[Duplicate]) -> dict[str, int]:
+    """Remove the extra subscriptions this importer created; give the kept one the panel's
+    number so it is recognised directly from now on. A duplicate the importer did NOT create
+    (bought in the bot) is left alone and only reported. Caller commits."""
+    removed = skipped = 0
+    for d in dupes:
+        if d.keep.remnawave_id is None and d.panel.panel_id is not None:
+            d.keep.remnawave_id = d.panel.panel_id
+        for extra in d.extra:
+            if (extra.plan_snapshot or {}).get("source") != "panel":
+                skipped += 1
+                continue
+            owner = await uow.users.get(extra.user_id)
+            if owner is not None and owner.current_subscription_id == extra.id:
+                owner.current_subscription_id = d.keep.id if d.keep.user_id == owner.id else None
+            await uow.session.delete(extra)
+            removed += 1
+    await uow.session.flush()
+    return {"removed": removed, "skipped": skipped}

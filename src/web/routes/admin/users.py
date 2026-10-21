@@ -221,8 +221,9 @@ async def counters(container: AppContainer = Depends(get_container)) -> Counters
 
 @router.get("/panel-sync")
 async def panel_sync_preview(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
-    """Who is in Remnawave but not in the bot. Read-only."""
-    from src.application.services.panel_import import find_panel_only
+    """Who is in Remnawave but not in the bot, and panel users two bot subscriptions point at.
+    Read-only."""
+    from src.application.services.panel_import import find_duplicates, find_panel_only
 
     try:
         panel_users = await container.remnawave_client.list_users()
@@ -230,6 +231,7 @@ async def panel_sync_preview(container: AppContainer = Depends(get_container)) -
         raise HTTPException(502, f"панель недоступна: {exc}") from exc
     async with container.uow() as uow:
         missing = await find_panel_only(uow, panel_users)
+        dupes = await find_duplicates(uow, panel_users)
         bot_total = await uow.users.count()
         # Bot users the panel has no account for: started the bot but never bought, or a
         # router placeholder still waiting for its QR — why «bot» can exceed «panel».
@@ -242,7 +244,27 @@ async def panel_sync_preview(container: AppContainer = Depends(get_container)) -
         "bot_total": bot_total,
         "bot_without_subscription": int(no_sub or 0),
         "items": [m.as_dict() for m in missing],
+        "duplicates": [d.as_dict() for d in dupes],
     }
+
+
+@router.post("/panel-sync/repair")
+async def panel_sync_repair(
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Drop the duplicate subscriptions the panel import created (see find_duplicates)."""
+    from src.application.services.panel_import import find_duplicates, repair_duplicates
+
+    try:
+        panel_users = await container.remnawave_client.list_users()
+    except RemnawaveError as exc:
+        raise HTTPException(502, f"панель недоступна: {exc}") from exc
+    async with container.uow() as uow:
+        result = await repair_duplicates(uow, await find_duplicates(uow, panel_users))
+        await audit(uow, identity, "users.panel_sync_repair", None, **result)
+        await uow.commit()
+    return result
 
 
 class PanelSyncIn(BaseModel):

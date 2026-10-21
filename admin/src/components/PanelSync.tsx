@@ -26,6 +26,12 @@ type Preview = {
   bot_total: number;
   bot_without_subscription: number;
   items: PanelOnly[];
+  duplicates: {
+    panel_username: string;
+    panel_id: number | null;
+    keep: { id: number; status: string };
+    extra: { id: number; status: string; from_import: boolean }[];
+  }[];
 };
 type Result = {
   users_created: number;
@@ -111,6 +117,48 @@ export function PanelSyncButton({ onDone }: { onDone: () => void }) {
                   поэтому в боте людей может быть больше, чем в панели.
                 </div>
               </div>
+              {data.duplicates.length > 0 && (
+                <div className="sync-dupes">
+                  <b>⚠️ Дубли: {data.duplicates.length}</b> — на одного пользователя панели смотрят
+                  две подписки бота. Лишняя (не рабочая) подписка заставляет бота отключать этого
+                  человека в панели каждые 7 минут, даже если он оплатил.
+                  <div className="dim" style={{ fontSize: 12, margin: "6px 0" }}>
+                    {data.duplicates.map((d) => (
+                      <div key={d.panel_username}>
+                        <span className="mono">{d.panel_username}</span>
+                        {d.panel_id != null ? ` · №${d.panel_id}` : ""} — оставить подписку #{d.keep.id}{" "}
+                        ({d.keep.status}), лишние:{" "}
+                        {d.extra
+                          .map((x) => `#${x.id} (${x.status}${x.from_import ? ", из импорта" : ", куплена в боте — не трогаю"})`)
+                          .join(", ")}
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    className="btn primary sm"
+                    disabled={busy}
+                    onClick={() => {
+                      void (async () => {
+                        setBusy(true);
+                        try {
+                          const r = await api.post<{ removed: number; skipped: number }>(
+                            "/api/admin/users/panel-sync/repair",
+                          );
+                          toast(`Убрано дублей: ${r.removed}${r.skipped ? `, оставлено для ручной проверки: ${r.skipped}` : ""}`);
+                          onDone();
+                          setData(await api.get<Preview>("/api/admin/users/panel-sync"));
+                        } catch (e) {
+                          toast((e as Error).message);
+                        } finally {
+                          setBusy(false);
+                        }
+                      })();
+                    }}
+                  >
+                    Исправить дубли
+                  </button>
+                </div>
+              )}
               {result && (
                 <div className="sync-result">
                   ✓ Добавлено подписок: {result.subscriptions} (новых пользователей {result.users_created}

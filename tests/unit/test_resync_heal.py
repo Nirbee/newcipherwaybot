@@ -105,3 +105,26 @@ async def test_reconcile_disabled_ignores_already_disabled(uow: UnitOfWork) -> N
 
         fixed = await service.reconcile_disabled(uow)
         assert fixed == 0  # panel already disabled → nothing to do
+
+
+async def test_reconcile_disabled_spares_a_panel_user_a_working_sub_also_uses(
+    uow: UnitOfWork,
+) -> None:
+    """Field: a stale DISABLED duplicate (left by a panel import) pointed at the same panel
+    user as the customer's paid subscription — and this job cut her off every 7 minutes."""
+    from src.infrastructure.database.models.subscription import Subscription
+
+    async with uow:
+        fake, subs, sub = await _grant(uow)  # the paid, working subscription
+        service = RemnawaveResyncService(fake, subs)
+        dup = Subscription(
+            user_id=sub.user_id,
+            short_id="dupshort01",
+            status=SubscriptionStatus.DISABLED,
+            remnawave_uuid=sub.remnawave_uuid,
+        )
+        await uow.subscriptions.add(dup)
+        await uow.commit()
+
+        assert await service.reconcile_disabled(uow) == 0
+        assert fake.users[sub.remnawave_uuid].is_enabled is True

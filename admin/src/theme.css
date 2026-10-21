@@ -1657,3 +1657,10 @@ hr.sep {
 .ud-section.ud-warn {
   border-color: var(--warn);
 }
+.sync-dupes {
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}

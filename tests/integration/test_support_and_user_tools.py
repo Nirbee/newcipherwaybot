@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 
 from src.application.dto.pricing import PurchaseRequest
-from src.core.enums import Currency, TicketAuthor, TicketStatus
+from src.core.enums import Currency, SubscriptionStatus, TicketAuthor, TicketStatus
 from src.infrastructure.database.models.ticket import Ticket, TicketMessage
 from src.web.routes.admin.tickets import effective_priority
 from tests.factories import make_plan, make_user
@@ -485,3 +485,78 @@ async def test_card_shows_the_panel_side_and_sync_reenables_a_disabled_panel_use
     res = await http.post(f"/api/admin/users/{user_id}/sync", headers=auth)
     assert res.status_code == 200, res.text
     assert fake.users[key].is_enabled is True
+
+
+async def test_a_2x_era_subscription_is_recognised_by_its_link_and_duplicates_are_repaired(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    """A subscription from the 2.x era knows its panel user by uuid; 3.x lists users with a
+    numeric id and no uuid. Matched by uuid alone it looked panel-only and got adopted a
+    second time (DISABLED) — and the 7-minute reconcile then kept disabling the paid user."""
+    import dataclasses
+
+    from src.application.dto.panel import PanelUser
+    from src.infrastructure.database.models.subscription import Subscription
+
+    http, container = client
+    future = dt.datetime.now(dt.UTC) + dt.timedelta(days=23)
+    link = "https://sub.example/api/sub/KLkn_osdBaCxyz"
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=5072755730)
+        await uow.commit()
+        old = Subscription(
+            user_id=user.id,
+            short_id="oldshort01",
+            status=SubscriptionStatus.ACTIVE,
+            expire_at=future,
+            subscription_url=link,
+            remnawave_uuid=__import__("uuid").uuid4(),  # 2.x-era link, no numeric id
+        )
+        await uow.subscriptions.add(old)
+        await uow.session.flush()
+        user.current_subscription_id = old.id
+        await uow.commit()
+        old_id = old.id
+
+    panel = PanelUser(
+        uuid=None,
+        panel_id=75,
+        short_id="KLkn_osdBaCxyz",
+        username="user_5072755730",
+        is_enabled=True,
+        status="ACTIVE",
+        expire_at=future,
+        traffic_limit_bytes=0,
+        traffic_used_bytes=0,
+        device_limit=3,
+        subscription_url=link,
+    )
+    container.remnawave_client.users["panel-75"] = panel
+    auth = await _login(http)
+
+    # recognised through the link code: not offered for import again
+    preview = (await http.get("/api/admin/users/panel-sync", headers=auth)).json()
+    assert preview["items"] == [] and preview["duplicates"] == []
+
+    # a duplicate left by the earlier import is found and removed; the paid one stays
+    async with container.uow() as uow:
+        dup = Subscription(
+            user_id=(await uow.users.find_one(telegram_id=5072755730)).id,
+            short_id="dup0000001",
+            status=SubscriptionStatus.DISABLED,
+            remnawave_id=75,
+            subscription_url=link,
+            plan_snapshot={"name": "Из панели", "source": "panel"},
+        )
+        await uow.subscriptions.add(dup)
+        await uow.commit()
+    preview = (await http.get("/api/admin/users/panel-sync", headers=auth)).json()
+    assert len(preview["duplicates"]) == 1
+    assert preview["duplicates"][0]["keep"]["id"] == old_id
+    res = (await http.post("/api/admin/users/panel-sync/repair", headers=auth)).json()
+    assert res == {"removed": 1, "skipped": 0}
+    async with container.uow() as uow:
+        kept = await uow.subscriptions.get(old_id)
+        assert kept.remnawave_id == 75  # recognised directly from now on
+        assert len(await uow.subscriptions.list(remnawave_id=75)) == 1
+    assert dataclasses.is_dataclass(panel)

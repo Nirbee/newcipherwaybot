@@ -13,7 +13,7 @@ keeps subscribers working after admins poke the panel by hand.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.core.enums import SubscriptionStatus
 from src.core.logging import get_logger
@@ -122,9 +122,25 @@ class RemnawaveResyncService:
         """
         fixed = 0
         subs = await uow.subscriptions.disabled_with_panel(limit)
+        # A panel user that a WORKING subscription also points at is that customer's live
+        # account — never disable it because of a stale duplicate (field: a paid customer was
+        # cut off by a second, DISABLED copy of her subscription left by a panel import).
+        live_ids: set[int] = set()
+        live_uuids: set[Any] = set()
+        if subs:
+            for live in await uow.subscriptions.list():
+                if live.status.is_usable:
+                    if live.remnawave_id is not None:
+                        live_ids.add(live.remnawave_id)
+                    if live.remnawave_uuid is not None:
+                        live_uuids.add(live.remnawave_uuid)
         for sub in subs:
             panel_ref = sub.panel_ref
             assert panel_ref is not None  # disabled_with_panel guarantees a provisioned sub
+            if (sub.remnawave_id is not None and sub.remnawave_id in live_ids) or (
+                sub.remnawave_uuid is not None and sub.remnawave_uuid in live_uuids
+            ):
+                continue
             try:
                 panel = await self._client.get_user(panel_ref)
                 if panel is not None and panel.is_enabled:
