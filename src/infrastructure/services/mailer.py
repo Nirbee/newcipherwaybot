@@ -8,11 +8,55 @@ from __future__ import annotations
 
 import asyncio
 import smtplib
+import socket
 from email.mime.text import MIMEText
+from typing import Any
 
 from src.core.logging import get_logger
 
 log = get_logger(__name__)
+
+
+class SmtpConnectError(OSError):
+    """Couldn't open a TCP connection to the SMTP server at all — the message names every
+    address tried, so «blocked by the hosting» doesn't hide behind an IPv6 error."""
+
+
+def _connect_ipv4_first(host: str, port: int, timeout: float | None) -> socket.socket:
+    """Like socket.create_connection, but IPv4 first and every failure reported.
+
+    In a Docker container IPv6 is usually unroutable; create_connection tried the AAAA
+    address first and, when IPv4 also failed, surfaced only «[Errno 101] Network is
+    unreachable» — which says nothing about the real cause (field: the hosting blocked
+    outbound SMTP)."""
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    infos.sort(key=lambda i: i[0] != socket.AF_INET)
+    errors: list[str] = []
+    for family, kind, proto, _name, addr in infos:
+        sock = socket.socket(family, kind, proto)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(addr)
+            return sock
+        except OSError as exc:
+            errors.append(f"{addr[0]} — {exc.strerror or exc}")
+            sock.close()
+    raise SmtpConnectError(
+        f"сервер не может подключиться к {host}:{port} ({'; '.join(errors) or 'нет адресов'}). "
+        "Скорее всего, хостинг блокирует исходящую почту: попробуйте порт 587 "
+        "или попросите хостинг открыть исходящие порты 465 и 587."
+    )
+
+
+class _SMTP(smtplib.SMTP):
+    def _get_socket(self, host: str, port: int, timeout: Any) -> socket.socket:
+        return _connect_ipv4_first(host, port, timeout)
+
+
+class _SMTP_SSL(smtplib.SMTP_SSL):
+    def _get_socket(self, host: str, port: int, timeout: Any) -> socket.socket:
+        sock = _connect_ipv4_first(host, port, timeout)
+        return self.context.wrap_socket(sock, server_hostname=self._host)  # type: ignore[attr-defined]
 
 
 class Mailer:
@@ -44,12 +88,12 @@ class Mailer:
         msg["To"] = to
         # 465 is implicit TLS (Yandex, Mail.ru, many hosts offer only that); 587/25 = STARTTLS.
         if self._port == 465:
-            with smtplib.SMTP_SSL(self._host, self._port, timeout=15) as smtp:
+            with _SMTP_SSL(self._host, self._port, timeout=15) as smtp:
                 if self._user:
                     smtp.login(self._user, self._password)
                 smtp.send_message(msg)
             return
-        with smtplib.SMTP(self._host, self._port, timeout=15) as smtp:
+        with _SMTP(self._host, self._port, timeout=15) as smtp:
             if self._tls:
                 smtp.starttls()
             if self._user:

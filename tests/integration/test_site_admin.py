@@ -170,3 +170,15 @@ async def test_renew_by_telegram_username_without_login(
     assert (captured["return_url"] or "").endswith("/web/?renewed=1") or captured[
         "return_url"
     ] is None
+
+
+def test_smtp_connect_error_names_every_address_tried() -> None:
+    """Field: «[Errno 101] Network is unreachable» — the IPv6 attempt's error hid that the
+    IPv4 one failed too (hosting blocks outbound SMTP)."""
+    import pytest
+
+    from src.infrastructure.services.mailer import SmtpConnectError, _connect_ipv4_first
+
+    with pytest.raises(SmtpConnectError) as err:
+        _connect_ipv4_first("127.0.0.1", 9, 3)  # nothing listens on the discard port
+    assert "127.0.0.1" in str(err.value) and "587" in str(err.value)
