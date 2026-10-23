@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 from src.web.routes.admin import (
     ai_support,
     analytics,
+    api_keys,
     auth,
     blacklist,
     broadcasts,
@@ -59,6 +60,7 @@ _protected.include_router(tickets.router)
 _protected.include_router(servers.router)
 _protected.include_router(routers.router)
 _protected.include_router(staff.router)
+_protected.include_router(api_keys.router)
 _protected.include_router(settings.router)
 _protected.include_router(menu.router)
 _protected.include_router(reminders.router)

@@ -277,6 +277,28 @@ export default function Settings() {
               </div>
             </button>
           )}
+          {me.data?.role === "OWNER" && (
+            <button
+              onClick={() => nav("/ai-keys")}
+              style={{
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: 18,
+                cursor: "pointer",
+                textAlign: "left",
+                color: "var(--text)",
+              }}
+            >
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span style={{ fontSize: 22 }}>🤖</span>
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 600, margin: "10px 0 4px" }}>{t.aiKeys}</div>
+              <div className="muted" style={{ fontSize: 12.5, minHeight: 34 }}>
+                {t.aiKeysTileHint}
+              </div>
+            </button>
+          )}
           {cats.map((c) => {
             const params = all.filter((p) => p.category === c.id);
             const overridden = params.filter((p) => p.is_overridden || p.key in dirty).length;

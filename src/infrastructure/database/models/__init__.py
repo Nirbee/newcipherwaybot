@@ -5,6 +5,7 @@ and ``create_all`` in tests). Import order is irrelevant — relationships use s
 from __future__ import annotations
 
 from src.infrastructure.database.base import Base
+from src.infrastructure.database.models.admin_api_key import AdminApiKey
 from src.infrastructure.database.models.audit_log import AuditLog
 from src.infrastructure.database.models.blacklist import BlacklistEntry
 from src.infrastructure.database.models.bot_config import BotConfigValue
@@ -41,6 +42,7 @@ from src.infrastructure.database.models.winback_step import WinbackStep
 from src.infrastructure.database.models.withdrawal import WithdrawalRequest
 
 __all__ = [
+    "AdminApiKey",
     "AuditLog",
     "Base",
     "BlacklistEntry",

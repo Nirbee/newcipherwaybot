@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 
 from src.core.enums import BroadcastStatus, TicketStatus
 from src.infrastructure.database.dao.base import BaseDAO
+from src.infrastructure.database.models.admin_api_key import AdminApiKey
 from src.infrastructure.database.models.audit_log import AuditLog
 from src.infrastructure.database.models.blacklist import BlacklistEntry
 from src.infrastructure.database.models.bot_config import BotConfigValue
@@ -273,6 +274,10 @@ class WithdrawalDAO(BaseDAO[WithdrawalRequest]):
 
 class CabinetRefreshTokenDAO(BaseDAO[CabinetRefreshToken]):
     model = CabinetRefreshToken
+
+
+class AdminApiKeyDAO(BaseDAO[AdminApiKey]):
+    model = AdminApiKey
 
 
 class ServerNodeDAO(BaseDAO[ServerNode]):

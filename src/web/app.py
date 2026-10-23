@@ -31,6 +31,7 @@ from src.web.routes import (
     panel,
     payments,
 )
+from src.web.routes.admin.api_key_auth import AdminKeyResponseFilter
 from src.web.routes.admin.auth import bootstrap_admin
 from src.web.routes.admin.maintenance import bootstrap_public_urls, bootstrap_report_topics
 from src.web.routes.admin.menu import bootstrap_menu
@@ -154,6 +155,8 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="VPN-shop base", lifespan=lifespan)
     app.add_exception_handler(Exception, unhandled_error_handler)
+    # Read-only API keys: mask e-mails/phones in their answers + per-key request journal.
+    app.add_middleware(AdminKeyResponseFilter)
     if settings.web.cors_origins:
         app.add_middleware(
             CORSMiddleware,

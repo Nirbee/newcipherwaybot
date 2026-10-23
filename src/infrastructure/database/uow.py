@@ -18,6 +18,7 @@ from types import TracebackType
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.infrastructure.database.dao.admin import (
+    AdminApiKeyDAO,
     AuditLogDAO,
     BlacklistDAO,
     BotConfigValueDAO,
@@ -104,6 +105,7 @@ class UnitOfWork:
         self.report_topics = ReportTopicDAO(session)
         self.withdrawals = WithdrawalDAO(session)
         self.cabinet_tokens = CabinetRefreshTokenDAO(session)
+        self.admin_api_keys = AdminApiKeyDAO(session)
         self.linked_accounts = LinkedAccountDAO(session)
         self.server_nodes = ServerNodeDAO(session)
         self.audit = AuditLogDAO(session)
