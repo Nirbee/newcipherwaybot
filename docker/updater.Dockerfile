@@ -4,7 +4,8 @@ FROM docker:27-cli
 
 # curl: DM the owner the update's outcome via the Bot API. gnupg: `git verify-commit` when
 # UPDATE_VERIFY_SIGNATURE=1 (without it, signature checks fail even for correctly-signed commits).
-RUN apk add --no-cache bash git curl gnupg
+# util-linux: a real flock with -w (BusyBox's lacks it; update.sh falls back, this restores the timeout).
+RUN apk add --no-cache bash git curl gnupg util-linux
 
 COPY scripts/updater.sh /usr/local/bin/updater.sh
 RUN chmod +x /usr/local/bin/updater.sh

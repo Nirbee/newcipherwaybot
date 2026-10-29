@@ -43,7 +43,13 @@ run_spin() { # run_spin "подпись" cmd...
 if [ -z "${_VPNHUB_LOCKED:-}" ] && command -v flock >/dev/null 2>&1; then
   # Lock in the repo (bind-mounted identically on host and in the updater sidecar) so a host-run
   # update and the sidecar/6h auto-run actually serialize — /tmp is NOT shared between them.
-  exec env _VPNHUB_LOCKED=1 flock -w 1800 "$(dirname "$0")/../.update.lock" bash "$0" "$@"
+  # BusyBox flock (the alpine-based updater sidecar) has no -w: there the «Обновить» button died
+  # at this line with «flock: unrecognized option: w» before even pulling. Without -w it simply
+  # waits for the lock, which is still serialized — just without the 30-min give-up.
+  if flock --help 2>&1 | grep -q -- '-w'; then
+    exec env _VPNHUB_LOCKED=1 flock -w 1800 "$(dirname "$0")/../.update.lock" bash "$0" "$@"
+  fi
+  exec env _VPNHUB_LOCKED=1 flock -x "$(dirname "$0")/../.update.lock" bash "$0" "$@"
 fi
 
 cd "$(dirname "$0")/.."
