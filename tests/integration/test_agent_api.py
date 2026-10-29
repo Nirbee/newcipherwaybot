@@ -6,6 +6,7 @@ Reuses the ApiTestContainer/client fixture from test_admin_api.py (fakes + in-me
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import httpx
 
@@ -738,3 +739,183 @@ async def test_past_end_date_means_vpn_off_and_no_alarm_before_the_status_flips(
     assert sent == []  # unpaid is not an outage
     row = (await http.get("/api/admin/routers", headers=await _login(http))).json()["items"][0]
     assert row["vpn"]["state"] == "expired"
+
+
+# --- agent v7: event journal + game pulse -------------------------------------------------
+
+
+async def test_pulse_settings_need_a_token_and_are_off_by_default(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    assert (await http.get("/api/agent/pulse")).status_code == 401
+    bad = await http.get("/api/agent/pulse", headers={"Authorization": "Bearer nope"})
+    assert bad.status_code == 401
+
+    container.remnawave_client.hosts = [_host("host-a")]
+    device_id, token = await _create_device(http, container, telegram_id=40, host_uuids=["host-a"])
+    auth = {"Authorization": f"Bearer {token}"}
+    res = await http.get("/api/agent/pulse", headers=auth)
+    assert res.status_code == 200
+    assert res.json() == {"enabled": False, "every_runs": 2, "timeout_s": 3, "targets": []}
+    assert (await http.get("/api/agent/pulse", headers=auth)).status_code == 429
+    rev_off = (await http.get("/api/agent/config", headers=auth)).headers["X-Pulse-Rev"]
+
+    # Switched on in the card: targets arrive and /config advertises a new revision, so the
+    # agent re-reads /pulse on its next run instead of within the hour.
+    admin = await _login(http)
+    put = await http.put(
+        f"/api/admin/routers/{device_id}/pulse", headers=admin, json={"enabled": True}
+    )
+    assert put.status_code == 200
+    container.redis.store.pop(f"agent:pulsecfg:{device_id}", None)
+    on = (await http.get("/api/agent/pulse", headers=auth)).json()
+    assert on["enabled"] is True
+    assert [t["id"] for t in on["targets"]] == ["aws-fra", "aws-sto", "rbx-fra"]
+    assert on["targets"][2]["resolve_ip"] == "128.116.44.3"
+    container.redis.store.pop(f"agent:cfg:{device_id}", None)
+    rev_on = (await http.get("/api/agent/config", headers=auth)).headers["X-Pulse-Rev"]
+    assert rev_on != rev_off
+
+    # Other routers stay off.
+    _, other = await _create_device(http, container, telegram_id=41, host_uuids=["host-a"])
+    res = await http.get("/api/agent/pulse", headers={"Authorization": f"Bearer {other}"})
+    assert res.json()["enabled"] is False
+
+
+async def test_heartbeat_v7_stores_events_and_pulse_for_the_card(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import time
+
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=42)
+    auth = {"Authorization": f"Bearer {token}"}
+    now = int(time.time())
+    events = [
+        {"ts": now - 3600, "kind": "watchdog_stop", "note": "no server and no internet"},
+        {"ts": now - 3300, "kind": "watchdog_resume", "note": ""},
+        {"ts": now - 3290, "kind": "config_applied", "note": "etag=abc"},
+    ]
+    pulse = {
+        "ts": now,
+        "results": [
+            {"target": "aws-fra", "path": "direct", "ms": 46},
+            {"target": "aws-fra", "path": "proxy-de", "ms": 63},
+            {"target": "aws-sto", "path": "direct", "ms": None},
+        ],
+    }
+    body = {
+        "xray_running": True,
+        "diagnostics": {"agent_version": "7"},
+        "events": events,
+        "pulse": pulse,
+    }
+    assert (await http.post("/api/agent/heartbeat", headers=auth, json=body)).status_code == 204
+    # Pulse not switched on for this router: its numbers are not kept.
+    assert f"agent:pulse:{device_id}" not in container.redis.store
+
+    admin = await _login(http)
+    await http.put(f"/api/admin/routers/{device_id}/pulse", headers=admin, json={"enabled": True})
+    # The agent re-sends its last 20 events every run: no duplicates.
+    container.redis.store.pop(f"agent:hb:{device_id}", None)
+    body["events"] = [*events, {"ts": now - 10, "kind": "config_applied", "note": ""}]
+    assert (await http.post("/api/agent/heartbeat", headers=auth, json=body)).status_code == 204
+    container.redis.store.pop(f"agent:hb:{device_id}", None)
+    assert (await http.post("/api/agent/heartbeat", headers=auth, json=body)).status_code == 204
+
+    stored = json.loads(container.redis.store[f"agent:events:{device_id}"])
+    assert len(stored) == 4
+    runs = json.loads(container.redis.store[f"agent:pulse:{device_id}"])
+    assert len(runs) == 2 and runs[0]["r"][0] == ["aws-fra", "direct", 46]
+
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=admin)).json()
+    assert detail["restarts"]["day"] == 3  # watchdog stop + 2 config applies
+    assert detail["restarts"]["supported"] is True
+    assert detail["restarts"]["events"][0]["kind"] == "config_applied"  # newest first
+    games = detail["games"]
+    assert games["supported"] is True and games["enabled"] is True
+    assert [p["id"] for p in games["paths"]] == ["direct", "proxy-de"]
+    assert games["rows"][0]["best"] == "direct"
+    assert games["rows"][1]["cells"]["direct"]["loss_24h"] == 1.0
+    assert "быстрее напрямую" in games["verdict"]
+    row = (await http.get("/api/admin/routers", headers=admin)).json()["items"][0]
+    assert row["restarts_24h"] == 3
+
+
+async def test_heartbeat_v6_without_events_or_pulse_still_works(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=43)
+    res = await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"xray_running": True, "diagnostics": {"agent_version": "6", "self_test": []}},
+    )
+    assert res.status_code == 204
+    assert f"agent:events:{device_id}" not in container.redis.store
+    assert f"agent:pulse:{device_id}" not in container.redis.store
+
+    admin = await _login(http)
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=admin)).json()
+    assert detail["diagnostics"]["agent_version"] == "6"
+    assert detail["games"]["supported"] is False
+    assert detail["games"]["rows"] and detail["games"]["paths"] == []
+    assert detail["restarts"] == {"day": 0, "week": 0, "supported": False, "events": []}
+    assert detail["restarts_24h"] == 0
+
+
+async def test_heartbeat_ignores_malformed_events_and_pulse(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=44)
+    res = await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"events": "nope", "pulse": [1, 2, 3], "diagnostics": {"agent_version": "7"}},
+    )
+    assert res.status_code == 204
+    assert f"agent:events:{device_id}" not in container.redis.store
+    assert f"agent:pulse:{device_id}" not in container.redis.store
+
+
+async def test_heartbeat_with_junk_pulse_keeps_only_known_targets_and_survives_infinity(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import random
+
+    http, container = client
+    device_id, token = await _create_device(http, container, telegram_id=45)
+    admin = await _login(http)
+    await http.put(f"/api/admin/routers/{device_id}/pulse", headers=admin, json={"enabled": True})
+    rnd = random.Random(7)
+    results = [
+        {
+            "target": rnd.choice(["aws-fra", "aws-sto", "evil", "x" * 40]),
+            "path": rnd.choice(["direct", f"proxy-{i:08x}", "BAD PATH", "a" * 50]),
+            "ms": rnd.randrange(500),
+        }
+        for i in range(40)
+    ]
+    # Raw JSON: Infinity / huge numbers must not turn into a 500.
+    raw = json.dumps({"pulse": {"results": results}})[:-3] + (
+        ', {"target": "aws-fra", "path": "direct", "ms": Infinity}]}, '
+        '"events": [{"ts": Infinity, "kind": "rollback"}, {"ts": 1e400, "kind": "rollback"}]}'
+    )
+    res = await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        content=raw,
+    )
+    assert res.status_code == 204
+    runs = json.loads(container.redis.store[f"agent:pulse:{device_id}"])
+    rows = [row for run in runs for row in run["r"]]
+    assert rows and len(rows) <= 20
+    assert {row[0] for row in rows} <= {"aws-fra", "aws-sto"}
+    assert len({row[1] for row in rows}) <= 6
+    assert f"agent:events:{device_id}" not in container.redis.store
+    detail = (await http.get(f"/api/admin/routers/{device_id}", headers=admin)).json()
+    assert len(detail["games"]["paths"]) <= 6
+    assert [r["target"] for r in detail["games"]["rows"]] == ["aws-fra", "aws-sto", "rbx-fra"]

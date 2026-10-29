@@ -28,6 +28,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from src.application.services import game_pulse
 from src.application.services.router_config import (
     CANDIDATE_PREFIX,
     MAX_CANDIDATES,
@@ -370,6 +371,83 @@ async def config_info(container: AppContainer, device_id: int) -> dict[str, Any]
     return json.loads(raw) if raw else None
 
 
+# --- game pulse / event journal (agent v7) ----------------------------------------------------
+# Which routers run the game pulse: a bot_config row (a list of device ids, like the eligible-
+# hosts allowlist — no migration), off for every router unless switched on in its card.
+PULSE_DEVICES_KEY = "ROUTER_PULSE_DEVICES"
+
+
+async def pulse_device_ids(container: AppContainer) -> set[int]:
+    async with container.uow() as uow:
+        row = await uow.bot_config.find_one(key=PULSE_DEVICES_KEY)
+    ids: set[int] = set()
+    for v in (row.value if row is not None else None) or []:
+        try:
+            ids.add(int(v))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+async def pulse_targets(container: AppContainer) -> list[dict[str, str]]:
+    async with container.uow() as uow:
+        raw = await container.bot_config.value(uow, "GAME_PULSE_TARGETS")
+    return game_pulse.parse_targets(raw)
+
+
+async def _pulse_settings(container: AppContainer, device_id: int) -> dict[str, Any]:
+    enabled = device_id in await pulse_device_ids(container)
+    return game_pulse.agent_settings(enabled, await pulse_targets(container) if enabled else [])
+
+
+def _pulse_revision(settings: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:12]
+
+
+async def _redis_json_list(container: AppContainer, key: str) -> list[Any]:
+    raw = await _redis_get(container, key)
+    try:
+        value = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+async def agent_events(container: AppContainer, device_id: int) -> list[dict[str, Any]]:
+    """The agent's journal (config applied, watchdog, self-update…), oldest first."""
+    return await _redis_json_list(container, f"agent:events:{device_id}")
+
+
+async def pulse_runs(container: AppContainer, device_id: int) -> list[dict[str, Any]]:
+    return await _redis_json_list(container, f"agent:pulse:{device_id}")
+
+
+async def _store_events_and_pulse(
+    container: AppContainer, device_id: int, events: Any, pulse: Any
+) -> None:
+    now = dt.datetime.now(dt.UTC).timestamp()
+    if isinstance(events, list) and events:
+        stored = await agent_events(container, device_id)
+        merged = game_pulse.merge_events(stored, events, now)
+        if merged != stored:  # usually the same 20 lines again: nothing to write
+            await _redis_set(
+                container,
+                f"agent:events:{device_id}",
+                json.dumps(merged, ensure_ascii=False),
+                game_pulse.EVENTS_TTL_SECONDS,
+            )
+    # Pulse only from routers it's switched on for, only for the current targets.
+    if isinstance(pulse, dict) and device_id in await pulse_device_ids(container):
+        targets = {t["id"] for t in await pulse_targets(container)}
+        runs = game_pulse.append_pulse(await pulse_runs(container, device_id), pulse, now, targets)
+        await _redis_set(
+            container,
+            f"agent:pulse:{device_id}",
+            json.dumps(runs, separators=(",", ":")),
+            game_pulse.PULSE_TTL_SECONDS,
+        )
+
+
 async def require_device(
     authorization: str | None = Header(None),
     container: AppContainer = Depends(get_container),
@@ -547,9 +625,19 @@ async def get_config(
         candidates=candidates,
     )
     etag = config_etag(config)
+    # v7 agents re-read /pulse when this changes, so switching the pulse on in the card takes
+    # effect on the next poll instead of within the hour. Never allowed to cost the config.
+    try:
+        pulse_rev = _pulse_revision(await _pulse_settings(container, device.id))
+    except Exception:
+        log.warning("agent config: pulse revision unavailable", device_id=device.id)
+        pulse_rev = ""
 
     if if_none_match and if_none_match.strip('"') == etag:
-        return Response(status_code=304, headers={"X-Agent-Version": _AGENT_VERSION})
+        return Response(
+            status_code=304,
+            headers={"X-Agent-Version": _AGENT_VERSION, "X-Pulse-Rev": pulse_rev},
+        )
 
     async with container.uow() as uow:
         fresh = await uow.router_devices.get(device.id)
@@ -559,7 +647,19 @@ async def get_config(
 
     response.headers["ETag"] = f'"{etag}"'
     response.headers["X-Agent-Version"] = _AGENT_VERSION
+    response.headers["X-Pulse-Rev"] = pulse_rev
     return config
+
+
+@router.get("/pulse")
+async def pulse_settings(
+    device: RouterDevice = Depends(require_device),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Game pulse settings for this router (agent v7): off -> no targets, nothing measured."""
+    if not await _rate_limit_ok(container, f"agent:pulsecfg:{device.id}"):
+        raise HTTPException(429, "too many requests")
+    return await _pulse_settings(container, device.id)
 
 
 # --- self-test support ------------------------------------------------------------------
@@ -895,6 +995,15 @@ async def heartbeat(
             container, fresh, vpn_verdict(diagnostics, fresh.external_ip, live)
         )
         await _autotune_device(container, device.id, diagnostics)
+    # Agent v7: event journal + game pulse (top level; inside diagnostics also accepted).
+    # Older agents send neither — nothing changes for them.
+    extra = diagnostics if isinstance(diagnostics, dict) else {}
+    await _store_events_and_pulse(
+        container,
+        device.id,
+        body.get("events", extra.get("events")),
+        body.get("pulse", extra.get("pulse")),
+    )
 
 
 @router.post("/install-report", status_code=204)

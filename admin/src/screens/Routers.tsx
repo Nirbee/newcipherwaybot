@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { api, dtTime } from "../api/client";
-import { Drawer, Field, Modal, Seg, SecretInput } from "../components/ui";
+import { Drawer, Field, Modal, Seg, SecretInput, Toggle } from "../components/ui";
 import { useApp } from "../state/app";
 
 type Mode = "auto" | "force";
@@ -58,6 +58,43 @@ type RouterDevice = {
   vpn: VpnVerdict;
   note: string | null;
   created_at: string;
+  /** Agent v7 journal: Xray restarts / watchdog stops over the last 24 h. */
+  restarts_24h?: number;
+};
+type PulseCell = {
+  median_1h: number | null;
+  median_24h: number | null;
+  loss_1h: number | null;
+  loss_24h: number | null;
+  samples_24h: number;
+};
+type GamesInfo = {
+  enabled: boolean;
+  supported: boolean;
+  paths: { id: string; title: string }[];
+  rows: {
+    target: string;
+    title: string;
+    games: string;
+    best: string | null;
+    cells: Record<string, PulseCell>;
+  }[];
+  verdict: string;
+  last_at: number | null;
+};
+type AgentEvent = { ts: number; kind: string; note: string };
+type RestartsInfo = {
+  day: number;
+  week: number;
+  supported: boolean;
+  events: AgentEvent[];
+};
+type PulseTarget = {
+  id: string;
+  title: string;
+  url: string;
+  games: string;
+  resolve_ip?: string;
 };
 type AvailableHost = { uuid: string; remark: string; network: string; is_disabled: boolean };
 type SubSummary = {
@@ -78,6 +115,8 @@ type RouterDetail = RouterDevice & {
   config_info: ConfigInfo;
   recommended_xray: string;
   autotune: { note: string; at: string | null } | null;
+  games?: GamesInfo;
+  restarts?: RestartsInfo;
 };
 
 function QrImage({ text }: { text: string }) {
@@ -266,6 +305,171 @@ function DiagRow({ label, value, warn }: { label: string; value: string; warn?: 
     </div>
   );
 }
+
+const NEED_V7 = "Нужен агент v7 — обновится сам в течение 5 минут.";
+/** A restart in the list gets flagged above this many per 24 h. */
+const RESTARTS_WARN = 5;
+
+function evTime(ts: number): string {
+  return new Date(ts * 1000).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function PulseValue({ cell, best }: { cell: PulseCell | undefined; best: boolean }) {
+  if (!cell) return <span className="dim">—</span>;
+  const ms = cell.median_1h ?? cell.median_24h;
+  const loss = cell.loss_24h ?? 0;
+  return (
+    <span className="pulse-val">
+      {ms == null ? (
+        <span style={{ color: "var(--bad-ink)" }}>нет связи</span>
+      ) : (
+        <span
+          title={cell.median_1h == null ? "За последний час замеров нет — медиана за 24 ч" : undefined}
+          style={{ color: best ? "var(--good-ink)" : undefined, fontWeight: best ? 600 : undefined }}
+        >
+          {cell.median_1h == null ? "~" : ""}
+          {ms} мс{best ? " ✓" : ""}
+        </span>
+      )}
+      {ms != null && loss > 0 && (
+        <span className="dim pulse-loss" style={{ color: loss >= 0.2 ? "var(--warn)" : undefined }}>
+          потери {Math.round(loss * 100)} %
+        </span>
+      )}
+    </span>
+  );
+}
+
+function GamesBlock({
+  games,
+  onToggle,
+}: {
+  games: GamesInfo | undefined;
+  onToggle: (on: boolean) => void;
+}) {
+  const enabled = games?.enabled ?? false;
+  const paths = games?.paths ?? [];
+  const cols = `minmax(110px, 1.3fr) repeat(${Math.max(paths.length, 1)}, minmax(70px, 1fr))`;
+  return (
+    <div className="grid" style={{ gap: 8 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+        <span className="caps">Игры и пинг</span>
+        <span className="row" style={{ gap: 8, fontSize: 12.5 }}>
+          <span className="dim">Игровой пульс</span>
+          <Toggle on={enabled} onChange={onToggle} />
+        </span>
+      </div>
+      {!enabled && (
+        <span className="dim" style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+          Пульс выключен. Включённый роутер раз в 10 минут сам замеряет задержку до игровых
+          регионов — напрямую и через каждый сервер. Трафик клиентов не смотрим: только
+          свои короткие замеры.
+        </span>
+      )}
+      {enabled && games && !games.supported && (
+        <span className="dim" style={{ fontSize: 12.5 }}>
+          {NEED_V7}
+        </span>
+      )}
+      {enabled && games?.supported && paths.length === 0 && (
+        <span className="dim" style={{ fontSize: 12.5 }}>
+          Ждём первых замеров — до 15 минут после включения.
+        </span>
+      )}
+      {paths.length > 0 && games && (
+        <>
+          <div className="pulse-tbl">
+            <div className="pulse-row head" style={{ gridTemplateColumns: cols }}>
+              <span>Регион</span>
+              {paths.map((p) => (
+                <span key={p.id}>{p.title}</span>
+              ))}
+            </div>
+            {games.rows.map((r) => (
+              <div key={r.target} className="pulse-row" style={{ gridTemplateColumns: cols }}>
+                <span className="pulse-target" title={r.games || undefined}>
+                  {r.title}
+                </span>
+                {paths.map((p) => (
+                  <span key={p.id} className="pulse-cell" data-label={p.title}>
+                    <PulseValue cell={r.cells[p.id]} best={r.best === p.id} />
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div className="dim" style={{ fontSize: 11.5 }}>
+            медиана за 1 ч · потери за 24 ч под числом · ✓ лучший путь
+            {games.last_at ? ` · последний замер ${evTime(games.last_at)}` : ""}
+          </div>
+          {games.verdict && (
+            <div className="vpn-verdict" style={{ fontSize: 13 }}>
+              Вывод: {games.verdict}.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const EVENT_TEXT: Record<string, string> = {
+  config_applied: "конфиг применён — Xray перезапущен",
+  rollback: "новый конфиг не запустился — вернули прежний",
+  watchdog_stop: "сторож выключил VPN — нет связи с сервером и интернетом",
+  watchdog_resume: "сторож включил VPN обратно",
+  self_update: "агент обновился",
+  xray_restart_failed: "не удалось перезапустить Xray",
+};
+const EVENT_BAD = new Set(["rollback", "watchdog_stop", "xray_restart_failed"]);
+
+function RestartsBlock({ restarts }: { restarts: RestartsInfo | undefined }) {
+  return (
+    <div className="grid" style={{ gap: 8 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+        <span className="caps">Перезапуски VPN</span>
+        {restarts?.supported && (
+          <span
+            className="mono"
+            style={{
+              fontSize: 12,
+              color: restarts.day > RESTARTS_WARN ? "var(--warn)" : undefined,
+            }}
+          >
+            за 24 ч: {restarts.day} · за 7 дн: {restarts.week}
+          </span>
+        )}
+      </div>
+      {!restarts?.supported ? (
+        <span className="dim" style={{ fontSize: 12.5 }}>
+          {NEED_V7}
+        </span>
+      ) : restarts.events.length === 0 ? (
+        <span className="dim" style={{ fontSize: 12.5 }}>
+          За 7 дней перезапусков не было.
+        </span>
+      ) : (
+        <div className="grid ev-list" style={{ gap: 3 }}>
+          {restarts.events.map((e) => (
+            <div key={`${e.ts}-${e.kind}`} className="ev-row">
+              <span className="mono dim">{evTime(e.ts)}</span>
+              <span style={{ color: EVENT_BAD.has(e.kind) ? "var(--warn)" : undefined }}>
+                {EVENT_TEXT[e.kind] ?? e.kind}
+                {e.kind === "self_update" && e.note && <span className="dim"> ({e.note})</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type EligibleHost = {
   uuid: string;
   remark: string;
@@ -353,6 +557,20 @@ export default function Routers() {
   } | null>(null);
   const [hostsOpen, setHostsOpen] = useState(false);
   const [hostsChecked, setHostsChecked] = useState<Record<string, boolean>>({});
+  const [pulseOpen, setPulseOpen] = useState(false);
+  const [pulseDraft, setPulseDraft] = useState<PulseTarget[]>([]);
+  const [pulseSaving, setPulseSaving] = useState(false);
+  const pulseTargets = useQuery({
+    queryKey: ["routers", "pulse-targets"],
+    queryFn: () =>
+      api.get<{ items: PulseTarget[]; defaults: PulseTarget[]; max: number }>(
+        "/api/admin/routers/config/pulse-targets",
+      ),
+    enabled: pulseOpen,
+  });
+  useEffect(() => {
+    if (pulseOpen && pulseTargets.data) setPulseDraft(pulseTargets.data.items.map((x) => ({ ...x })));
+  }, [pulseOpen, pulseTargets.data]);
 
   const [openId, setOpenId] = useState<number | null>(null);
   const detail = useQuery({
@@ -531,6 +749,36 @@ export default function Routers() {
     }
   }
 
+  async function setPulse(id: number, enabled: boolean) {
+    try {
+      await api.put(`/api/admin/routers/${id}/pulse`, { enabled });
+      void qc.invalidateQueries({ queryKey: ["routers", id] });
+      toast(enabled ? "Пульс включён — роутер подхватит за 5 минут" : "Пульс выключен");
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  function editPulseTarget(i: number, patch: Partial<PulseTarget>) {
+    setPulseDraft((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  }
+
+  async function savePulseTargets() {
+    setPulseSaving(true);
+    try {
+      await api.put("/api/admin/routers/config/pulse-targets", {
+        items: pulseDraft.map((x) => ({ ...x, resolve_ip: (x.resolve_ip ?? "").trim() || undefined })),
+      });
+      setPulseOpen(false);
+      void qc.invalidateQueries({ queryKey: ["routers"] });
+      toast("✓");
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setPulseSaving(false);
+    }
+  }
+
   async function copy(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -550,6 +798,9 @@ export default function Routers() {
         <div className="actions">
           <button className="btn secondary" onClick={openHostsModal}>
             {t.routersEligibleHosts}
+          </button>
+          <button className="btn secondary" onClick={() => setPulseOpen(true)}>
+            🎮 Игровой пульс
           </button>
           <button
             className="btn primary"
@@ -603,6 +854,15 @@ export default function Routers() {
                     ? t.routersStOnline
                     : t.routersStOffline}
               {d.status !== "revoked" && <VpnBadge vpn={d.vpn} />}
+              {(d.restarts_24h ?? 0) > RESTARTS_WARN && (
+                <div
+                  className="vpn-badge"
+                  style={{ color: "var(--warn)" }}
+                  title="Перезапусков VPN за 24 ч — в эти моменты у клиента рвутся соединения (игры, звонки)"
+                >
+                  ⚠ перезапусков за 24 ч: {d.restarts_24h}
+                </div>
+              )}
             </span>
             <span className="cap-pill rt-mode">
               {d.mode === "auto" ? t.routersModeAuto : t.routersModeForce}
@@ -929,6 +1189,102 @@ export default function Routers() {
         </Modal>
       )}
 
+      {pulseOpen && (
+        <Modal title="Игровой пульс: цели замеров" wide onClose={() => setPulseOpen(false)}>
+          <div className="grid" style={{ gap: 10 }}>
+            <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+              Роутеры с включённым пульсом (переключатель в карточке роутера) раз в 10 минут
+              замеряют время ответа этих адресов по уже открытому соединению — напрямую и через
+              каждый сервер. Цель должна держать keep-alive (иначе замер считается потерей).
+              До {pulseTargets.data?.max ?? 4} целей. Адрес — публичный https (порт 443) в том же городе, что игровые
+              серверы, и не CDN: CDN покажет ближайший к роутеру узел, а не игру. «Фиксированный
+              IP» — если имя ведёт на разные узлы (роутер подставит этот адрес).
+            </div>
+            {pulseDraft.map((x, i) => (
+              <div key={i} className="card pulse-edit">
+                <div className="row" style={{ gap: 8 }}>
+                  <input
+                    className="input mono"
+                    style={{ width: 120 }}
+                    placeholder="id"
+                    value={x.id}
+                    onChange={(e) => editPulseTarget(i, { id: e.target.value })}
+                  />
+                  <input
+                    className="input"
+                    style={{ flex: 1 }}
+                    placeholder="Название (PUBG · Европа)"
+                    value={x.title}
+                    onChange={(e) => editPulseTarget(i, { title: e.target.value })}
+                  />
+                  <button
+                    className="btn danger sm"
+                    onClick={() => setPulseDraft((list) => list.filter((_, j) => j !== i))}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <input
+                  className="input mono"
+                  placeholder="https://…"
+                  value={x.url}
+                  onChange={(e) => editPulseTarget(i, { url: e.target.value })}
+                />
+                <div className="row" style={{ gap: 8 }}>
+                  <input
+                    className="input mono"
+                    style={{ width: 160 }}
+                    placeholder="фикс. IP (необяз.)"
+                    value={x.resolve_ip ?? ""}
+                    onChange={(e) => editPulseTarget(i, { resolve_ip: e.target.value })}
+                  />
+                  <input
+                    className="input"
+                    style={{ flex: 1 }}
+                    placeholder="Игры (подсказка в таблице)"
+                    value={x.games}
+                    onChange={(e) => editPulseTarget(i, { games: e.target.value })}
+                  />
+                </div>
+              </div>
+            ))}
+            {pulseTargets.isLoading && <span className="dim">…</span>}
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <button
+                className="btn secondary sm"
+                disabled={pulseDraft.length >= (pulseTargets.data?.max ?? 4)}
+                onClick={() =>
+                  setPulseDraft((list) => [...list, { id: "", title: "", url: "", games: "" }])
+                }
+              >
+                + Добавить цель
+              </button>
+              <button
+                className="btn secondary sm"
+                disabled={!pulseTargets.data}
+                onClick={() =>
+                  setPulseDraft((pulseTargets.data?.defaults ?? []).map((x) => ({ ...x })))
+                }
+              >
+                Вернуть стандартные
+              </button>
+            </div>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn secondary" onClick={() => setPulseOpen(false)}>
+                {t.cancel}
+              </button>
+              <button
+                className="btn primary"
+                disabled={pulseSaving || !pulseTargets.data}
+                onClick={() => void savePulseTargets()}
+              >
+                {t.save}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {openId !== null && (
         <Drawer onClose={() => setOpenId(null)}>
           {detail.data && (
@@ -1003,6 +1359,11 @@ export default function Routers() {
                   </div>
                 )}
               </Field>
+              <GamesBlock
+                games={detail.data.games}
+                onToggle={(on) => void setPulse(detail.data!.id, on)}
+              />
+              <RestartsBlock restarts={detail.data.restarts} />
               {detail.data.claim_url && (
                 <Field label={t.routersClaimTitle}>
                   <div className="grid" style={{ gap: 8 }}>

@@ -44,3 +44,6 @@ CLAUDE.md
 migration_inbox/
 admin/tsconfig.tsbuildinfo
 .installans
+
+# graphify (local knowledge graph)
+graphify-out/

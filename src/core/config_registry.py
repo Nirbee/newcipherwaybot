@@ -13,6 +13,7 @@ Conventions:
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,6 +56,31 @@ def _p(
 
 
 C = ConfigCategory
+
+# Game pulse (router agent v7): addresses in the same cities as the game servers, TLS on 443,
+# not CDN/anycast (a CDN name measures its nearest edge, not the game). ``resolve_ip`` pins
+# the address the agent dials. Edited in the admin: Роутеры -> Игровой пульс.
+GAME_PULSE_DEFAULT_TARGETS: tuple[dict[str, str], ...] = (
+    {
+        "id": "aws-fra",
+        "title": "PUBG · Европа",
+        "url": "https://dynamodb.eu-central-1.amazonaws.com/",
+        "games": "PUBG (Европа), WARDOGS Europe Central",
+    },
+    {
+        "id": "aws-sto",
+        "title": "WARDOGS · Европа-Восток",
+        "url": "https://dynamodb.eu-north-1.amazonaws.com/",
+        "games": "WARDOGS Europe East",
+    },
+    {
+        "id": "rbx-fra",
+        "title": "Roblox · Франкфурт",
+        "url": "https://www.roblox.com/",
+        "resolve_ip": "128.116.44.3",
+        "games": "Roblox",
+    },
+)
 
 REGISTRY: tuple[ParamSpec, ...] = (
     # --- MAIN ---------------------------------------------------------------
@@ -192,6 +218,17 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "Router trial days",
         "Сколько работает VPN на новом роутере до оплаты",
         "How long a new router works before payment",
+    ),
+    _p(
+        "GAME_PULSE_TARGETS",
+        C.SUBSCRIPTIONS,
+        STR,
+        json.dumps(list(GAME_PULSE_DEFAULT_TARGETS), ensure_ascii=False),
+        "Игровой пульс роутеров: цели",
+        "Router game pulse targets",
+        'JSON-список [{"id","title","url","games","resolve_ip"}], до 4 целей. '
+        "Проще редактировать в «Роутеры» → «Игровой пульс»",
+        'JSON list [{"id","title","url","games","resolve_ip"}], up to 4 targets',
     ),
     _p(
         "AUTO_RENEWAL_ENABLED",

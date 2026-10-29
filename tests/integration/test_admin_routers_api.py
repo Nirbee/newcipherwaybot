@@ -123,7 +123,9 @@ async def test_create_force_mode_requires_primary_host(
         "/api/admin/routers",
         headers=auth,
         json={
-            "subscription_id": sub_id, "label": "Forced", "mode": "force",
+            "subscription_id": sub_id,
+            "label": "Forced",
+            "mode": "force",
             "primary_host_uuid": "host-x",
         },
     )
@@ -237,6 +239,64 @@ async def test_eligible_hosts_round_trip(
     res = await http.get("/api/admin/routers/config/eligible-hosts", headers=auth)
     items = {h["uuid"]: h["eligible"] for h in res.json()["items"]}
     assert items == {"host-a": True, "host-b": False}
+
+
+async def test_pulse_targets_round_trip_and_validation(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+
+    res = await http.get("/api/admin/routers/config/pulse-targets", headers=auth)
+    assert res.status_code == 200
+    assert [t["id"] for t in res.json()["items"]] == ["aws-fra", "aws-sto", "rbx-fra"]
+    assert res.json()["max"] == 4
+
+    bad = await http.put(
+        "/api/admin/routers/config/pulse-targets",
+        headers=auth,
+        json={"items": [{"id": "x", "url": "http://plain.example.com/"}]},
+    )
+    assert bad.status_code == 400
+    too_many = [{"id": f"t{i}", "url": "https://a.example.com/"} for i in range(5)]
+    res = await http.put(
+        "/api/admin/routers/config/pulse-targets", headers=auth, json={"items": too_many}
+    )
+    assert res.status_code == 400
+
+    new = [{"id": "ru-msk", "title": "PUBG · Россия", "url": "https://ru.example.com/"}]
+    res = await http.put(
+        "/api/admin/routers/config/pulse-targets", headers=auth, json={"items": new}
+    )
+    assert res.status_code == 200
+    res = await http.get("/api/admin/routers/config/pulse-targets", headers=auth)
+    assert res.json()["items"] == [
+        {"id": "ru-msk", "title": "PUBG · Россия", "url": "https://ru.example.com/", "games": ""}
+    ]
+
+    # The audit keeps what routers dial, before and after.
+    from sqlalchemy import select
+
+    from src.infrastructure.database.models.audit_log import AuditLog
+
+    async with container.uow() as uow:
+        entry = (
+            await uow.session.scalars(
+                select(AuditLog).where(AuditLog.action == "routers.pulse_targets")
+            )
+        ).one()
+    assert [t["id"] for t in entry.payload["before"]] == ["aws-fra", "aws-sto", "rbx-fra"]
+    assert entry.payload["before"][2]["resolve_ip"] == "128.116.44.3"
+    assert entry.payload["after"] == [{"id": "ru-msk", "url": "https://ru.example.com/"}]
+
+
+async def test_pulse_toggle_unknown_router_404s(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, _ = client
+    auth = await _login(http)
+    res = await http.put("/api/admin/routers/99999/pulse", headers=auth, json={"enabled": True})
+    assert res.status_code == 404
 
 
 async def test_tags_the_subscriptions_panel_user_as_router(

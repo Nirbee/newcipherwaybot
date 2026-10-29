@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import secrets
 from typing import Any
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 
 from src.application.dto.pricing import PurchaseRequest
+from src.application.services import game_pulse
 from src.application.services import router_onboarding as onboarding
 from src.core.enums import (
     PaymentGatewayType,
@@ -37,13 +39,18 @@ from src.web.deps import get_container
 from src.web.routes.admin._common import OkOut, audit, iso
 from src.web.routes.admin.deps import AdminIdentity, require_admin
 from src.web.routes.agent import (
+    PULSE_DEVICES_KEY,
     ROUTER_XRAY_VERSION,
+    agent_events,
     autotune_note,
-    subscription_live,
     config_info,
     current_install_code,
     drop_install_code,
     issue_install_code,
+    pulse_device_ids,
+    pulse_runs,
+    pulse_targets,
+    subscription_live,
     vpn_verdict,
 )
 
@@ -202,7 +209,60 @@ async def set_eligible_hosts(
     return OkOut()
 
 
+# --- game pulse targets (agent v7) ---------------------------------------------------------
+
+
+@router.get("/config/pulse-targets")
+async def get_pulse_targets(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+    return {
+        "items": await pulse_targets(container),
+        "defaults": game_pulse.default_targets(),
+        "max": game_pulse.MAX_TARGETS,
+    }
+
+
+class PulseTargetsIn(BaseModel):
+    items: list[dict[str, Any]]
+
+
+@router.put("/config/pulse-targets")
+async def set_pulse_targets(
+    body: PulseTargetsIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> OkOut:
+    try:
+        items = game_pulse.clean_targets(body.items)
+    except game_pulse.TargetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    def dialed(targets: list[dict[str, str]]) -> list[dict[str, str]]:
+        # What routers will actually connect to — the audit keeps it before and after.
+        return [{k: t[k] for k in ("id", "url", "resolve_ip") if t.get(k)} for t in targets]
+
+    before = dialed(await pulse_targets(container))
+    async with container.uow() as uow:
+        await container.bot_config.set_values(
+            uow, {"GAME_PULSE_TARGETS": json.dumps(items, ensure_ascii=False)}
+        )
+        await audit(
+            uow,
+            identity,
+            "routers.pulse_targets",
+            None,
+            before=before,
+            after=dialed(items),
+        )
+        await uow.commit()
+    return OkOut()
+
+
 # --- devices ------------------------------------------------------------------------------
+
+
+async def _restarts_24h(container: AppContainer, device_id: int) -> int:
+    events = await agent_events(container, device_id)
+    return game_pulse.restart_counts(events, dt.datetime.now(dt.UTC).timestamp())["day"]
 
 
 @router.get("")
@@ -217,6 +277,9 @@ async def list_devices(container: AppContainer = Depends(get_container)) -> dict
             )
             for d in devices
         ]
+    # Agent v7 journal: the list flags a router whose VPN restarted often in the last day.
+    for row in rows:
+        row["restarts_24h"] = await _restarts_24h(container, row["id"])
     return {"items": rows}
 
 
@@ -512,6 +575,7 @@ async def get_device(
     )
     detail["install_report"] = device.install_report
     detail["diagnostics"] = device.diagnostics
+    detail.update(await _games_and_restarts(container, device, detail["config_info"]))
     detail["subscription"] = summary
     detail["claim_url"] = (
         onboarding.claim_url(bot_username, device.claim_code)
@@ -524,6 +588,37 @@ async def get_device(
         if h.protocol == "vless"
     ]
     return detail
+
+
+async def _games_and_restarts(
+    container: AppContainer, device: RouterDevice, info: dict[str, Any] | None
+) -> dict[str, Any]:
+    """«Игры и пинг» (game pulse) and «Перезапуски VPN» (event journal) — agent v7."""
+    now = dt.datetime.now(dt.UTC).timestamp()
+    try:
+        agent_version = int(str((device.diagnostics or {}).get("agent_version") or "0"))
+    except ValueError:
+        agent_version = 0
+    events = await agent_events(container, device.id)
+    card = game_pulse.pulse_card(
+        await pulse_runs(container, device.id),
+        await pulse_targets(container),
+        dict((info or {}).get("tags") or {}),
+        now,
+    )
+    return {
+        "restarts_24h": game_pulse.restart_counts(events, now)["day"],
+        "games": {
+            "enabled": device.id in await pulse_device_ids(container),
+            "supported": agent_version >= 7,
+            **card,
+        },
+        "restarts": {
+            **game_pulse.restart_counts(events, now),
+            "supported": agent_version >= 7,
+            "events": [e for e in reversed(events) if e["ts"] > now - 7 * 86400][:50],
+        },
+    }
 
 
 class RouterPatchIn(BaseModel):
@@ -562,6 +657,32 @@ async def patch_device(
             f"router:{device.id}",
             **body.model_dump(exclude_none=True),
         )
+        await uow.commit()
+    return OkOut()
+
+
+class PulseToggleIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/{device_id}/pulse")
+async def set_device_pulse(
+    device_id: int,
+    body: PulseToggleIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> OkOut:
+    """Game pulse on/off for one router (off by default). The agent picks it up on its next
+    poll: /config advertises a new pulse revision."""
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+        if device is None:
+            raise HTTPException(404, "device not found")
+        row = await uow.bot_config.find_one(key=PULSE_DEVICES_KEY)
+        ids = [int(v) for v in ((row.value if row is not None else None) or []) if str(v).isdigit()]
+        ids = [i for i in ids if i != device_id] + ([device_id] if body.enabled else [])
+        await uow.bot_config.upsert(PULSE_DEVICES_KEY, ids)
+        await audit(uow, identity, "routers.pulse", f"router:{device_id}", enabled=body.enabled)
         await uow.commit()
     return OkOut()
 
