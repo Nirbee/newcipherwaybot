@@ -86,7 +86,9 @@ ensure_host_repo_dir() {
     printf '\nAPP__HOST_REPO_DIR=%s\n' "$here" >>.env
   fi
 }
-ensure_host_repo_dir
+# Inside the updater sidecar pwd is /repo, not the host path — writing it would point the bot's
+# «where is the install» hint at a folder that doesn't exist on the server.
+[ -n "${SKIP_UPDATER_RECREATE:-}" ] || ensure_host_repo_dir
 
 notify_owner() { # best-effort Telegram DM of the update outcome to the owners; never fails us
   command -v curl >/dev/null 2>&1 || return 0
@@ -110,12 +112,12 @@ bring_up() { # (re)create+start the stack; never recreate the updater if we ARE 
     # Triggered from inside the updater container: recreate every service EXCEPT updater,
     # else `up -d` would kill this very process mid-update. The updater keeps the old code
     # (it's a tiny watch loop); to update it too, run ./scripts/update.sh on the host once.
-    # Naming a service on the CLI activates it even if its profile is off — on a "behind an
-    # existing proxy" install (caddy omitted from COMPOSE_PROFILES, :80/:443 already taken)
-    # that would try to start caddy, fail to bind, and abort the whole update. So include
-    # caddy only when its profile is actually enabled.
+    # Caddy is never recreated from here: the sidecar sees the repo as /repo, so compose turns
+    # caddy's `./Caddyfile` bind into /repo/docker/Caddyfile — a path that doesn't exist on the
+    # HOST, whose daemon does the mount. Recreating caddy then fails («not a directory») and the
+    # site goes down (field, 29.10). Caddy doesn't change with bot releases; a Caddyfile change
+    # needs a host-run ./scripts/update.sh, which recreates everything with real host paths.
     local svc="postgres redis web bot worker scheduler"
-    grep -qE '^COMPOSE_PROFILES=.*caddy' .env 2>/dev/null && svc="$svc caddy"
     $COMPOSE up -d --no-deps $svc
   else
     $COMPOSE up -d
