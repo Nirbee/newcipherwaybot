@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
+import secrets
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 # Import schemes for the popular clients. Keys are stable identifiers used by both surfaces.
 CLIENT_LABELS: dict[str, str] = {
@@ -75,6 +78,69 @@ CLIENT_STORES: dict[str, dict[str, str]] = {
         "default": "https://sing-box.sagernet.org/clients/",
     },
 }
+
+
+# App schemes a Connect screen may launch for one-tap import. Shared by the /dl hand-off page
+# (its open-redirect guard) and the subscription-page buttons: a panel-config link with any
+# other scheme is dropped, never forwarded. The second row = apps of the Remnawave
+# subscription-page catalogue.
+APP_LINK_SCHEMES: tuple[str, ...] = (
+    "happ://",
+    "incy://",
+    "v2raytun://",
+    "hiddify://",
+    "streisand://",
+    "clash://",
+    "sing-box://",
+    "v2box://",
+    "shadowrocket://",
+    "nekobox://",
+    "clashmi://",
+    "flclashx://",
+    "flclash://",
+    "koala-clash://",
+    "prizrak-box://",
+    "v2rayng://",
+    "karing://",
+    "stash://",
+    "loon://",
+    "husi://",
+    "exclave://",
+)
+
+# Longest import link /dl accepts (a subscription URL inside an app scheme fits easily).
+DL_MAX_LINK = 2048
+# Signing-key fallback when the app has no secret configured (local runs only: production
+# requires APP__JWT_SECRET) — links then stay valid for this process's lifetime.
+_DL_EPHEMERAL = secrets.token_hex(32)
+
+
+def _dl_key(secret: str) -> bytes:
+    """A key derived for /dl only, so a signature can't be replayed against other HMAC uses."""
+    return hmac.new((secret or _DL_EPHEMERAL).encode(), b"dl-link", hashlib.sha256).digest()
+
+
+def sign_dl(link: str, secret: str) -> str:
+    return hmac.new(_dl_key(secret), link.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_dl(link: str, sig: str, secret: str) -> bool:
+    """/dl opens only links WE issued: anyone could otherwise mail out our-domain/dl?to=
+    clash://install-config?url=https://evil/… and import a stranger's profile in our name."""
+    return bool(sig) and hmac.compare_digest(sign_dl(link, secret), sig)
+
+
+def dl_url(link: str, secret: str, base: str = "") -> str:
+    """Signed /dl hand-off URL for an app-scheme import link; http(s) links pass through.
+
+    ``base`` = the public origin: an absolute https URL is what WebApp.openLink() takes, and
+    it is also what lets a mini-app copy cached from before signing keep working (it opens
+    any https link directly instead of building its own unsigned /dl).
+    """
+    if link.startswith(("https://", "http://")):
+        return link
+    query = urlencode({"to": link, "sig": sign_dl(link, secret)})
+    return f"{base.rstrip('/')}/dl?{query}"
 
 
 def store_links(client: str) -> dict[str, str]:

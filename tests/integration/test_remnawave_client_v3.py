@@ -244,3 +244,92 @@ async def test_v3_internal_squads_read_members_count_from_info() -> None:
         await client.aclose()
     assert squads[0].name == "eu-west"
     assert squads[0].members_count == 12
+
+
+_ZERO = "00000000-0000-0000-0000-000000000000"
+_SUBPAGE = {"platforms": {"ios": {"apps": [{"name": "Happ", "blocks": []}]}}}
+
+
+@respx.mock
+async def test_subpage_config_picks_default_and_fetches_its_body() -> None:
+    other = str(uuid.uuid4())
+    # the list route ships config: null — the body comes from the by-uuid route
+    respx.get(f"{BASE}/api/subscription-page-configs").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "response": {
+                    "total": 2,
+                    "configs": [
+                        {"uuid": other, "viewPosition": 0, "name": "Other", "config": None},
+                        {"uuid": _ZERO, "viewPosition": 1, "name": "Default", "config": None},
+                    ],
+                }
+            },
+        )
+    )
+    route = respx.get(f"{BASE}/api/subscription-page-configs/{_ZERO}").mock(
+        return_value=httpx.Response(
+            200, json={"response": {"uuid": _ZERO, "name": "Default", "config": _SUBPAGE}}
+        )
+    )
+    client = _client()
+    try:
+        config = await client.get_subscription_page_config()
+    finally:
+        await client.aclose()
+    assert route.called
+    assert config == _SUBPAGE
+
+
+@respx.mock
+async def test_subpage_config_without_default_takes_first_by_position() -> None:
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    respx.get(f"{BASE}/api/subscription-page-configs").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "response": {
+                    "configs": [
+                        {"uuid": second, "viewPosition": 5, "config": None},
+                        {"uuid": first, "viewPosition": 2, "config": None},
+                    ]
+                }
+            },
+        )
+    )
+    respx.get(f"{BASE}/api/subscription-page-configs/{first}").mock(
+        return_value=httpx.Response(200, json={"response": {"uuid": first, "config": _SUBPAGE}})
+    )
+    client = _client()
+    try:
+        assert await client.get_subscription_page_config() == _SUBPAGE
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_subpage_config_list_route_missing_tries_default_directly() -> None:
+    respx.get(f"{BASE}/api/subscription-page-configs").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    respx.get(f"{BASE}/api/subscription-page-configs/{_ZERO}").mock(
+        return_value=httpx.Response(200, json={"response": {"uuid": _ZERO, "config": _SUBPAGE}})
+    )
+    client = _client()
+    try:
+        assert await client.get_subscription_page_config() == _SUBPAGE
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_subpage_config_none_when_panel_has_no_configs() -> None:
+    respx.get(f"{BASE}/api/subscription-page-configs").mock(
+        return_value=httpx.Response(200, json={"response": {"total": 0, "configs": []}})
+    )
+    client = _client()
+    try:
+        assert await client.get_subscription_page_config() is None
+    finally:
+        await client.aclose()

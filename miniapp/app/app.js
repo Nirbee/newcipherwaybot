@@ -319,9 +319,9 @@
 
   // Launch a client app from its deep link. A custom scheme (happ://…) CANNOT be opened from
   // inside the Telegram WebView — a direct anchor/navigation fails with ERR_UNKNOWN_URL_SCHEME —
-  // and WebApp.openLink() takes http(s) only. So we bounce a custom scheme through our https
-  // /dl page (openLink opens it in the EXTERNAL browser, which then hands the scheme to the OS).
-  // An https deep link (e.g. a universal link) is opened directly.
+  // and WebApp.openLink() takes http(s) only. So a custom scheme goes through our https /dl
+  // page (openLink opens it in the EXTERNAL browser, which then hands the scheme to the OS) —
+  // the server returns that /dl URL ready and signed; any https link is opened directly.
   function openApp(link) {
     if (!link) return;
     haptic();
@@ -330,8 +330,9 @@
       else window.open(link, "_blank");
       return;
     }
-    if (wa && wa.openLink) wa.openLink(location.origin + "/dl?to=" + encodeURIComponent(link));
-    else location.href = link; // a plain browser routes the scheme to the app itself
+    // The server hands out import links already signed (https …/dl?to=…&sig=…, opened above);
+    // /dl refuses unsigned ones, so a bare scheme (preview data) can only go straight to the OS.
+    location.href = link;
   }
 
   // Admin custom blocks + standalone link-buttons for a given screen (home/connect/account).
@@ -718,7 +719,24 @@
     { os: "linux", name: "Linux" },
   ];
 
+  // Per-platform apps + steps from the panel's subscription page (/connection `platforms`).
+  // null -> the CONNECTION_APPS wizard (panel down, switched off, or /connection not loaded).
+  function wizPanel() {
+    const p = state.connection && state.connection.platforms;
+    return Array.isArray(p) && p.length ? p : null;
+  }
+  function wizPlatforms() {
+    const panel = wizPanel();
+    return panel ? panel.map((p) => ({ os: p.key, name: p.name })) : PLATFORMS;
+  }
   function wizApps() {
+    const panel = wizPanel();
+    if (panel) {
+      const plat = panel.find((p) => p.key === wizOs()) || panel[0];
+      return (plat.apps || []).map((a) => ({
+        key: a.key, label: a.label, deep_link: a.deep_link, stores: {}, blocks: Array.isArray(a.blocks) ? a.blocks : [],
+      }));
+    }
     // Owner-enabled list from /connection when loaded; offline registry until then.
     const fromApi = state.connection && Array.isArray(state.connection.apps) ? state.connection.apps : null;
     if (fromApi && fromApi.length)
@@ -731,10 +749,36 @@
     const apps = wizApps();
     return apps.find((a) => a.key === state.wiz.app) || apps[0];
   }
-  function wizOs() { return (state.wiz && state.wiz.os) || detectPlatform().os; }
+  function wizOs() {
+    const want = (state.wiz && state.wiz.os) || detectPlatform().os;
+    const panel = wizPanel();
+    // A device the panel has no apps for (e.g. Linux removed there) -> its first platform.
+    return !panel || panel.some((p) => p.key === want) ? want : panel[0].key;
+  }
   function wizOsName() {
-    const found = PLATFORMS.find((p) => p.os === wizOs());
+    const found = wizPlatforms().find((p) => p.os === wizOs());
     return found ? found.name : detectPlatform().name;
+  }
+  // Panel steps of one wizard stage (install / subscribe / connect) for the chosen app.
+  function wizBlocks(app, stage) {
+    return (app.blocks || []).filter((b) => b && b.stage === stage);
+  }
+  // One panel button: store/download page, one-tap import (via /dl) or copy-the-link.
+  function wizButton(b, primary, icon) {
+    const cls = "btn " + (primary ? "primary" : "ghost") + " wiz-btn";
+    if (b.kind === "import")
+      return el("button", { class: cls, style: primary ? btnStyle("open_app") : "", onclick: () => openApp(b.url), text: "⊕ " + (primary ? btnText("open_app", b.text) : b.text) });
+    if (b.kind === "copy")
+      return el("button", { class: cls, onclick: async () => { (await copyText(b.url)) && toast(T.copied); haptic("ok"); }, text: b.text });
+    return el("button", { class: cls, onclick: () => openUrl(b.url), text: (icon ? icon + " " : "") + b.text });
+  }
+  // Extra steps (warnings, HWID, «если не добавилась») as compact notes. Text only, no HTML.
+  function wizNote(b, icon, noImport) {
+    const kids = [];
+    if (b.title) kids.push(el("b", { text: b.title }));
+    if (b.text) kids.push(el("div", { class: "wiz-note-text", text: b.text }));
+    (b.buttons || []).filter((x) => !noImport || x.kind !== "import").forEach((x) => kids.push(wizButton(x, false, icon)));
+    return el("div", { class: "wiz-note" }, kids);
   }
   function wizStore() {
     const a = wizApp();
@@ -890,6 +934,16 @@
 
     if (w.step === 0) {
       screen.append(title(T.wizTitle(wizOsName())), sub(T.wizIntroSub));
+      // Device first: with the panel's catalogue it decides which apps are offered.
+      if (w.other) {
+        const plats = el("div", { class: "wiz-chips" });
+        wizPlatforms().forEach((p) => plats.append(el("button", {
+          class: "wiz-chip" + (wizOs() === p.os ? " on" : ""),
+          onclick: () => wizSet({ os: p.os }),
+          text: p.name,
+        })));
+        screen.append(el("div", { class: "wiz-cap", text: T.wizPickPlatform }), plats);
+      }
       const apps = wizApps();
       if (apps.length > 1) {
         const chips = el("div", { class: "wiz-chips" });
@@ -900,39 +954,50 @@
         })));
         screen.append(el("div", { class: "wiz-cap", text: T.wizPickApp }), chips);
       }
-      if (w.other) {
-        const plats = el("div", { class: "wiz-chips" });
-        PLATFORMS.forEach((p) => plats.append(el("button", {
-          class: "wiz-chip" + (wizOs() === p.os ? " on" : ""),
-          onclick: () => wizSet({ os: p.os }),
-          text: p.name,
-        })));
-        screen.append(el("div", { class: "wiz-cap", text: T.wizPickPlatform }), plats);
-      }
       screen.append(wizHero(0, "plug"));
       actions.append(
         el("button", { class: "btn primary wiz-btn", style: btnStyle("open_app"), onclick: () => wizSet({ step: 1 }), text: w.other ? T.wizNext + " →" : T.wizStart }),
         el("button", { class: "btn ghost wiz-btn", onclick: () => wizSet({ other: !w.other, os: null }), text: w.other ? T.wizThisDevice : T.wizOther }),
       );
     } else if (w.step === 1) {
-      screen.append(title(T.wizAppTitle), sub(T.wizAppSub(app.label)), wizHero(1, "cloud"));
-      const storeUrl = wizStore();
-      actions.append(
-        el("button", {
+      // Panel app: its install steps (store/download buttons as the panel names them, then
+      // warnings like «удалите Clash Verge Rev»); otherwise the single store button.
+      const install = wizBlocks(app, "install");
+      const head = install[0];
+      screen.append(title(T.wizAppTitle), sub((head && head.text) || T.wizAppSub(app.label)), wizHero(1, "cloud"));
+      const headBtns = head ? (head.buttons || []).filter((b) => b.kind === "link") : [];
+      if (headBtns.length) {
+        headBtns.forEach((b, i) => actions.append(wizButton(b, i === 0, "⤓")));
+      } else if (!app.blocks) {
+        // CONNECTION_APPS wizard: the owner's store link (a panel app without one shows none —
+        // the fallback would point at a different app).
+        const storeUrl = wizStore();
+        actions.append(el("button", {
           class: "btn primary wiz-btn",
           onclick: () => { haptic(); wa && wa.openLink ? wa.openLink(storeUrl) : window.open(storeUrl, "_blank"); },
           text: "⤓ " + T.wizInstall,
-        }),
+        }));
+      }
+      install.slice(1).forEach((b) => actions.append(wizNote(b, "↗")));
+      actions.append(
         el("button", { class: "btn ghost wiz-btn", onclick: () => wizSet({ step: 2 }), text: T.wizNext + " →" }),
         back(0),
       );
     } else if (w.step === 2) {
-      screen.append(title(T.wizSubTitle), sub(w.other ? T.wizOtherSub(app.label) : T.wizSubSub(app.label)), wizHero(2, "plus"));
+      const steps = wizBlocks(app, "subscribe");
+      const head = steps[0];
+      screen.append(title(T.wizSubTitle), sub(w.other ? T.wizOtherSub(app.label) : (head && head.text) || T.wizSubSub(app.label)), wizHero(2, "plus"));
       // hide_link shops return subscription_url:null but keep working deep_links — the step
       // must still render (one-tap import), otherwise it hangs forever on «Загрузка…».
       if (conn && (conn.subscription_url || conn.hide_link)) {
-        const link = (conn.deep_links && conn.deep_links[app.key]) || app.deep_link;
-        if (!w.other && link) {
+        // A panel app carries its own import link (the panel's scheme for THAT app).
+        const link = app.blocks ? app.deep_link : (conn.deep_links && conn.deep_links[app.key]) || app.deep_link;
+        // Import opens the app on THIS device, so «другое устройство» keeps only copy/links.
+        const headBtns = head ? (head.buttons || []).filter((b) => !w.other || b.kind !== "import") : [];
+        const hasCopy = headBtns.some((b) => b.kind === "copy");
+        if (headBtns.length) {
+          headBtns.forEach((b, i) => actions.append(wizButton(b, i === 0, "↗")));
+        } else if (!w.other && link) {
           actions.append(el("button", {
             class: "btn primary wiz-btn",
             style: btnStyle("open_app"),
@@ -941,15 +1006,14 @@
           }));
         }
         if (!conn.hide_link) {
-          if (!w.other) actions.append(el("div", { class: "wiz-cap", text: T.wizCopyHint }));
-          actions.append(
-            el("div", { class: "link-box mono wiz-link", text: conn.subscription_url }),
-            el("button", {
+          if (!w.other && !hasCopy) actions.append(el("div", { class: "wiz-cap", text: T.wizCopyHint }));
+          actions.append(el("div", { class: "link-box mono wiz-link", text: conn.subscription_url }));
+          if (!hasCopy)
+            actions.append(el("button", {
               class: "btn ghost wiz-btn",
               onclick: async () => { (await copyText(conn.subscription_url)) && toast(T.copied); haptic("ok"); },
               text: T.copy,
-            }),
-          );
+            }));
         } else if (w.other && link) {
           // Raw link hidden by the owner: hand over the one-tap import link instead (HIDE-1
           // keeps deep links working, so copying one to the other device is consistent).
@@ -959,6 +1023,7 @@
             text: T.copy,
           }));
         }
+        steps.slice(1).forEach((b) => actions.append(wizNote(b, "↗", w.other)));
         actions.append(el("button", { class: "btn ghost wiz-btn", onclick: () => wizSet({ step: 3 }), text: T.wizNext + " →" }));
       } else if (w.connErr) {
         actions.append(
@@ -971,7 +1036,8 @@
       }
       actions.append(back(1));
     } else {
-      screen.append(title(T.wizDoneTitle), sub(T.wizDoneSub(app.label)), wizHero(3, "check"));
+      const done = wizBlocks(app, "connect")[0];
+      screen.append(title(T.wizDoneTitle), sub((done && done.text) || T.wizDoneSub(app.label)), wizHero(3, "check"));
       wizConfetti(screen);
       actions.append(
         el("button", {

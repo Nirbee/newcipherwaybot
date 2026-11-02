@@ -28,6 +28,7 @@ from src.application.common.payments import (
     WebhookResult,
 )
 from src.application.services.bot_config import BotConfigService
+from src.application.services.connection import sign_dl, verify_dl
 from src.application.services.panel_sync import PanelSyncService
 from src.application.services.payment import PaymentService
 from src.application.services.pricing import PricingService
@@ -479,27 +480,63 @@ async def test_menu_row_layout_and_action_validation(
 async def test_deep_link_redirect_wraps_allowed_scheme(
     client: tuple[httpx.AsyncClient, ApiTestContainer],
 ) -> None:
-    http, _ = client
+    http, container = client
+    secret = container.settings.app.jwt_secret
+
+    def signed(to: str) -> dict[str, str]:
+        return {"to": to, "sig": sign_dl(to, secret)}
+
     # A client-app scheme is returned inside an https page that fires it (openable from the
     # external browser, unlike the Telegram WebView which errors on ERR_UNKNOWN_URL_SCHEME).
-    res = await http.get("/dl", params={"to": "happ://add/https://sub.example/abc"})
+    happ = "happ://add/https://sub.example/abc"
+    res = await http.get("/dl", params=signed(happ))
     assert res.status_code == 200
     assert "text/html" in res.headers["content-type"]
-    assert "happ://add/https://sub.example/abc" in res.text
+    assert happ in res.text
 
     # Android needs an intent:// URL to launch the app from a web link; iOS/desktop use the
     # plain scheme. The page adapts to the User-Agent.
     droid = await http.get(
         "/dl",
-        params={"to": "happ://add/https://sub.example/abc"},
+        params=signed(happ),
         headers={"user-agent": "Mozilla/5.0 (Linux; Android 14; Pixel) Chrome/126"},
     )
     assert "intent://add/https://sub.example/abc#Intent;scheme=happ;end" in droid.text
 
-    # Disallowed schemes (open-redirect / XSS vectors) are rejected, not reflected.
-    for bad in ("javascript:alert(1)", "https://evil.example", "data:text/html,x"):
-        r = await http.get("/dl", params={"to": bad})
+    # Disallowed schemes (open-redirect / XSS vectors) are rejected, not reflected — even
+    # signed; scheme matching is case-sensitive.
+    for bad in (
+        "javascript:alert(1)",
+        "https://evil.example",
+        "data:text/html,x",
+        "ms-msdt:x",
+        "HAPP://add/x",
+    ):
+        r = await http.get("/dl", params=signed(bad))
         assert r.status_code == 400, bad
+
+    # Only links the server signed open: someone mailing out our-domain/dl?to=clash://…evil
+    # (no signature, a wrong one, or one for a different link) gets refused.
+    evil = "clash://install-config?url=https://evil.example/profile"
+    assert (await http.get("/dl", params={"to": evil})).status_code == 400
+    assert (await http.get("/dl", params={"to": evil, "sig": "0" * 64})).status_code == 400
+    assert (
+        await http.get("/dl", params={"to": evil, "sig": sign_dl(happ, secret)})
+    ).status_code == 400
+    assert (
+        await http.get("/dl", params={"to": evil, "sig": sign_dl(evil, "another-secret")})
+    ).status_code == 400
+    long_link = "happ://add/https://sub.example/" + "a" * 2048
+    assert (await http.get("/dl", params=signed(long_link))).status_code == 400
+
+    # Apps of the panel's subscription page launch the same way (koala-clash://, clashmi://…).
+    to = "koala-clash://install-config?url=https://sub.example/abc"
+    res = await http.get("/dl", params=signed(to))
+    assert res.status_code == 200 and "koala-clash://install-config" in res.text
+    droid = await http.get(
+        "/dl", params=signed(to), headers={"user-agent": "Mozilla/5.0 (Linux; Android 14)"}
+    )
+    assert "#Intent;scheme=koala-clash;end" in droid.text
 
 
 async def test_menu_actions_catalog(
@@ -768,6 +805,65 @@ async def test_cabinet_purchase_with_balance(
     happ = next(a for a in conn["apps"] if a["key"] == "happ")
     # The reported bug: the Windows download must be the owner's app, not Hiddify's repo.
     assert "happ-desktop" in happ["stores"]["windows"]
+    # the panel has no subscription-page config -> the mini-app keeps the CONNECTION_APPS wizard
+    assert conn["platforms"] is None
+
+
+async def test_cabinet_connection_apps_from_panel_subscription_page(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+    tma = _tma_headers(tg_id=777000333)
+    fixture = Path(__file__).parents[1] / "fixtures" / "subpage_config.json"
+    container.remnawave_client.subpage_config = json.loads(fixture.read_text(encoding="utf-8"))[
+        "response"
+    ]["config"]
+    res = await http.post(
+        "/api/admin/plans",
+        headers=auth,
+        json={"name": "Panel apps", "durations": [{"days": 30, "price_minor": 10000}]},
+    )
+    plan_id = res.json()["id"]
+    uid = (await http.get("/api/cabinet/me", headers=tma)).json()["user"]["id"]
+    await http.post(f"/api/admin/users/{uid}/balance", headers=auth, json={"amount_minor": 50000})
+    res = await http.post(
+        "/api/cabinet/purchase",
+        headers=tma,
+        json={"plan_id": plan_id, "days": 30, "method": "balance"},
+    )
+    assert res.status_code == 200, res.text
+
+    conn = (await http.get("/api/cabinet/connection", headers=tma)).json()
+    url = conn["subscription_url"]
+    plats = {p["key"]: p for p in conn["platforms"]}
+    ios = [a["label"] for a in plats["ios"]["apps"]]
+    assert ios == ["Happ", "Clash Mi", "v2RayTun", "Shadowrocket", "INCY"]  # panel order + INCY
+    # import links go out signed (/dl opens only those) — and the signed URL really opens
+    happ = plats["ios"]["apps"][0]
+    secret = container.settings.app.jwt_secret
+    for link in (
+        happ["deep_link"],
+        happ["blocks"][1]["buttons"][0]["url"],
+        conn["deep_links"]["incy"],
+    ):
+        parts = urllib.parse.urlsplit(link)
+        q = dict(urllib.parse.parse_qsl(parts.query))
+        assert parts.path == "/dl" and verify_dl(q["to"], q["sig"], secret)
+        assert (await http.get(f"/dl?{parts.query}")).status_code == 200
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(happ["deep_link"]).query))
+    assert q["to"] == f"happ://add/{url}"
+    assert plats["windows"]["apps"][0]["label"] == "FlClashX"
+    # back-compat fields for an older cached mini-app stay as they were
+    assert [a["key"] for a in conn["apps"]] == ["happ", "incy"]
+
+    # owner switch: off -> back to the CONNECTION_APPS list only
+    res = await http.patch(
+        "/api/admin/settings", headers=auth, json={"changes": {"CONNECTION_APPS_FROM_PANEL": False}}
+    )
+    assert res.status_code == 200, res.text
+    conn = (await http.get("/api/cabinet/connection", headers=tma)).json()
+    assert conn["platforms"] is None
 
 
 async def test_cabinet_purchase_insufficient_balance(

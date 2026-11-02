@@ -1,0 +1,1163 @@
+{
+ "response": {
+  "uuid": "00000000-0000-0000-0000-000000000000",
+  "viewPosition": 1,
+  "name": "Default",
+  "config": {
+   "locales": [
+    "en",
+    "ru"
+   ],
+   "version": "1",
+   "platforms": {
+    "ios": {
+     "apps": [
+      {
+       "name": "Happ",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973",
+           "text": {
+            "en": "App Store (RU)",
+            "ru": "App Store (RU)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://apps.apple.com/us/app/happ-proxy-utility/id6504287215",
+           "text": {
+            "en": "App Store (Global)",
+            "ru": "App Store (Global)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the page in App Store and install the app. Launch it, in the VPN configuration permission window click Allow and enter your passcode.",
+          "ru": "Откройте страницу в App Store и установите приложение. Запустите его, в окне разрешения VPN-конфигурации нажмите Allow и введите свой пароль."
+         },
+         "svgIconColor": "violet"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "happ://add/{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below — the app will open and the subscription will be added automatically",
+          "ru": "Нажмите кнопку ниже — приложение откроется, и подписка добавится автоматически."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "In the main section, click the large power button in the center to connect to VPN. Don't forget to select a server from the server list. If needed, choose another server from the server list.",
+          "ru": "В главном разделе нажмите большую кнопку включения в центре для подключения к VPN. Не забудьте выбрать сервер в списке серверов. При необходимости выберите другой сервер из списка серверов."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "Happ"
+      },
+      {
+       "name": "Clash Mi",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://apps.apple.com/us/app/clash-mi/id6744321968",
+           "text": {
+            "en": "Open in App Store",
+            "ru": "Открыть в App Store"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the App Store page and install the app.",
+          "ru": "Откройте страницу в App Store и установите приложение."
+         },
+         "svgIconColor": "blue"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "clashmi://install-config?xhwid=true&overwrite=no&name={{USERNAME}}&url={{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below — the app will open and the subscription will be added automatically",
+          "ru": "Нажмите кнопку ниже — приложение откроется, и подписка добавится автоматически."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "On the main screen, tap the Disconnected button, then in the VPN configuration prompt tap Allow and enter your password to connect.",
+          "ru": "На главной странице нажми кнопку Disconnected,  в появившемся окне разрешения VPN-конфигурации нажмите Allow и введите свой пароль для подключения к VPN."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "ClashMi"
+      },
+      {
+       "name": "v2RayTun",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://apps.apple.com/app/v2raytun/id6476628951",
+           "text": {
+            "en": "App Store",
+            "ru": "App Store"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the page in App Store and install the app. Launch it, in the VPN configuration permission window click Allow and enter your passcode.",
+          "ru": "Откройте страницу в App Store и установите приложение. Запустите его, в окне разрешения VPN-конфигурации нажмите Allow и введите свой пароль."
+         },
+         "svgIconColor": "violet"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "v2raytun://import/{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below — the app will open and the subscription will be added automatically",
+          "ru": "Нажмите кнопку ниже — приложение откроется, и подписка добавится автоматически."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "In the main section, click the large power button in the center to connect to VPN. Don't forget to select a server from the server list. If needed, choose another server from the server list.",
+          "ru": "В главном разделе нажмите большую кнопку включения в центре для подключения к VPN. Не забудьте выбрать сервер в списке серверов. При необходимости выберите другой сервер из списка серверов."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": false,
+       "svgIconKey": "vrayTUN"
+      },
+      {
+       "name": "Shadowrocket",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://apps.apple.com/ru/app/shadowrocket/id932747118",
+           "text": {
+            "en": "Open in App Store",
+            "ru": "Открыть в App Store"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the page in App Store and install the app. Launch it, in the VPN configuration permission window click Allow and enter your passcode.",
+          "ru": "Откройте страницу в App Store и установите приложение. Запустите его, в окне разрешения VPN-конфигурации нажмите Allow и введите свой пароль."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Enable HWID",
+          "ru": "Включите HWID"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "Go to Settings section, find Update section, find the Subscribe item and toggle Send HWID to ON position",
+          "ru": "Перейдите в раздел Настройки, найдите раздел Обновить, найдите пункт Подписаться и переключите Отправить HWID в положение ВКЛ"
+         },
+         "svgIconColor": "red"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "shadowrocket://add/{{SUBSCRIPTION_LINK}}#{{USERNAME}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below — the app will open and the subscription will be added automatically",
+          "ru": "Нажмите кнопку ниже — приложение откроется, и подписка добавится автоматически."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add routing rules",
+          "ru": "Добавить правила маршрутизации"
+         },
+         "buttons": [
+          {
+           "link": "https://cdn.sm1ky.pl/s/eB4eYAxSNGk8gja/download",
+           "text": {
+            "en": "Add rules for Russia",
+            "ru": "Добавить правила для России"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "By adding routing, internal websites and applications are not passed through the VPN",
+          "ru": "При добавлении роутинга, сайты внутри страны будут открываться без VPN"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "In the main section, click the large power button in the center to connect to VPN. Don't forget to select a server from the server list. If needed, choose another server from the server list.",
+          "ru": "В главном разделе нажмите большую кнопку включения в центре для подключения к VPN. Не забудьте выбрать сервер в списке серверов. При необходимости выберите другой сервер из списка серверов."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": false,
+       "svgIconKey": "Shadowrocket"
+      }
+     ],
+     "svgIconKey": "AppleIcon",
+     "displayName": {
+      "en": "iOS",
+      "ru": "iOS"
+     }
+    },
+    "android": {
+     "apps": [
+      {
+       "name": "Happ",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://play.google.com/store/apps/details?id=com.happproxy",
+           "text": {
+            "en": "Open in Google Play",
+            "ru": "Открыть в Google Play"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/Happ-proxy/happ-android/releases/latest/download/Happ.apk",
+           "text": {
+            "en": "Download APK",
+            "ru": "Скачать APK"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the page in Google Play and install the app. Or install the app directly from the APK file if Google Play is not working.",
+          "ru": "Откройте страницу в Google Play и установите приложение. Или установите приложение из APK файла напрямую, если Google Play не работает."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "happ://add/{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add subscription",
+          "ru": "Нажмите кнопку ниже, чтобы добавить подписку"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "Open the app and connect to the server",
+          "ru": "Откройте приложение и подключитесь к серверу"
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "Happ"
+      },
+      {
+       "name": "FlClashX",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-android-universal.apk",
+           "text": {
+            "en": "Download APK",
+            "ru": "Скачать APK"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Download and install FlClashX APK",
+          "ru": "Скачайте и установите FlClashX APK"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "flclashx://install-config?url={{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add subscription",
+          "ru": "Нажмите кнопку ниже, чтобы добавить подписку"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "If the subscription is not added",
+          "ru": "Если подписка не добавилась"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "If nothing happens after clicking the button, add a subscription manually. Click the Get link button on this page in the upper right corner, copy the link. In FlClashX, go to the Profiles section, click the + button, select the URL, paste your copied link and click Send",
+          "ru": "Если после нажатия на кнопку ничего не произошло, добавьте подписку вручную. Нажмите на этой страницу кнопку Получить ссылку в правом верхнем углу, скопируйте ссылку. В FlClashX перейдите в раздел Профили, нажмите кнопку +, выберите URL, вставьте вашу скопированную ссылку и нажмите Отправить"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "Select the added profile in the Profiles section. In the Control Panel, click the Enable button in the bottom right corner. Once it's running, you can change the server you're connected to in the Proxy section.",
+          "ru": "Выберите добавленный профиль в разделе Профили. В Панели управления нажмите кнопку включить в правом нижнем углу. После запуска в разделе Прокси вы можете изменить выбор сервера к которому вас подключит."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "FlClashX"
+      },
+      {
+       "name": "v2RayTun",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://play.google.com/store/apps/details?id=com.v2raytun.android",
+           "text": {
+            "en": "Open in Google Play",
+            "ru": "Открыть в Google Play"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/DigneZzZ/v2raytun/releases/latest/download/v2RayTun_universal.apk",
+           "text": {
+            "en": "Download APK",
+            "ru": "Скачать APK"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the page in Google Play and install the app. Or install the app directly from the APK file if Google Play is not working.",
+          "ru": "Откройте страницу в Google Play и установите приложение. Или установите приложение из APK файла напрямую, если Google Play не работает."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "v2raytun://import/{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add subscription",
+          "ru": "Нажмите кнопку ниже, чтобы добавить подписку"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "Open the app and connect to the server",
+          "ru": "Откройте приложение и подключитесь к серверу"
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": false,
+       "svgIconKey": "vrayTUN"
+      }
+     ],
+     "svgIconKey": "Android",
+     "displayName": {
+      "en": "Android",
+      "ru": "Android"
+     }
+    },
+    "windows": {
+     "apps": [
+      {
+       "name": "FlClashX",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-windows-amd64-setup.exe",
+           "text": {
+            "en": "Windows (Setup)",
+            "ru": "Windows (Установщик)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-windows-arm64-setup.exe",
+           "text": {
+            "en": "Windows on ARM (Setup)",
+            "ru": "Windows на ARM (Установщик)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Choose the version for your device, click the button below and install the app.",
+          "ru": "Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "flclashx://install-config?url={{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add subscription",
+          "ru": "Нажмите кнопку ниже, чтобы добавить подписку"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "If the subscription is not added",
+          "ru": "Если подписка не добавилась"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "If nothing happens after clicking the button, add a subscription manually. Click the Get link button on this page in the upper right corner, copy the link. In FlClashX, go to the Profiles section, click the + button, select the URL, paste your copied link and click Send",
+          "ru": "Если после нажатия на кнопку ничего не произошло, добавьте подписку вручную. Нажмите на этой страницу кнопку Получить ссылку в правом верхнем углу, скопируйте ссылку. В FlClashX перейдите в раздел Профили, нажмите кнопку +, выберите URL, вставьте вашу скопированную ссылку и нажмите Отправить"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "Select the added profile in the Profiles section. In the Dashboard, click the enable button in the lower right corner, and then turn on the switch next to the TUN item. After launching, in the Proxy section, you can change the choice of the server to which you will be connected.",
+          "ru": "Выберите добавленный профиль в разделе Профили. В Панели управления нажмите кнопку включить в правом нижнем углу, а затем включите переключатель у пункта TUN. После запуска в разделе Прокси вы можете изменить выбор сервера к которому вас подключит."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "FlClashX"
+      },
+      {
+       "name": "Koala Clash",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_x64-setup.exe",
+           "text": {
+            "en": "Windows (Setup)",
+            "ru": "Windows (Установщик)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Choose the version for your device, click the button below and install the app.",
+          "ru": "Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Warning",
+          "ru": "Предупреждение"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "If you have previously used Clash Verge Rev, you need to uninstall it before installing Koala Clash.",
+          "ru": "Если вы ранее использовали Clash Verge Rev, то его требуется удалить перед установкой Koala Clash."
+         },
+         "svgIconColor": "red"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "koala-clash://install-config?url={{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add subscription",
+          "ru": "Нажмите кнопку ниже, чтобы добавить подписку"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "If the subscription is not added",
+          "ru": "Если подписка не добавилась"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "If nothing happens after clicking the button, add the subscription manually. Click the Get Link button in the top right corner of this page, copy the link. In Koala Clash, go to the main page, click the Add Profile button, paste the link into the text field, and then click the Import button.",
+          "ru": "Если после нажатия на кнопку ничего не произошло, добавьте подписку вручную. Нажмите на этой странице кнопку Получить ссылку в правом верхнем углу, скопируйте ссылку. В Koala Clash перейдите на главную страницу, нажмите кнопку Добавить профиль и вставьте ссылку в текстовое поле, затем нажмите на кнопку Импорт."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "You can select a server at the bottom of the main page, and enable VPN by clicking on the large button in the center of the main page.",
+          "ru": "Выбрать сервер можно внизу на главной странице, включить VPN можно нажав на главной странице на большую кнопку по центру."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "KoalaClash"
+      },
+      {
+       "name": "Prizrak-Box",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/windows-amd64.msi",
+           "text": {
+            "en": "Windows (Setup)",
+            "ru": "Windows (Установщик)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/windows-arm64.msi",
+           "text": {
+            "en": "Windows on ARM (Setup)",
+            "ru": "Windows на ARM (Установщик)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Choose your architecture (installer preferred for automatic integration) and install or unzip Prizrak-Box.",
+          "ru": "Выберите архитектуру (предпочтительно установщик) и установите или распакуйте Prizrak-Box."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Warning",
+          "ru": "Предупреждение"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "Run the program as an administrator.",
+          "ru": "Запустите программу от имени администратора."
+         },
+         "svgIconColor": "red"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "prizrak-box://install-config?url={{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add the subscription automatically.",
+          "ru": "Нажмите кнопку ниже, чтобы автоматически добавить подписку."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "If the subscription is not added",
+          "ru": "Если подписка не добавилась"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "If nothing happens after clicking the button, add the subscription manually. On this page, click the Get Link button in the upper right corner, copy the link. In Prizrak-Box, go to the Profiles section, click the + button, paste your copied link, and click Confirm.",
+          "ru": "Если после нажатия на кнопку ничего не произошло, добавьте подписку вручную. Нажмите на этой страницу кнопку Получить ссылку в правом верхнем углу, скопируйте ссылку. В Prizrak-Box перейдите в раздел Профили, нажмите кнопку +, вставьте вашу скопированную ссылку и нажмите Потдвердить."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "Select the added subscription in the Profiles section. You can choose the server country in the Proxy (🚀) section. Set the TUN switch to ON.",
+          "ru": "Выберите добавленную подписку в разделе Профили. Выбрать страну сервера можно в разделе Прокси (🚀). Установите переключатель TUN в положение ВКЛ."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "PrizrakBox"
+      },
+      {
+       "name": "Happ",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe",
+           "text": {
+            "en": "Windows",
+            "ru": "Windows"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Choose the version for your device, click the button below and install the app.",
+          "ru": "Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "happ://add/{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below — the app will open and the subscription will be added automatically",
+          "ru": "Нажмите кнопку ниже — приложение откроется, и подписка добавится автоматически."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "In the main section, click the large power button in the center to connect to VPN. Don't forget to select a server from the server list. If needed, choose another server from the server list.",
+          "ru": "В главном разделе нажмите большую кнопку включения в центре для подключения к VPN. Не забудьте выбрать сервер в списке серверов. При необходимости выберите другой сервер из списка серверов."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": false,
+       "svgIconKey": "Happ"
+      },
+      {
+       "name": "Throne",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://github.com/throneproj/Throne/releases/download/1.0.13/Throne-1.0.13-windows64-installer.exe",
+           "text": {
+            "en": "Windows 64-bit (Installer)",
+            "ru": "Windows 64-бит (Установщик)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/throneproj/Throne/releases/download/1.0.13/Throne-1.0.13-windows64.zip",
+           "text": {
+            "en": "Windows 64-bit (Portable)",
+            "ru": "Windows 64-бит (Портативная)"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/throneproj/Throne/releases/download/1.0.13/Throne-1.0.13-windows32.zip",
+           "text": {
+            "en": "Windows 32-bit",
+            "ru": "Windows 32-бит"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/throneproj/Throne/releases/download/1.0.13/Throne-1.0.13-windows-arm64.zip",
+           "text": {
+            "en": "Windows ARM64",
+            "ru": "Windows ARM64"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://github.com/throneproj/Throne/releases/download/1.0.13/Throne-1.0.13-windowslegacy64.zip",
+           "text": {
+            "en": "Windows Legacy 64-bit",
+            "ru": "Windows Legacy 64-бит"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Download and install Throne. Run the application with administrator rights.",
+          "ru": "Скачайте и установите Throne. Запустите приложение с правами администратора."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Enable HWID",
+          "ru": "Включите HWID"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "On the main screen, enable TUN Mode. Click the settings button, select General Settings, go to the Subscription section and enable Send HWID option.",
+          "ru": "На главном экране включите Режим TUN. Нажмите кнопку настроек, выберите Основные настройки, перейдите в раздел Подписка и включите пункт Включить отправку HWID."
+         },
+         "svgIconColor": "red"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Copy Link",
+            "ru": "Скопировать ссылку"
+           },
+           "type": "copyButton",
+           "svgIconKey": "copyButton"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button to copy the link. In Throne, click the Profiles button on the main menu and select Add Profile from Clipboard. When asked how to update, select Create New Subscription Group.",
+          "ru": "Нажмите на кнопку, чтобы скопировать ссылку. В Throne нажмите кнопку Профили в главном меню и выберите Добавить профиль из буфера обмена. При вопросе как обновить, выберите пункт Создать новую группу подписки."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add routing rules",
+          "ru": "Добавить правила маршрутизации"
+         },
+         "buttons": [],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "In Throne, click the Routing button on the main menu and select Download Profiles menu. Choose one of the required profiles. For Russia: ByPass_Russia, Proxy_Refilter, Proxy_Russia_Blocked. For Iran: Bypass_Iran. For China: Bypass_China or Proxy_China_Blocked.",
+          "ru": "В Throne нажмите кнопку Маршрутизация в главном меню и выберите меню Загрузка профилей. Выберите один из требуемых профилей. Для России: ByPass_Russia, Proxy_Refilter, Proxy_Russia_Blocked. Для Ирана: Bypass_Iran. Для Китая: Bypass_China или Proxy_China_Blocked."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "In the added subscription group, select the required server, right-click and click Connect.",
+          "ru": "В добавленной группе подписки выберите требуемый сервер, нажмите ПКМ и нажмите Подключиться."
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": false,
+       "svgIconKey": "Throne"
+      }
+     ],
+     "svgIconKey": "Windows",
+     "displayName": {
+      "en": "Windows",
+      "ru": "Windows"
+     }
+    },
+    "appleTV": {
+     "apps": [
+      {
+       "name": "Happ",
+       "blocks": [
+        {
+         "title": {
+          "en": "App Installation",
+          "ru": "Установка приложения"
+         },
+         "buttons": [
+          {
+           "link": "https://apps.apple.com/us/app/happ-proxy-utility-for-tv/id6748297274",
+           "text": {
+            "en": "App Store",
+            "ru": "App Store"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "DownloadIcon",
+         "description": {
+          "en": "Open the page in the App Store on your Apple TV and install the app. Launch it, allow VPN configuration if prompted, and enter your passcode if required.",
+          "ru": "Откройте страницу в App Store на Apple TV и установите приложение. Запустите его, предоставьте разрешение на VPN-конфигурацию, если потребуется, и введите свой пароль."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Installation instructions",
+          "ru": "Инструкции по установке"
+         },
+         "buttons": [
+          {
+           "link": "https://www.happ.su/main/ru/faq/android-tv",
+           "text": {
+            "en": "In Russian",
+            "ru": "На русском"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          },
+          {
+           "link": "https://www.happ.su/main/faq/android-tv",
+           "text": {
+            "en": "In English",
+            "ru": "На английском"
+           },
+           "type": "external",
+           "svgIconKey": "ExternalLink"
+          }
+         ],
+         "svgIconKey": "Gear",
+         "description": {
+          "en": "Detailed instructions to help you set up Happ on your device.",
+          "ru": "Подробные инструкции, чтобы помочь вам настроить Happ на вашем устройстве."
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Add Subscription",
+          "ru": "Добавление подписки"
+         },
+         "buttons": [
+          {
+           "link": "happ://add/{{SUBSCRIPTION_LINK}}",
+           "text": {
+            "en": "Add Subscription",
+            "ru": "Добавить подписку"
+           },
+           "type": "subscriptionLink",
+           "svgIconKey": "Plus"
+          }
+         ],
+         "svgIconKey": "CloudDownload",
+         "description": {
+          "en": "Click the button below to add subscription, if you opened the subscription page on your TV",
+          "ru": "Нажмите кнопку ниже, чтобы добавить подписку, если вы открыли страницу подписки на телевизоре"
+         },
+         "svgIconColor": "cyan"
+        },
+        {
+         "title": {
+          "en": "Connect and use",
+          "ru": "Подключение и использование"
+         },
+         "buttons": [],
+         "svgIconKey": "Check",
+         "description": {
+          "en": "Open the app and connect to the server",
+          "ru": "Откройте приложение и подключитесь к серверу"
+         },
+         "svgIconColor": "teal"
+        }
+       ],
+       "featured": true,
+       "svgIconKey": "Happ"
+      }
+     ],
+     "svgIconKey": "TV",
+     "displayName": {
+      "en": "Apple TV",
+      "ru": "Apple TV"
+     }
+    }
+   }
+  }
+ }
+}

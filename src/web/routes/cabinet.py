@@ -24,10 +24,13 @@ from src.application.events import UserRegistered
 from src.application.services.connection import (
     build_deep_links,
     connection_apps,
+    dl_url,
     parse_enabled_apps,
 )
 from src.application.services.ids import generate_referral_code
 from src.application.services.promo import PromoError
+from src.application.services.remnawave import RemnawaveService
+from src.application.services.subpage_apps import platform_apps, sign_import_links
 from src.bot.handlers.purchase import fmt_money  # single source for money labels (#7)
 from src.core.constants import MAX_DEPOSIT_AMOUNT_MINOR
 from src.core.enums import (
@@ -53,7 +56,7 @@ from src.infrastructure.database.models.transaction import Transaction
 from src.infrastructure.database.models.user import User
 from src.infrastructure.di import AppContainer
 from src.infrastructure.payments.crypto import decrypt_gateway_settings
-from src.web.deps import get_container
+from src.web.deps import dl_secret, get_container, public_base
 
 log = get_logger(__name__)
 
@@ -1189,7 +1192,9 @@ async def activate_trial(
 
 @router.get("/connection")
 async def connection(
-    user: User = Depends(cabinet_user), container: AppContainer = Depends(get_container)
+    request: Request,
+    user: User = Depends(cabinet_user),
+    container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
     """Step-2 data for the Connect tab: personal subscription URL + deep links."""
     async with container.uow() as uow:
@@ -1200,10 +1205,33 @@ async def connection(
         )
         hide_link = bool(await container.bot_config.value(uow, "HIDE_SUBSCRIPTION_LINK"))
         enabled = parse_enabled_apps(str(await container.bot_config.value(uow, "CONNECTION_APPS")))
+        from_panel = bool(await container.bot_config.value(uow, "CONNECTION_APPS_FROM_PANEL"))
     if sub is None or not sub.status.is_usable or not sub.subscription_url:
         raise HTTPException(404, "no active subscription")
     url = sub.subscription_url
     apps = connection_apps(url, sub.crypto_link, enabled)
+    # Per-platform apps + steps from the panel's subscription page (None -> the mini-app keeps
+    # the CONNECTION_APPS wizard below: panel down, no config, or switched off by the owner).
+    platforms = (
+        await platform_apps(
+            container.remnawave_client,
+            container.redis,
+            subscription_url=url,
+            crypto_link=sub.crypto_link,
+            username=RemnawaveService.username_for(sub.short_id),
+            enabled=enabled,
+            hide_link=hide_link,
+        )
+        if from_panel
+        else None
+    )
+    # App-scheme links go out as signed absolute /dl URLs: /dl opens only links we issued, and
+    # an https link is what WebApp.openLink() takes (an older cached mini-app opens it as is).
+    secret, base = dl_secret(container), public_base(container, request)
+    for a in apps:
+        a["deep_link"] = dl_url(a["deep_link"], secret, base)
+    if platforms:
+        sign_import_links(platforms, secret, base)
     return {
         # When the owner hides the raw link, the app still imports via deep links; it just
         # doesn't render the copyable URL box (HIDE-1). Deep links stay so import keeps working.
@@ -1212,6 +1240,7 @@ async def connection(
         # apps = only the owner-enabled clients (ordered); deep_links kept for back-compat.
         "apps": apps,
         "deep_links": {a["key"]: a["deep_link"] for a in apps},
+        "platforms": platforms,
         "hide_link": hide_link,
     }
 
@@ -1219,7 +1248,9 @@ async def connection(
 @router.post("/subscription/reset-link")
 @router.post("/subscription/reset-devices")  # #7: contract/client name — same reset, kicks devices
 async def reset_link(
-    user: User = Depends(cabinet_user), container: AppContainer = Depends(get_container)
+    request: Request,
+    user: User = Depends(cabinet_user),
+    container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
     """Self-serve: rotate the subscription URL on the panel (revoke) and drop stale sessions.
 
@@ -1262,7 +1293,10 @@ async def reset_link(
     return {
         "ok": True,  # #7: reset-devices contract shape; the url is a useful superset
         "subscription_url": new_url,
-        "deep_links": build_deep_links(new_url or "", None),
+        "deep_links": {
+            k: dl_url(v, dl_secret(container), public_base(container, request))
+            for k, v in build_deep_links(new_url or "", None).items()
+        },
     }
 
 

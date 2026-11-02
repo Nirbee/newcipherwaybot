@@ -58,7 +58,13 @@ _PATHS = {
     "internal_squads": "/api/internal-squads",
     "nodes": "/api/nodes",
     "hosts": "/api/hosts",
+    "subpage_configs": "/api/subscription-page-configs",
+    "subpage_config": "/api/subscription-page-configs/{uuid}",
 }
+
+# The panel's built-in subscription-page config («Default», not deletable): what the page
+# shows every user whose external squad doesn't pin another config.
+_DEFAULT_SUBPAGE_CONFIG_UUID = "00000000-0000-0000-0000-000000000000"
 
 # Remnawave >=3.0: users are addressed by their numeric id; ip-control became connections.
 _PATHS_V3 = {
@@ -751,6 +757,44 @@ class RemnawaveHttpClient:
         if resp.status_code != 200:
             raise RemnawaveError(f"subscription json fetch failed ({resp.status_code})")
         return resp.json()
+
+    async def get_subscription_page_config(self) -> dict[str, Any] | None:
+        """The ``config`` body of the subscription-page config the panel shows its users
+        (apps per platform with install/add-subscription steps), or None when the panel has none.
+
+        The list route carries ``config: null``, so pick the config there — the built-in
+        «Default» (zero uuid) if present, else the first by ``viewPosition`` — and fetch it by
+        uuid. A panel without the list route still gets a direct try at the default uuid.
+        """
+        target = _DEFAULT_SUBPAGE_CONFIG_UUID
+        try:
+            data = await self._request("GET", _PATHS["subpage_configs"])
+        except RemnawaveAuthError:
+            raise
+        except RemnawaveError:
+            data = None
+        items = data.get("configs") if isinstance(data, dict) else data
+        if isinstance(items, list):
+            found = [c for c in items if isinstance(c, dict) and c.get("uuid")]
+            if not found:
+                return None
+
+            def _position(c: dict[str, Any]) -> int:
+                try:
+                    return int(c.get("viewPosition") or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            chosen = next(
+                (c for c in found if str(c["uuid"]) == _DEFAULT_SUBPAGE_CONFIG_UUID),
+                min(found, key=_position),
+            )
+            if isinstance(chosen.get("config"), dict):
+                return dict(chosen["config"])
+            target = str(chosen["uuid"])
+        data = await self._request("GET", _PATHS["subpage_config"].format(uuid=target))
+        config = data.get("config") if isinstance(data, dict) else None
+        return config if isinstance(config, dict) else None
 
     async def get_hosts(self) -> list[PanelHost]:
         """Router-control-plane use only. Requires a Remnawave >=3.0 panel: the Reality/

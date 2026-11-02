@@ -871,6 +871,21 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "singbox. Order = display order, first = the wizard's primary app",
     ),
     _p(
+        "CONNECTION_APPS_FROM_PANEL",
+        C.INTERFACE,
+        BOOL,
+        True,
+        "Приложения — со страницы подписки панели",
+        "Apps from the panel's subscription page",
+        "Список приложений по платформам, шаги и кнопки на вкладке «Подключение» берутся со "
+        "страницы подписки Remnawave (обновление раз в час). Приложения из «Приложения на "
+        "вкладке «Подключение»», которых нет в панели, добавляются в конец. Если панель "
+        "недоступна или выключено — показывается только список из той настройки",
+        "Per-platform apps, steps and buttons on the Connect tab come from the Remnawave "
+        "subscription page (refreshed hourly). Apps from «Apps on the Connect tab» missing in "
+        "the panel are appended. Panel unavailable or switched off -> that setting's list only",
+    ),
+    _p(
         "CABINET_BUTTONS",
         C.INTERFACE,
         STR,

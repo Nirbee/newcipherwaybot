@@ -553,6 +553,22 @@ body[data-variant="g"] .toast {
   overflow-wrap: anywhere;
   text-align: left;
 }
+/* extra panel steps (warnings, HWID, fallback tips) between the wizard's main buttons */
+.wiz-note {
+  display: grid;
+  gap: 8px;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 14px);
+  background: var(--soft);
+  font-size: 13.5px;
+}
+.wiz-note-text {
+  color: var(--sub);
+  line-height: 1.45;
+  white-space: pre-line;
+}
 .wiz-home-btn {
   display: flex;
   justify-content: space-between;

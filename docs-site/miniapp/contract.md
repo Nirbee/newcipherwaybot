@@ -148,9 +148,33 @@ Authorization: tma <initData>
     "hiddify": "hiddify://import/https://…",
     "streisand": "streisand://import/https://…"
   },
+  // Приложения по платформам со страницы подписки Remnawave (+ приложения из CONNECTION_APPS,
+  // которых там нет, — в конце). null — панель недоступна / конфига нет / выключено
+  // настройкой CONNECTION_APPS_FROM_PANEL: мини-приложение показывает список CONNECTION_APPS.
+  "platforms": [
+    { "key": "ios", "name": "iOS", "apps": [
+      { "key": "happ", "label": "Happ", "featured": true, "source": "panel",  // "bot" — из CONNECTION_APPS
+        "deep_link": "happ://add/https://…",
+        "blocks": [  // шаги панели; stage: install | subscribe | connect
+          { "stage": "install", "title": "Установка приложения", "text": "…",
+            "buttons": [ { "kind": "link", "text": "App Store (RU)", "url": "https://apps.apple.com/…" } ] },
+          { "stage": "subscribe", "title": "Добавление подписки", "text": "…",
+            "buttons": [ { "kind": "import", "text": "Добавить подписку", "url": "happ://add/https://…" } ] },
+          { "stage": "connect", "title": "Подключение и использование", "text": "…", "buttons": [] }
+        ] }
+    ] }
+  ],
   "hide_link": false
 }
 ```
+
+Кнопки: `link` — страница магазина/загрузки (только https), `import` — deep link (схема из
+списка разрешённых), `copy` — скопировать ссылку подписки (не
+приходит при `HIDE_SUBSCRIPTION_LINK`). Конфиг панели кэшируется в Redis на час.
+
+Все ссылки импорта (`deep_links`, `apps[].deep_link`, `platforms[].apps[].deep_link`, кнопки
+`import`) приходят готовыми: `https://<домен>/dl?to=<ссылка>&sig=<HMAC>`. `/dl` открывает только
+подписанные сервером ссылки (без подписи или с чужой — `400`), длина `to` — до 2048 символов.
 
 ### GET /devices
 

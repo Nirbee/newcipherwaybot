@@ -19,6 +19,8 @@ from aiogram.types import (
 
 from src.application.dto.pricing import PurchaseRequest
 from src.application.services.connection import connection_apps, parse_enabled_apps
+from src.application.services.remnawave import RemnawaveService
+from src.application.services.subpage_apps import platform_apps
 from src.bot.banners import render_screen
 from src.bot.gate import ensure_channel
 from src.bot.keyboards import menu_keyboard, simple_keyboard, webapp_button
@@ -404,11 +406,33 @@ async def act_connect(cb: CallbackQuery | Message, container: AppContainer, db_u
         # otherwise this screen dumped all nine import links as a wall of text and named
         # apps the owner never offered, which is what scared users on the Connect screen.
         enabled = parse_enabled_apps(str(await container.bot_config.value(uow, "CONNECTION_APPS")))
+        from_panel = bool(await container.bot_config.value(uow, "CONNECTION_APPS_FROM_PANEL"))
     if sub is None or not sub.status.is_usable or not sub.subscription_url:
         await ack(cb, "Сначала оформи подписку", alert=True)
         return
-    chosen = connection_apps(sub.subscription_url, sub.crypto_link, enabled)
-    names = ", ".join(a["label"] for a in chosen)
+    # Same per-platform list as the mini-app: the panel's subscription page (+ CONNECTION_APPS
+    # clients it lacks); panel down / switched off -> the plain CONNECTION_APPS names.
+    platforms = (
+        await platform_apps(
+            container.remnawave_client,
+            container.redis,
+            subscription_url=sub.subscription_url,
+            crypto_link=sub.crypto_link,
+            username=RemnawaveService.username_for(sub.short_id),
+            enabled=enabled,
+            hide_link=hide_link,
+        )
+        if from_panel
+        else None
+    )
+    if platforms:
+        step1 = "1) Поставь приложение для своего устройства:\n" + "\n".join(
+            f"• <b>{hesc(p['name'])}</b>: " + ", ".join(hesc(a["label"]) for a in p["apps"])
+            for p in platforms
+        )
+    else:
+        chosen = connection_apps(sub.subscription_url, sub.crypto_link, enabled)
+        step1 = f"1) Поставь приложение: {', '.join(a['label'] for a in chosen)}."
     has_miniapp = miniapp_url.startswith("https://")
     # The raw happ://add/… / incy://add/… deep-link dump was removed: shown as <code> it only
     # confused people — tapping copies the whole scheme-prefixed string, which does NOT work
@@ -426,7 +450,7 @@ async def act_connect(cb: CallbackQuery | Message, container: AppContainer, db_u
         step2 = f"2) Скопируй ссылку и вставь её в приложении в «Добавить подписку»:{url_line}"
     else:
         step2 = "2) Нажми «Моя подписка», чтобы получить ссылку для подключения."
-    text = f"<b>🔌 Подключение</b>\n\n1) Поставь приложение: {names}.\n{step2}"
+    text = f"<b>🔌 Подключение</b>\n\n{step1}\n{step2}"
     kb: list[list[InlineKeyboardButton]] = []
     if miniapp_url.startswith("https://"):
         kb.append([webapp_button("📱 Открыть приложение", miniapp_url)])

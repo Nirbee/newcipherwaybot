@@ -176,28 +176,33 @@ def create_app() -> FastAPI:
     app.include_router(agent.short_router)
 
     @app.get("/dl", response_class=HTMLResponse)
-    async def _deep_link_redirect(to: str, request: Request) -> HTMLResponse:
+    async def _deep_link_redirect(to: str, request: Request, sig: str = "") -> HTMLResponse:
         """Hand a client-app deep link (happ://…) to the OS. Telegram's in-app WebView cannot
         open custom schemes — a direct anchor/navigation fails with ERR_UNKNOWN_URL_SCHEME — and
         WebApp.openLink() accepts http(s) only. So the mini-app opens THIS https page via
         openLink (external browser), which then fires the scheme; the OS routes it to the app.
-        The scheme is allow-listed so this can't be abused as an open redirect (javascript:, …)."""
+        The scheme is allow-listed so this can't be abused as an open redirect (javascript:, …),
+        and the link must carry OUR signature (``sig``, issued by /api/cabinet/connection) —
+        otherwise anyone could send out our-domain/dl?to=clash://…?url=https://evil/… and
+        import a stranger's profile in our name."""
         import html as _html
 
-        allowed = (
-            "happ://",
-            "incy://",
-            "v2raytun://",
-            "hiddify://",
-            "streisand://",
-            "clash://",
-            "sing-box://",
-            "v2box://",
-            "shadowrocket://",
-            "nekobox://",
-        )
-        if not to.startswith(allowed):
+        from src.application.services.connection import APP_LINK_SCHEMES, DL_MAX_LINK, verify_dl
+        from src.web.deps import dl_secret
+
+        if len(to) > DL_MAX_LINK or not to.startswith(APP_LINK_SCHEMES):
             raise HTTPException(400, "scheme not allowed")
+        if not verify_dl(to, sig, dl_secret(request.app.state.container)):
+            # A plain page, not JSON: this is what a person sees in their browser.
+            return HTMLResponse(
+                "<!doctype html><meta charset=utf-8>"
+                "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<title>Ссылка недействительна</title>"
+                "<body style='font-family:system-ui,sans-serif;text-align:center;padding:40px'>"
+                "<p>Ссылка недействительна или устарела. Вернитесь в приложение CipherWay "
+                "и нажмите «Добавить подписку» ещё раз.</p>",
+                status_code=400,
+            )
         # Android (Chrome and Telegram's in-app WebView) won't launch an app from a bare
         # `scheme://` link even on tap — it needs an Android intent:// URL. iOS/desktop open the
         # plain scheme fine. Rewrite to intent:// only for Android so the button works everywhere.

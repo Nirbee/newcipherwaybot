@@ -38,6 +38,9 @@ class FakeRemnawaveClient:
         self.hosts: list[PanelHost] = []
         self.subscription_json: Any = None
         self.subscription_json_fetches = 0
+        # Subscription-page config body (None = the panel has none); an Exception is raised.
+        self.subpage_config: Any = None
+        self.subpage_config_fetches = 0
 
     async def get_version(self) -> PanelVersion:
         maj, minr, pat = self._version
@@ -145,6 +148,12 @@ class FakeRemnawaveClient:
         if isinstance(self.subscription_json, Exception):
             raise self.subscription_json
         return self.subscription_json
+
+    async def get_subscription_page_config(self) -> dict[str, Any] | None:
+        self.subpage_config_fetches += 1
+        if isinstance(self.subpage_config, Exception):
+            raise self.subpage_config
+        return self.subpage_config
 
     # not part of the protocol, but handy in assertions
     def created_count(self) -> int:
