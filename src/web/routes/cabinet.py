@@ -11,11 +11,10 @@ import contextlib
 import math
 from collections.abc import Iterable
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.application.common.payments import PaymentContext, PaymentResultKind
@@ -56,7 +55,9 @@ from src.infrastructure.database.models.transaction import Transaction
 from src.infrastructure.database.models.user import User
 from src.infrastructure.di import AppContainer
 from src.infrastructure.payments.crypto import decrypt_gateway_settings
+from src.web import support
 from src.web.deps import dl_secret, get_container, public_base
+from src.web.support import SupportIn
 
 log = get_logger(__name__)
 
@@ -977,50 +978,12 @@ async def apply_promocode(
     return {"ok": True, "reward_type": reward.value, "message": None}  # #11: consistent shape
 
 
-class SupportIn(BaseModel):
-    text: str = Field(..., min_length=1, max_length=4096)
-
-
-def _support_msg(m: Any) -> dict[str, Any]:
-    from src.core.enums import TicketAuthor
-
-    text = m.text[2:].strip() if m.text.startswith("🤖 ") else m.text
-    return {
-        "from": "you" if m.author is TicketAuthor.USER else "support",
-        "text": text,
-        "image": m.attachment_url if m.attachment_kind in ("photo", "document") else None,
-        "at": m.created_at.isoformat(),
-    }
-
-
-_SUPPORT_UPLOADS = Path("uploads") / "tickets"
-_SUPPORT_IMAGE_TYPES = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-}
-_SUPPORT_IMAGE_MAX = 10 * 1024 * 1024
-
-
 @router.get("/support")
 async def support_history(
     user: User = Depends(cabinet_user), container: AppContainer = Depends(get_container)
 ) -> dict[str, Any]:
     """Current support conversation (for the mini-app chat + polling operator replies)."""
-    from src.core.enums import TicketStatus
-
-    async with container.uow() as uow:
-        tickets = await uow.tickets.list(user_id=user.id)
-        active = next((t for t in tickets if t.status is not TicketStatus.CLOSED), None)
-        if active is None:
-            return {"ticket_id": None, "status": None, "messages": []}
-        rows = await uow.ticket_messages.list(ticket_id=active.id)
-        msgs = sorted(rows, key=lambda m: m.id)  # base DAO list() has no ORDER BY
-        return {
-            "ticket_id": active.id,
-            "status": active.status.value,
-            "messages": [_support_msg(m) for m in msgs],
-        }
+    return await support.support_history(container, user)
 
 
 @router.post("/support")
@@ -1030,102 +993,24 @@ async def support_send(
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
     """Post a support message; the AI answers/escalates (same engine as the bot tickets)."""
-    from src.application.events import TicketOpened
-    from src.core.enums import TicketAuthor, TicketStatus
-    from src.infrastructure.database.base import utcnow
-    from src.infrastructure.database.models.ticket import Ticket, TicketMessage
-
-    text = (body.text or "").strip()[:4096]
-    if not text:
-        raise HTTPException(400, "empty message")
-    async with container.uow() as uow:
-        tickets = await uow.tickets.list(user_id=user.id)
-        active = next((t for t in tickets if t.status is not TicketStatus.CLOSED), None)
-        created = active is None
-        if active is None:
-            active = Ticket(user_id=user.id, subject=text[:64])
-            await uow.tickets.add(active)
-        await uow.ticket_messages.add(
-            TicketMessage(ticket_id=active.id, author=TicketAuthor.USER, text=text)
-        )
-        active.status = TicketStatus.OPEN
-        active.updated_at = utcnow()
-        await uow.commit()
-        ticket_id = active.id
-    if created:
-        await container.event_bus.publish(
-            TicketOpened(
-                ticket_id=ticket_id,
-                user_id=user.id,
-                telegram_id=user.telegram_id or 0,
-                username=user.username,
-                subject=text[:64],
-            )
-        )
-    outcome, ai_text = await container.ai_support.handle_ticket(user, ticket_id)
-    return {"ok": True, "ticket_id": ticket_id, "ai_outcome": outcome, "ai_reply": ai_text}
+    return await support.support_send(container, user, body.text)
 
 
 @router.post("/support/photo")
 async def support_send_photo(
-    file: UploadFile = File(...),
-    text: str = Form(""),
+    request: Request,
     user: User = Depends(cabinet_user),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
     """A screenshot into the support conversation (mini-app / web cabinet). Stored like the
-    bot's ticket screenshots (uploads/tickets/) so the admin thread renders it inline."""
-    import uuid
+    bot's ticket screenshots (uploads/tickets/) so the admin thread renders it inline. The
+    multipart body is parsed only after auth + rate limits (see support.photo_form)."""
+    from src.web.routes.cabinet_auth import _client_ip, _rate_limit
 
-    from src.application.events import TicketOpened
-    from src.core.enums import TicketAuthor, TicketStatus
-    from src.infrastructure.database.base import utcnow
-    from src.infrastructure.database.models.ticket import Ticket, TicketMessage
-
-    ext = _SUPPORT_IMAGE_TYPES.get((file.content_type or "").lower())
-    if ext is None:
-        raise HTTPException(400, "unsupported file type")
-    data = await file.read(_SUPPORT_IMAGE_MAX + 1)
-    if len(data) > _SUPPORT_IMAGE_MAX:
-        raise HTTPException(413, "file too large")
-    name = f"{uuid.uuid4().hex}{ext}"
-    try:
-        _SUPPORT_UPLOADS.mkdir(parents=True, exist_ok=True)
-        (_SUPPORT_UPLOADS / name).write_bytes(data)
-    except OSError as exc:
-        raise HTTPException(500, "could not store the file") from exc
-    caption = text.strip()[:1000]
-    async with container.uow() as uow:
-        tickets = await uow.tickets.list(user_id=user.id)
-        active = next((t for t in tickets if t.status is not TicketStatus.CLOSED), None)
-        created = active is None
-        if active is None:
-            active = Ticket(user_id=user.id, subject=(caption or "📎 Скриншот")[:64])
-            await uow.tickets.add(active)
-        await uow.ticket_messages.add(
-            TicketMessage(
-                ticket_id=active.id,
-                author=TicketAuthor.USER,
-                text=caption,
-                attachment_url=f"/uploads/tickets/{name}",
-                attachment_kind="photo",
-            )
-        )
-        active.status = TicketStatus.OPEN
-        active.updated_at = utcnow()
-        await uow.commit()
-        ticket_id = active.id
-    if created:
-        await container.event_bus.publish(
-            TicketOpened(
-                ticket_id=ticket_id,
-                user_id=user.id,
-                telegram_id=user.telegram_id or 0,
-                username=user.username,
-                subject=(caption or "📎 Скриншот")[:64],
-            )
-        )
-    return {"ok": True, "ticket_id": ticket_id}
+    await _rate_limit(container, "cab-photo", _client_ip(request), limit=10, window=60)
+    await _rate_limit(container, "cab-photo-u", str(user.id), limit=5, window=60)
+    async with support.photo_form(request) as (file, text):
+        return await support.support_send_photo(container, user, file, text)
 
 
 @router.post("/trial")
@@ -1288,6 +1173,11 @@ async def reset_link(
             fresh.subscription_url = new_url
             fresh.crypto_link = None  # the old happ link is stale after rotation
             await uow.commit()
+    # The Windows app authenticates with the link's token — the old one must die right now,
+    # not when its cached resolve expires.
+    from src.web.routes.app_api import forget_link
+
+    await forget_link(container, sub.subscription_url)
     with contextlib.suppress(Exception):  # best-effort: link is already rotated
         await container.remnawave_client.drop_connections(panel_ref)
     return {

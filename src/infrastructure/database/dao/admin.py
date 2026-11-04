@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from sqlalchemy import func, select
 
-from src.core.enums import BroadcastStatus, TicketStatus
+from src.core.enums import BroadcastStatus, TicketChannel, TicketStatus
 from src.infrastructure.database.dao.base import BaseDAO
 from src.infrastructure.database.models.admin_api_key import AdminApiKey
 from src.infrastructure.database.models.audit_log import AuditLog
@@ -234,6 +234,22 @@ class TicketDAO(BaseDAO[Ticket]):
             select(Ticket).order_by(Ticket.updated_at.desc()).limit(limit)
         )
         return result.all()
+
+    async def open_for(
+        self, user_id: int, *, app_subscription_id: int | None = None
+    ) -> Sequence[Ticket]:
+        """The user's not-closed tickets in ONE conversation, oldest first: the Windows-app
+        thread of that subscription (``app_subscription_id``), else the shared bot/cabinet
+        thread — app tickets never leak into the bot/cabinet view and vice versa."""
+        stmt = select(Ticket).where(Ticket.user_id == user_id, Ticket.status != TicketStatus.CLOSED)
+        if app_subscription_id is not None:
+            stmt = stmt.where(
+                Ticket.channel == TicketChannel.APP,
+                Ticket.subscription_id == app_subscription_id,
+            )
+        else:
+            stmt = stmt.where(Ticket.channel != TicketChannel.APP)
+        return (await self.session.scalars(stmt.order_by(Ticket.id))).all()
 
 
 class TicketMessageDAO(BaseDAO[TicketMessage]):

@@ -365,6 +365,7 @@ if [ "$CADDY_ACTIVE" = 0 ]; then
   printf "       location / {\n"
   printf "         proxy_pass http://127.0.0.1:%s;\n" "$WEB_PORT_OUT"
   printf "         proxy_set_header Host \$host;\n"
+  printf "         proxy_set_header X-Real-IP \$remote_addr;\n"
   printf "         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n"
   printf "         proxy_set_header X-Forwarded-Proto \$scheme;\n"
   printf "       }\n"

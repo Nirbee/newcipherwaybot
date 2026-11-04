@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.application.dto.panel import PanelUser
+from src.application.services.connection import link_token
 from src.core.constants import PANEL_USERNAME_PREFIX
 from src.core.enums import SubscriptionStatus
 from src.core.exceptions import WebhookVerificationError
@@ -106,6 +107,14 @@ async def _apply_user_event(
         sub.traffic_used_bytes = panel_user.traffic_used_bytes
         if panel_user.expire_at is not None:
             sub.expire_at = panel_user.expire_at
+        # A link revoked on the panel side (panel UI / MultiScript, not our reset-link) must
+        # stop working everywhere we trust the stored link — the Windows-app token cache
+        # compares against it. A rotated token also makes the stored happ link stale.
+        new_url = panel_user.subscription_url
+        if new_url and new_url != sub.subscription_url:
+            if link_token(new_url) != link_token(sub.subscription_url):
+                sub.crypto_link = None
+            sub.subscription_url = new_url[:512]
         sub.last_webhook_at = utcnow()
         await uow.commit()
     return True

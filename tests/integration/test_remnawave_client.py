@@ -141,3 +141,33 @@ async def test_transient_5xx_is_retried_then_succeeds() -> None:
         await client.aclose()
     assert version.tuple == (2, 8, 0)
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_v2_get_user_by_short_uuid_never_logs_the_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The 2.x lookup carries the subscription token in the PATH — a 404 must be logged with
+    the route template, not the live link token."""
+    import src.infrastructure.remnawave.client as client_mod
+
+    logged: list[dict[str, object]] = []
+
+    class _Log:
+        def warning(self, event: str, **kw: object) -> None:
+            logged.append({"event": event, **kw})
+
+        def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(client_mod, "log", _Log())
+    respx.get(f"{BASE}/api/system/metadata").mock(
+        return_value=httpx.Response(200, json={"response": {"version": "2.8.3"}})
+    )
+    respx.get(f"{BASE}/api/users/by-short-uuid/SecretTok12345").mock(
+        return_value=httpx.Response(404, json={"message": "not found"})
+    )
+    client = _client()
+    try:
+        assert await client.get_user_by_short_uuid("SecretTok12345") is None
+    finally:
+        await client.aclose()
+    assert logged and all("SecretTok12345" not in str(entry) for entry in logged)

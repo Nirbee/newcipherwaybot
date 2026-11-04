@@ -71,6 +71,7 @@ StepBot/
 │           ├── admin/            17 роутеров под /api/admin (JWT-auth), в т.ч.
 │           │                     migration.py (импорт shopbot) · withdrawals.py (выводы)
 │           ├── cabinet.py        /api/cabinet (initData-auth) — для мини-аппы
+│           ├── app_api.py        /api/app/v1 (токен ссылки подписки) — поддержка из Windows-приложения
 │           ├── panel.py          /webhook/panel — вебхук Remnawave
 │           ├── payments.py       /api/v1/payments/{gateway} — вебхук платежей
 │           └── health.py

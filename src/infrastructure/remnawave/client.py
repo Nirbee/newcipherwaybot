@@ -54,6 +54,7 @@ _PATHS = {
     "users": "/api/users",
     "user": "/api/users/{uuid}",
     "user_by_tg": "/api/users/by-telegram-id/{telegram_id}",
+    "user_by_short_uuid": "/api/users/by-short-uuid/{short_uuid}",
     "user_actions": "/api/users/{uuid}/actions/{action}",
     "internal_squads": "/api/internal-squads",
     "nodes": "/api/nodes",
@@ -301,8 +302,13 @@ class RemnawaveHttpClient:
         await self._http.aclose()
 
     # --- low-level request with retry -------------------------------------
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _request(
+        self, method: str, path: str, *, log_path: str | None = None, **kwargs: Any
+    ) -> Any:
+        # ``log_path``: what to write to the logs instead of ``path`` when the path itself
+        # carries a credential (the 2.x by-short-uuid lookup embeds the subscription token).
         last_exc: Exception | None = None
+        shown = log_path or path
         for attempt in range(1, PANEL_RETRY_ATTEMPTS + 1):
             try:
                 resp = await self._http.request(method, path, **kwargs)
@@ -311,7 +317,7 @@ class RemnawaveHttpClient:
             else:
                 if resp.status_code in (401, 403):
                     log.warning(
-                        "panel rejected credentials", method=method, path=path,
+                        "panel rejected credentials", method=method, path=shown,
                         status=resp.status_code, body=resp.text[:300],
                     )
                     raise RemnawaveAuthError(f"panel rejected credentials ({resp.status_code})")
@@ -321,7 +327,7 @@ class RemnawaveHttpClient:
                     # payload shape and the body carries the real reason, e.g. a stack trace or
                     # validation message naming the offending field.
                     log.warning(
-                        "panel request failed", method=method, path=path,
+                        "panel request failed", method=method, path=shown,
                         status=resp.status_code, body=resp.text[:500], attempt=attempt,
                     )
                     last_exc = RemnawaveTransientError(
@@ -332,7 +338,7 @@ class RemnawaveHttpClient:
                     # "panel returned an error" message for the admin UI — the raw status/body
                     # (the actual field-name/route mismatch, if any) would otherwise be lost.
                     log.warning(
-                        "panel request rejected", method=method, path=path,
+                        "panel request rejected", method=method, path=shown,
                         status=resp.status_code, body=resp.text[:300],
                     )
                     raise RemnawaveError(f"panel {resp.status_code}: {resp.text[:200]}")
@@ -601,6 +607,38 @@ class RemnawaveHttpClient:
         if isinstance(data, list):
             return _to_panel_user(dict(data[0])) if data else None
         return _to_panel_user(dict(data))
+
+    async def get_user_by_short_uuid(self, short_uuid: str) -> PanelUser | None:
+        """The panel user whose subscription link ends with ``short_uuid`` (the token the
+        Windows app knows). 3.x: POST /users/resolve by shortUuid ONLY (never the username
+        guess — that would accept our internal short_id as a credential) → GET by id; 2.x:
+        GET /users/by-short-uuid. Unknown → None; auth/transient errors propagate so the
+        caller can tell "panel down" from "no such link"."""
+        try:
+            if await self._is_v3():
+                data = await self._request(
+                    "POST", _PATHS_V3["resolve"], json={"shortUuid": short_uuid}
+                )
+                panel_id = _numeric_id(data.get("id")) if isinstance(data, dict) else None
+                if panel_id is None:
+                    return None
+                data = await self._request("GET", _PATHS_V3["user"].format(id=panel_id))
+            else:
+                data = await self._request(
+                    "GET",
+                    _PATHS["user_by_short_uuid"].format(short_uuid=short_uuid),
+                    log_path=_PATHS["user_by_short_uuid"],  # never log the token itself
+                )
+        except (RemnawaveAuthError, RemnawaveTransientError):
+            raise
+        except RemnawaveError:
+            return None
+        if not isinstance(data, dict) or not data:
+            return None
+        try:
+            return _to_panel_user(dict(data))
+        except ValueError:
+            return None
 
     async def _action(self, ref: PanelRef, action: str) -> Any:
         if await self._is_v3():

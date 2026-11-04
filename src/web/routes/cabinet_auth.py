@@ -11,7 +11,9 @@ in, the same ``/api/cabinet/*`` endpoints (purchase, me, devices…) work over t
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
+import ipaddress
 import re as _re
 import secrets
 from typing import TYPE_CHECKING, Any, cast
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from sqlalchemy import CursorResult
 
 from src.application.services.ids import generate_referral_code
+from src.core.config import get_settings
 from src.core.enums import AuthType, Currency, UserStatus
 from src.core.security import hash_password, jwt_decode, jwt_encode, verify_password
 from src.infrastructure.database.models.cabinet_token import CabinetRefreshToken
@@ -103,18 +106,41 @@ async def _require_web_enabled(container: AppContainer) -> None:
             raise HTTPException(403, "web cabinet is disabled")
 
 
+@functools.lru_cache(maxsize=4)
+def _proxy_networks(
+    cidrs: tuple[str, ...],
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    return tuple(ipaddress.ip_network(n, strict=False) for n in cidrs)
+
+
+def _is_proxy_peer(host: str) -> bool:
+    """Only our own reverse proxy (WEB__TRUSTED_PROXIES) may vouch for the client address.
+    A request that arrives straight from anywhere else set those headers itself."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    nets = _proxy_networks(tuple(get_settings().web.trusted_proxies))
+    return any(addr in net for net in nets)
+
+
 def _client_ip(request: Request) -> str:
-    # The LEFTMOST X-Forwarded-For hop is attacker-controllable (nginx/Caddy APPEND the real peer
-    # rather than overwrite), so keying rate-limits on it lets a client rotate a fake header per
-    # request and defeat every limiter. Prefer X-Real-IP (our proxy sets it to the direct peer),
-    # else the RIGHTMOST XFF hop (the value the proxy itself appended), else the socket peer.
-    real = request.headers.get("x-real-ip", "").strip()
-    if real:
-        return real
+    # Proxy headers are trusted ONLY from a trusted proxy peer — otherwise any client could
+    # send its own per request and defeat every limiter. From the proxy: the RIGHTMOST
+    # X-Forwarded-For hop (Caddy sets XFF to the peer it saw; nginx $proxy_add_x_forwarded_for
+    # appends it on the right — anything to the left is client-controlled), X-Real-IP only as
+    # a fallback, else the socket peer.
+    peer = request.client.host if request.client else ""
+    if not _is_proxy_peer(peer):
+        return peer
     xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[-1].strip()
-    return request.client.host if request.client else ""
+    hop = xff.split(",")[-1].strip() if xff else ""
+    if hop:
+        return hop
+    real = request.headers.get("x-real-ip", "").strip()
+    return real or peer
 
 
 async def _rate_limit(

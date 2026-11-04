@@ -53,9 +53,9 @@ async def user_on_premium_plan(uow: UnitOfWork, user: User) -> bool:
 
 
 async def active_ticket(uow: UnitOfWork, user_id: int, *, premium_only: bool) -> Ticket | None:
-    tickets = await uow.tickets.list(user_id=user_id)
-    for t in tickets:
-        if t.status is not TicketStatus.CLOSED and (t.is_premium or not premium_only):
+    """The user's open bot/cabinet ticket (oldest first); Windows-app threads are excluded."""
+    for t in await uow.tickets.open_for(user_id):
+        if t.is_premium or not premium_only:
             return t
     return None
 

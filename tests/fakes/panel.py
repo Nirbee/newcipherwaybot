@@ -41,6 +41,7 @@ class FakeRemnawaveClient:
         # Subscription-page config body (None = the panel has none); an Exception is raised.
         self.subpage_config: Any = None
         self.subpage_config_fetches = 0
+        self.short_uuid_lookups = 0
 
     async def get_version(self) -> PanelVersion:
         maj, minr, pat = self._version
@@ -88,6 +89,10 @@ class FakeRemnawaveClient:
     async def get_user_by_telegram_id(self, telegram_id: int) -> PanelUser | None:
         return next((u for u in self.users.values() if u.telegram_id == telegram_id), None)
 
+    async def get_user_by_short_uuid(self, short_uuid: str) -> PanelUser | None:
+        self.short_uuid_lookups += 1
+        return next((u for u in self.users.values() if u.short_id == short_uuid), None)
+
     async def enable_user(self, ref: PanelRef) -> None:
         key = _key(ref)
         user = self.users.get(key)
@@ -110,8 +115,10 @@ class FakeRemnawaveClient:
     async def revoke_subscription(self, ref: PanelRef) -> PanelUser:
         key = _key(ref)
         user = self.users[key]
+        # Like the real panel: a revoke issues a new shortUuid, i.e. a new link token.
+        new_short = uuid.uuid4().hex[:16]
         rotated = dataclasses.replace(
-            user, subscription_url=f"{user.subscription_url}?r={uuid.uuid4().hex[:6]}"
+            user, short_id=new_short, subscription_url=f"https://panel.test/sub/{new_short}"
         )
         self.users[key] = rotated
         return rotated

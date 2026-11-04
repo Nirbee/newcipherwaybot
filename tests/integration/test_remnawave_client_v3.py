@@ -14,10 +14,12 @@ import json
 import uuid
 
 import httpx
+import pytest
 import respx
 
 from src.application.dto.panel import PanelUserRef, ProvisionSpec
 from src.core.config.remnawave import PanelAuthType, RemnawaveSettings
+from src.core.exceptions import RemnawaveTransientError
 from src.infrastructure.remnawave.client import RemnawaveHttpClient
 from src.infrastructure.remnawave.connection import build_profile
 
@@ -331,5 +333,50 @@ async def test_subpage_config_none_when_panel_has_no_configs() -> None:
     client = _client()
     try:
         assert await client.get_subscription_page_config() is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_v3_get_user_by_short_uuid_resolves_by_short_uuid_only() -> None:
+    """The Windows app's token lookup: resolve by shortUuid (never the username guess, which
+    would make our internal short_id a credential), then fetch the full user by id."""
+    _mock_v3()
+    resolve = respx.post(f"{BASE}/api/users/resolve").mock(
+        return_value=httpx.Response(200, json={"response": {"id": 101}})
+    )
+    respx.get(f"{BASE}/api/users/101").mock(
+        return_value=httpx.Response(200, json=_user_payload(101))
+    )
+    client = _client()
+    try:
+        user = await client.get_user_by_short_uuid("shrt" * 4)
+    finally:
+        await client.aclose()
+    assert user is not None and user.panel_id == 101 and user.short_id == "shrt" * 4
+    assert resolve.call_count == 1
+    assert json.loads(resolve.calls.last.request.content) == {"shortUuid": "shrt" * 4}
+
+
+@respx.mock
+async def test_v3_get_user_by_short_uuid_unknown_is_none_but_outage_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.infrastructure.remnawave.client as client_mod
+
+    monkeypatch.setattr(client_mod, "PANEL_RETRY_BASE_DELAY", 0)
+    _mock_v3()
+    respx.post(f"{BASE}/api/users/resolve").mock(
+        side_effect=[
+            httpx.Response(404, json={"message": "User not found"}),
+            *[httpx.Response(502, text="bad gateway")] * 5,
+        ]
+    )
+    client = _client()
+    try:
+        assert await client.get_user_by_short_uuid("nope123456") is None
+        # an outage must not look like «unknown link»
+        with pytest.raises(RemnawaveTransientError):
+            await client.get_user_by_short_uuid("nope123456")
     finally:
         await client.aclose()

@@ -54,8 +54,8 @@ async def _append_ticket_message(
     Returns (ticket_id, created, is_premium). A new ticket from a customer on a premium plan is
     flagged premium: human-only and pinned to the top of the admin queue."""
     async with container.uow() as uow:
-        tickets = await uow.tickets.list(user_id=db_user.id)
-        active = next((t for t in tickets if t.status is not TicketStatus.CLOSED), None)
+        # Bot + cabinet share one thread; Windows-app tickets are separate (TicketChannel).
+        active = next(iter(await uow.tickets.open_for(db_user.id)), None)
         created = False
         if active is None:
             active = Ticket(
@@ -117,8 +117,7 @@ async def _maybe_ai_reply(
 async def begin_ticket(cb: CallbackQuery | Message, container: AppContainer, db_user: User) -> None:
     """Entry from the support action: show the open ticket or start a new one."""
     async with container.uow() as uow:
-        open_tickets = await uow.tickets.list(user_id=db_user.id)
-        active = next((t for t in open_tickets if t.status is not TicketStatus.CLOSED), None)
+        active = next(iter(await uow.tickets.open_for(db_user.id)), None)
     if active is not None:
         text = (
             f"<b>🆘 Тикет #{active.id}</b>\n──────────\n"

@@ -259,6 +259,16 @@ class TicketAuthor(StrEnum):
     ADMIN = "admin"
 
 
+class TicketChannel(StrEnum):
+    """Where a support conversation lives. BOT and CABINET share one thread per account (the
+    same person, staff replies reach them in Telegram); APP is the Windows app — a separate
+    thread per SUBSCRIPTION, because its link token proves only that one subscription."""
+
+    BOT = "bot"
+    CABINET = "cabinet"
+    APP = "app"
+
+
 class MenuNodeKind(StrEnum):
     """Bot menu-constructor node types (screen == submenu with its own text)."""
 

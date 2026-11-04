@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import secrets
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 # Import schemes for the popular clients. Keys are stable identifiers used by both surfaces.
 CLIENT_LABELS: dict[str, str] = {
@@ -146,6 +146,14 @@ def dl_url(link: str, secret: str, base: str = "") -> str:
 def store_links(client: str) -> dict[str, str]:
     """Per-platform download links for a client key (empty dict for an unknown key)."""
     return CLIENT_STORES.get(client, {})
+
+
+def link_token(subscription_url: str | None) -> str:
+    """Last path segment of a subscription link (``https://sub.example/<token>``) — the panel
+    shortUuid that the Windows app authenticates with. Empty for a missing link."""
+    if not subscription_url:
+        return ""
+    return urlsplit(subscription_url).path.rstrip("/").rsplit("/", 1)[-1]
 
 
 def build_deep_links(subscription_url: str, crypto_link: str | None = None) -> dict[str, str]:

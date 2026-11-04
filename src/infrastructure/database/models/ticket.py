@@ -12,7 +12,7 @@ import datetime as dt
 from sqlalchemy import Boolean, Enum, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.core.enums import TicketAuthor, TicketStatus
+from src.core.enums import TicketAuthor, TicketChannel, TicketStatus
 from src.infrastructure.database.base import AwareDateTime, Base, IntPk, TimestampMixin, utcnow
 
 
@@ -33,6 +33,17 @@ class Ticket(IntPk, TimestampMixin, Base):
     # Manual priority set by staff: 0 low, 1 normal, 2 high, 3 urgent. The admin queue also
     # escalates automatically by how long the customer has been waiting (see admin/tickets.py).
     priority: Mapped[int] = mapped_column(default=1, server_default="1")
+    # Source of the conversation (see TicketChannel). Existing rows are BOT. An APP ticket is
+    # pinned to the subscription whose link authenticated the app (subscription_id) and is
+    # never read or continued by the bot/cabinet, nor vice versa.
+    channel: Mapped[TicketChannel] = mapped_column(
+        Enum(TicketChannel, native_enum=False, length=16),
+        default=TicketChannel.BOT,
+        server_default="BOT",
+    )
+    subscription_id: Mapped[int | None] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="SET NULL"), index=True
+    )
 
     messages: Mapped[list[TicketMessage]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan", order_by="TicketMessage.id"

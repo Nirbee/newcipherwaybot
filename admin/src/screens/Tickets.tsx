@@ -13,6 +13,7 @@ type TicketRow = {
   subject: string;
   status: "open" | "waiting" | "closed";
   is_premium: boolean;
+  channel: TicketChannel;
   priority: number;
   effective_priority: number;
   waiting_minutes: number | null;
@@ -26,11 +27,23 @@ type TicketList = {
   open_premium: number;
 };
 type Section = "all" | "premium" | "regular";
+type TicketChannel = "bot" | "cabinet" | "app";
+/* Where the conversation lives. Bot is the default and gets no badge; the Windows app is a
+   separate thread per subscription (the customer only proved that subscription's link). */
+const CHANNEL_BADGE: Record<TicketChannel, string | null> = {
+  bot: null,
+  cabinet: "🌐 Кабинет",
+  app: "💻 Приложение",
+};
+const ChannelBadge = ({ channel }: { channel: TicketChannel }) =>
+  CHANNEL_BADGE[channel] ? <span className="cap-pill">{CHANNEL_BADGE[channel]}</span> : null;
 type TicketDetail = {
   id: number;
   subject: string;
   status: string;
   is_premium: boolean;
+  channel: TicketChannel;
+  subscription_id: number | null;
   priority: number;
   offers: {
     id: number;
@@ -350,6 +363,7 @@ export default function Tickets() {
                   <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     <span className="mono dim">#{tk.id}</span>{" "}
                     {tk.is_premium && <span className="cap-pill">💎 {t.premiumBadge}</span>}{" "}
+                    <ChannelBadge channel={tk.channel} />{" "}
                     {tk.username ? `@${tk.username}` : "—"} · {tk.subject}
                   </div>
                   <div className="dim" style={{ fontSize: 11.5 }}>
@@ -393,6 +407,10 @@ export default function Tickets() {
                 <span>
                   <b className="mono">#{d.id}</b> ·{" "}
                   {d.is_premium && <span className="cap-pill">💎 {t.premiumBadge}</span>}{" "}
+                  <ChannelBadge channel={d.channel} />
+                  {d.channel === "app" && d.subscription_id !== null && (
+                    <span className="dim"> подписка #{d.subscription_id}</span>
+                  )}{" "}
                   {d.subject}{" "}
                   <span className={`st ${ST[d.status]?.[1] ?? "off"}`}>
                     {d.status === "open" ? t.openSt : d.status === "waiting" ? t.waitSt : t.closedSt}

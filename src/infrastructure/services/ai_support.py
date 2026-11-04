@@ -141,12 +141,18 @@ class AiSupportService:
             key = str(await self._config.value(uow, "AI_SUPPORT_API_KEY") or "").strip()
         return on and bool(key)
 
-    async def handle_ticket(self, user: User, ticket_id: int) -> tuple[str, str | None]:
+    async def handle_ticket(
+        self, user: User, ticket_id: int, *, subscription_id: int | None = None
+    ) -> tuple[str, str | None]:
         """Answer or escalate a ticket, persisting the AI reply. Returns (outcome, text):
         ``("reply", text)`` — stored a 🤖-marked support message + set WAITING;
         ``("escalate", None)`` — alerted the owner, ticket left OPEN;
         ``("skip", None)`` — AI off, or a human is already in the loop. Single source of
-        truth shared by the bot ticket handler and the mini-app cabinet endpoint."""
+        truth shared by the bot ticket handler and the mini-app cabinet endpoint.
+
+        ``subscription_id`` = the Windows-app channel: the customer proved only ONE
+        subscription (its link token), so context and tools are pinned to it, account-wide
+        data (payments) is off and the subscription link is never disclosed."""
         if not await self.enabled():
             return "skip", None
         async with self._uow() as uow:
@@ -168,7 +174,9 @@ class AiSupportService:
                 )
             return "escalate", None
         history = [(m.author.value, m.text) for m in msgs]
-        reply, escalate, _ = await self.generate_reply(user, history)
+        reply, escalate, _ = await self.generate_reply(
+            user, history, subscription_id=subscription_id
+        )
         if reply and not escalate:
             async with self._uow() as uow:
                 await uow.ticket_messages.add(
@@ -200,19 +208,28 @@ class AiSupportService:
 
     # ---- per-user context + tools -----------------------------------------
 
-    async def _sub_uuid(self, user: User) -> tuple[PanelUserRef | None, Any]:
-        if not user.current_subscription_id:
+    async def _sub_uuid(
+        self, user: User, subscription_id: int | None = None
+    ) -> tuple[PanelUserRef | None, Any]:
+        sub_id = subscription_id or user.current_subscription_id
+        if not sub_id:
             return None, None
         async with self._uow() as uow:
-            sub = await uow.subscriptions.get(user.current_subscription_id)
-        if sub is None:
-            return None, sub
+            sub = await uow.subscriptions.get(sub_id)
+        if sub is None or sub.user_id != user.id:
+            return None, None
         return sub.panel_ref, sub
 
-    async def _context(self, user: User) -> str:
-        uuid, sub = await self._sub_uuid(user)
+    async def _context(self, user: User, subscription_id: int | None = None) -> str:
+        uuid, sub = await self._sub_uuid(user, subscription_id)
+        channel = (
+            "Клиент пишет из приложения CipherWay для Windows. Ссылку подписки НЕ сообщай, "
+            "об оплатах и других подписках не рассказывай — по таким вопросам верни ESCALATE. "
+            if subscription_id is not None
+            else ""
+        )
         if sub is None:
-            return "У клиента НЕТ активной подписки (не покупал или истекла)."
+            return channel + "У клиента НЕТ активной подписки (не покупал или истекла)."
         exp = sub.expire_at.date().isoformat() if sub.expire_at else "—"
         trial = " Пробный период." if getattr(sub, "is_trial", False) else ""
         ndev = ""
@@ -221,15 +238,27 @@ class AiSupportService:
                 ndev = f" Подключено устройств сейчас: {len(await self._rw.get_devices(uuid))}."
             except Exception:
                 ndev = ""
-        return f"Подписка клиента: статус {sub.status.value}, действует до {exp}.{trial}{ndev}"
+        return (
+            f"{channel}Подписка клиента: статус {sub.status.value}, действует до {exp}."
+            f"{trial}{ndev}"
+        )
 
     async def _tool(
-        self, name: str, user: User, tool_input: dict[str, Any], *, readonly: bool = False
+        self,
+        name: str,
+        user: User,
+        tool_input: dict[str, Any],
+        *,
+        readonly: bool = False,
+        subscription_id: int | None = None,
     ) -> tuple[str, str | None]:
         """Return (text-for-model, short-action-note|None). ``readonly`` (admin Test) suppresses
-        side effects — no real device reset or owner alert."""
+        side effects — no real device reset or owner alert. ``subscription_id`` — the app
+        channel (see handle_ticket): device tools act on that subscription only, no payments,
+        no link."""
+        app_channel = subscription_id is not None
         try:
-            uuid, sub = await self._sub_uuid(user)
+            uuid, sub = await self._sub_uuid(user, subscription_id)
             if name == "reset_devices":
                 if uuid is None:
                     return "У клиента нет активной подписки для сброса устройств.", None
@@ -253,6 +282,8 @@ class AiSupportService:
                 )
                 return f"Устройств: {len(devs)} — {desc}", None
             if name == "check_payment":
+                if app_channel:
+                    return "Недоступно в этом канале — по вопросам оплаты верни ESCALATE.", None
                 async with self._uow() as uow:
                     txns = await uow.transactions.list_recent(user.id, limit=1)
                 if not txns:
@@ -276,9 +307,16 @@ class AiSupportService:
                 async with self._uow() as uow:
                     hide = bool(await self._config.value(uow, "HIDE_SUBSCRIPTION_LINK"))
                 # Honour the owner's hide-link policy — don't hand the raw URL to the model.
-                link = (
-                    "скрыта настройкой, НЕ разглашать" if hide else (sub.subscription_url or "нет")
-                )
+                # The app channel never gets it: whoever holds an OLD token must not be handed
+                # the current link (and the app is already connected anyway).
+                if app_channel:
+                    link = "не выдаётся в этом канале, НЕ разглашать"
+                else:
+                    link = (
+                        "скрыта настройкой, НЕ разглашать"
+                        if hide
+                        else (sub.subscription_url or "нет")
+                    )
                 return (
                     f"Подписка есть: статус {sub.status.value}, в панели={inp}, ссылка={link}",
                     None,
@@ -300,7 +338,12 @@ class AiSupportService:
     # ---- main -------------------------------------------------------------
 
     async def generate_reply(
-        self, user: User, history: list[tuple[str, str]], *, readonly: bool = False
+        self,
+        user: User,
+        history: list[tuple[str, str]],
+        *,
+        readonly: bool = False,
+        subscription_id: int | None = None,
     ) -> tuple[str | None, bool, list[str]]:
         """(reply|None, escalate, actions). None+escalate → hand to a human."""
         cfg = await self._cfg()
@@ -328,7 +371,11 @@ class AiSupportService:
         stable += "\n\n=== БАЗА ЗНАНИЙ ===\n" + cfg["kb"]
         system = [
             {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": "\n\n=== КОНТЕКСТ КЛИЕНТА ===\n" + await self._context(user)},
+            {
+                "type": "text",
+                "text": "\n\n=== КОНТЕКСТ КЛИЕНТА ===\n"
+                + await self._context(user, subscription_id),
+            },
         ]
 
         actions: list[str] = []
@@ -361,7 +408,11 @@ class AiSupportService:
                         for b in content:
                             if b.get("type") == "tool_use":
                                 res, act = await self._tool(
-                                    b.get("name"), user, b.get("input") or {}, readonly=readonly
+                                    b.get("name"),
+                                    user,
+                                    b.get("input") or {},
+                                    readonly=readonly,
+                                    subscription_id=subscription_id,
                                 )
                                 if act:
                                     actions.append(act)

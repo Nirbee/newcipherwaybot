@@ -5,5 +5,15 @@
 # plain HTTP. Set ACME_EMAIL in .env only affects nothing here — kept for future use.
 {$DOMAIN} {
 	encode gzip
-	reverse_proxy web:8080
+	# Body cap for the public, pre-auth upload endpoints only (Windows-app API + support
+	# screenshots); admin uploads/imports elsewhere keep Caddy's default (unlimited).
+	@capped path /api/app/v1/* /api/cabinet/support/photo
+	request_body @capped {
+		max_size 12MB
+	}
+	# The web app trusts X-Real-IP only from this proxy (a private peer) — overwrite whatever
+	# the client sent with the real peer address, so rate limits can't be dodged by spoofing.
+	reverse_proxy web:8080 {
+		header_up X-Real-IP {remote_host}
+	}
 }

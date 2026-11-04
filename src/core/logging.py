@@ -43,6 +43,9 @@ def configure_logging(*, level: str = "INFO", json: bool = False) -> None:
 
     # Route stdlib logging (sqlalchemy, uvicorn, aiogram) through the same handler.
     logging.basicConfig(format="%(message)s", stream=sys.stderr, level=log_level)
+    # httpx logs every request URL at INFO — panel paths can carry a subscription token
+    # (2.x by-short-uuid), bot API URLs carry the bot token. Only warnings and up.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def get_logger(name: str | None = None) -> structlog.typing.FilteringBoundLogger:

@@ -21,9 +21,11 @@ from starlette.types import Scope
 from src.core.config import get_settings
 from src.core.logging import configure_logging, get_logger
 from src.infrastructure.di import AppContainer
+from src.web.body_limit import BodyLimitMiddleware
 from src.web.routes import (
     admin,
     agent,
+    app_api,
     cabinet,
     cabinet_auth,
     cabinet_link,
@@ -62,6 +64,16 @@ class NoCacheHTMLStatic(StaticFiles):
         response = await super().get_response(path, scope)
         if path.endswith(".html") or path in ("", "/", "."):
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
+class NoSniffStatic(StaticFiles):
+    """User/admin uploads: X-Content-Type-Options: nosniff, so a browser never second-guesses
+    the extension-derived type of an uploaded file (no «image» rendered as HTML/script)."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
 
@@ -157,6 +169,8 @@ def create_app() -> FastAPI:
     app.add_exception_handler(Exception, unhandled_error_handler)
     # Read-only API keys: mask e-mails/phones in their answers + per-key request journal.
     app.add_middleware(AdminKeyResponseFilter)
+    # Body caps for the Windows-app API + support-photo uploads (bodies are read before auth).
+    app.add_middleware(BodyLimitMiddleware)
     if settings.web.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -172,6 +186,7 @@ def create_app() -> FastAPI:
     app.include_router(cabinet.router)
     app.include_router(cabinet_auth.router)
     app.include_router(cabinet_link.router)
+    app.include_router(app_api.router)  # Windows app: support chat by subscription link
     app.include_router(agent.router)
     app.include_router(agent.short_router)
 
@@ -247,7 +262,7 @@ def create_app() -> FastAPI:
     if _WEB_DIR.is_dir():
         app.mount("/web", VersionedStatic(directory=_WEB_DIR, html=True), name="web-cabinet")
     _UPLOADS_DIR.mkdir(exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory=_UPLOADS_DIR), name="uploads")
+    app.mount("/uploads", NoSniffStatic(directory=_UPLOADS_DIR), name="uploads")
     # The public site is a catch-all at "/", so it MUST mount last — after every API
     # router and the /admin, /app, /web, /uploads mounts, which still match first.
     if _SITE_DIR.is_dir():

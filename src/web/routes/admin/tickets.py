@@ -1,6 +1,7 @@
 """Admin: support tickets + channel config (screen 11).
 
-Replying stores the message and (best-effort) delivers it to the user via the bot.
+Replying stores the message and (best-effort) delivers it to the user via the bot —
+except Windows-app threads (TicketChannel.APP), which the app shows itself.
 Support channel modes (in-bot tickets / redirect / separate bot / mini-app chat) are
 bot-config params surfaced here for the screen's config cards.
 """
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from src.application.services import premium
-from src.core.enums import TicketAuthor, TicketStatus
+from src.core.enums import TicketAuthor, TicketChannel, TicketStatus
 from src.core.logging import get_logger
 from src.infrastructure.database.base import utcnow
 from src.infrastructure.database.models.ticket import TicketMessage
@@ -120,6 +121,7 @@ async def list_tickets(
                     "subject": t.subject,
                     "status": t.status.value,
                     "is_premium": t.is_premium,
+                    "channel": t.channel.value,  # bot | cabinet | app (Windows app)
                     "priority": t.priority,
                     "effective_priority": effective_priority(t.priority, waiting, t.is_premium),
                     "waiting_minutes": waiting,
@@ -170,6 +172,8 @@ async def ticket_detail(
             "subject": t.subject,
             "status": t.status.value,
             "is_premium": t.is_premium,
+            "channel": t.channel.value,
+            "subscription_id": t.subscription_id,
             "priority": t.priority,
             "offers": [
                 {
@@ -244,6 +248,9 @@ async def reply_ticket(
         if t is None:
             raise HTTPException(404, "ticket not found")
         user = await uow.users.get(t.user_id)
+        # A Windows-app thread is answered IN the app (it polls and notifies itself) — never
+        # via Telegram: whoever holds that subscription link may not be the account owner.
+        in_app = t.channel is TicketChannel.APP
         await uow.ticket_messages.add(
             TicketMessage(
                 ticket_id=ticket_id,
@@ -258,7 +265,7 @@ async def reply_ticket(
         await uow.commit()
 
     # Best-effort delivery to the user's chat (bot process not required).
-    if user is not None and user.telegram_id:
+    if user is not None and user.telegram_id and not in_app:
         try:
             from aiogram import Bot
             from aiogram.types import FSInputFile
@@ -382,7 +389,10 @@ async def premium_offer(
         )
         await uow.commit()
         plan_id, telegram_id = plan.id, customer.telegram_id
-    await container.notifier.notify_user(telegram_id, text)
+        in_app = t.channel is TicketChannel.APP
+    # The offer is in the thread either way; an app thread is not mirrored to Telegram.
+    if not in_app:
+        await container.notifier.notify_user(telegram_id, text)
     return {"ok": True, "plan_id": plan_id, "pay_url": premium.plan_url(bot_username, plan_id)}
 
 
