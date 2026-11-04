@@ -11,6 +11,7 @@ missing group id or a Telegram error never breaks the publishing flow.
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -145,9 +146,15 @@ async def send_topic_report(
                     FSInputFile(str(document)), caption=text
                 )
             else:
-                await container.notifier.notify_admins(text)
+                # Report texts are HTML for the group topic; the admin DM goes as plain text,
+                # so strip the tags (else the admin sees a literal "<b>#15</b>").
+                await container.notifier.notify_admins(_html_to_plain(text))
             delivered = True
     return delivered
+
+
+def _html_to_plain(text: str) -> str:
+    return html.unescape(re.sub(r"</?[a-zA-Z][^>]*>", "", text))
 
 
 async def _deliver(
