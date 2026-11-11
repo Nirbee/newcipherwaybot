@@ -12,7 +12,7 @@
 
 set -u
 
-INSTALLER_VERSION="3"
+INSTALLER_VERSION="4"
 XKEEN_VERSION="2.0"
 XRAY_VERSION="v26.7.28"   # the server may override: the version the VPN nodes run
 AGENT_DIR="/opt/etc/cipherway-agent"
@@ -365,13 +365,14 @@ CONFDIR="$CONFDIR"
 OUTFILE="10_cipherway.json"
 EOF
 chmod 600 "$AGENT_DIR/agent.conf"
-rm -f /opt/var/lib/cipherway-agent/etag
+rm -f /opt/var/lib/cipherway-agent/etag /opt/var/lib/cipherway-agent/rev \
+    /opt/var/lib/cipherway-agent/last_full
 ok agent "агент и конфиг записаны"
 
 # --- 6. cron ---------------------------------------------------------------------------
 
 say "Настройка запуска по расписанию (cron)"
-cron_line="*/5 * * * * $AGENT_DIR/agent.sh >/dev/null 2>&1"
+cron_line="*/1 * * * * $AGENT_DIR/agent.sh >/dev/null 2>&1"
 if [ -x /opt/etc/init.d/S05crond ]; then
     cron_file="/opt/var/spool/cron/crontabs/root"; cron_init="/opt/etc/init.d/S05crond"
 elif [ -x /opt/etc/init.d/S10cron ]; then
@@ -388,13 +389,13 @@ echo "$cron_line" >> "$cron_file"
 run_limited 60 "перезапуск cron" "$cron_init" restart >> "$LOG" 2>&1 </dev/null \
     || run_limited 60 "запуск cron" "$cron_init" start >> "$LOG" 2>&1 </dev/null
 pidof crond >/dev/null 2>&1 || fail cron "cron не запустился ($cron_init)."
-ok cron "каждые 5 минут ($cron_file)"
+ok cron "каждую минуту ($cron_file)"
 
 # --- 7. first run ----------------------------------------------------------------------
 
 say "Первый запуск агента и Xray"
 run_limited 300 "первый запуск агента" "$AGENT_DIR/agent.sh" </dev/null \
-    || warn "первый запуск агента завершился с ошибкой или дольше 5 минут — cron повторит через 5 минут"
+    || warn "первый запуск агента завершился с ошибкой или дольше 5 минут — cron повторит через минуту"
 if ! pidof xray >/dev/null 2>&1; then
     run_limited 120 "запуск XKeen" xkeen -start >> "$LOG" 2>&1 </dev/null || true
 fi

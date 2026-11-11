@@ -22,7 +22,7 @@ type ProbeResult = {
   error: string;
 };
 type VpnVerdict = {
-  state: "ok" | "direct" | "slow" | "fail" | "unknown" | "none" | "expired";
+  state: "ok" | "direct" | "slow" | "fail" | "unknown" | "none" | "expired" | "paused";
   text: string;
   exit_ip?: string;
   direct_ip?: string;
@@ -197,6 +197,7 @@ const VPN_COLOR: Record<string, string> = {
   fail: "var(--bad-ink)",
   none: "var(--muted)",
   expired: "var(--muted)",
+  paused: "var(--muted)",
 };
 
 function VpnBadge({ vpn }: { vpn: VpnVerdict }) {
@@ -210,7 +211,9 @@ function VpnBadge({ vpn }: { vpn: VpnVerdict }) {
           ? "VPN не проверен"
           : vpn.state === "expired"
             ? "VPN выкл. — не оплачено"
-            : "VPN не работает";
+            : vpn.state === "paused"
+              ? "Напрямую (выбрал клиент)"
+              : "VPN не работает";
   return (
     <div className="vpn-badge" style={{ color: VPN_COLOR[vpn.state] }} title={vpn.text}>
       {label}
@@ -558,6 +561,18 @@ export default function Routers() {
   const [hostsOpen, setHostsOpen] = useState(false);
   const [hostsChecked, setHostsChecked] = useState<Record<string, boolean>>({});
   const [pulseOpen, setPulseOpen] = useState(false);
+  const [rolloutOpen, setRolloutOpen] = useState(false);
+  const [rolloutDraft, setRolloutDraft] = useState("");
+  const rollout = useQuery({
+    queryKey: ["routers", "agent-rollout"],
+    queryFn: () =>
+      api.get<{ all: boolean; device_ids: number[] }>("/api/admin/routers/config/agent-rollout"),
+    enabled: rolloutOpen,
+  });
+  useEffect(() => {
+    if (rolloutOpen && rollout.data)
+      setRolloutDraft(rollout.data.all ? "*" : rollout.data.device_ids.join(", "));
+  }, [rolloutOpen, rollout.data]);
   const [pulseDraft, setPulseDraft] = useState<PulseTarget[]>([]);
   const [pulseSaving, setPulseSaving] = useState(false);
   const pulseTargets = useQuery({
@@ -779,6 +794,29 @@ export default function Routers() {
     }
   }
 
+  async function saveRollout() {
+    const raw = rolloutDraft.trim();
+    const all = raw === "*";
+    const ids = all
+      ? []
+      : raw
+          .split(/[\s,;]+/)
+          .filter(Boolean)
+          .map((x) => Number(x));
+    if (ids.some((x) => !Number.isInteger(x) || x <= 0)) {
+      toast("Укажите номера роутеров через запятую или *");
+      return;
+    }
+    try {
+      await api.put("/api/admin/routers/config/agent-rollout", { all, device_ids: ids });
+      setRolloutOpen(false);
+      void qc.invalidateQueries({ queryKey: ["routers", "agent-rollout"] });
+      toast("✓");
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
   async function copy(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -801,6 +839,9 @@ export default function Routers() {
           </button>
           <button className="btn secondary" onClick={() => setPulseOpen(true)}>
             🎮 Игровой пульс
+          </button>
+          <button className="btn secondary" onClick={() => setRolloutOpen(true)}>
+            🧪 Агент v8
           </button>
           <button
             className="btn primary"
@@ -833,6 +874,9 @@ export default function Routers() {
           >
             <span className="rt-label">
               <b style={{ fontWeight: 500 }}>{d.label}</b>
+              <span className="dim mono" style={{ fontSize: 11, marginLeft: 6 }}>
+                #{d.id}
+              </span>
               {d.note && (
                 <div className="dim" style={{ fontSize: 11.5 }}>
                   {d.note}
@@ -1182,6 +1226,40 @@ export default function Routers() {
                 {t.cancel}
               </button>
               <button className="btn primary" onClick={() => void saveEligibleHosts()}>
+                {t.save}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {rolloutOpen && (
+        <Modal title="Агент v8: кому выдавать" onClose={() => setRolloutOpen(false)}>
+          <div className="grid" style={{ gap: 10 }}>
+            <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+              Новый агент (проверка раз в минуту, выбор локации и режим «Напрямую» из кабинета)
+              ставится роутерам из этого списка при их следующем полном цикле, то есть в течение
+              5 минут. Укажите номера роутеров (#… рядом с названием в списке) через запятую, «*» — всем.
+              Пусто — никому: остальные остаются на v7 и продолжают работать, изменения из
+              кабинета доходят до них за 5 минут. Роутер, уже получивший v8, назад не
+              откатывается.
+            </div>
+            <input
+              className="input mono"
+              placeholder="например: 3, 7 или *"
+              value={rolloutDraft}
+              onChange={(e) => setRolloutDraft(e.target.value)}
+            />
+            {rollout.isLoading && <span className="dim">…</span>}
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn secondary" onClick={() => setRolloutOpen(false)}>
+                {t.cancel}
+              </button>
+              <button
+                className="btn primary"
+                disabled={!rollout.data}
+                onClick={() => void saveRollout()}
+              >
                 {t.save}
               </button>
             </div>

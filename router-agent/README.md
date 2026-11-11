@@ -8,7 +8,8 @@ from the admin panel. Russian technician guide: [README.ru.md](README.ru.md).
   XKeen's interactive installer for that pinned version, with a watchdog), baseline settings
   (`routeOnly: false`, Xray error log), the agent, its cron job (in whichever crontab the
   router's crond actually reads), a first run, and an install report.
-- `agent.sh` — served at `/api/agent/agent.sh`; runs from cron every 5 minutes. Fetches
+- `agent.sh` — served at `/api/agent/agent.sh`; runs from cron every minute (a light
+  "has the config changed?" check; the full cycle still runs every 5 minutes). Fetches
   `/api/agent/config` (outbounds + the split-tunnel routing/DNS lifted from the Happ
   Xray-JSON subscription), keeps a new config only if `xray run -test` accepts it and Xray
   comes back up after the restart, self-updates when `X-Agent-Version` changes, and sends a
@@ -24,3 +25,7 @@ from the admin panel. Russian technician guide: [README.ru.md](README.ru.md).
 - `agent.conf.example` — the file the installer writes to `/opt/etc/cipherway-agent/agent.conf`.
 
 To ship an agent change to every router: bump `AGENT_VERSION` in `agent.sh` and deploy.
+
+## Agent versions only go forward
+
+Never roll the server back to an agent below v8: v7 has no light check while the cron line is already `*/1`, so it would run a full cycle every minute. Fix forward (v9, v10…). As a last resort v8 puts cron back to `*/5` before installing a version below 8. A new agent goes to a few routers first: admin «Роутеры → 🧪 Агент v8» (ids, or `*` for all).

@@ -71,4 +71,10 @@ input:focus { border-color: var(--acc); }
 }
 #toast.show { opacity: 1; }
 .center { text-align: center; }
+.rt-seg { font-weight: 700; padding: 13px 10px; }
+.rt-off { opacity: .55; cursor: default; }
+.rt-banner { margin-top: 12px; padding: 11px 13px; border: 1px solid var(--warn); border-radius: 10px; color: var(--warn); font-size: 13.5px; font-weight: 600; }
+.rt-applying { margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--acc); }
+.rt-loc.off { opacity: .45; cursor: default; }
+.rt-loc.pick { border-color: var(--acc); }
 .link { color: var(--acc); cursor: pointer; }

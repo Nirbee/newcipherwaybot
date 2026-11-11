@@ -366,6 +366,9 @@ async def test_scripts_are_served_and_config_advertises_agent_version(
 
     container.remnawave_client.hosts = [_host("host-a")]
     _, token = await _create_device(http, container, telegram_id=33, host_uuids=["host-a"])
+    await http.put(  # staged rollout: only listed routers are offered the new agent
+        "/api/admin/routers/config/agent-rollout", headers=await _login(http), json={"all": True}
+    )
     res = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
     assert res.headers["X-Agent-Version"] == version
 
@@ -662,7 +665,8 @@ async def test_auto_router_is_moved_to_what_works_from_its_isp(
     cfg = (await http.get("/api/agent/config", headers=auth)).json()
     proxies = sorted(o["tag"] for o in cfg["outbounds"] if o["tag"].startswith("proxy-"))
     cands = [o["tag"] for o in cfg["outbounds"] if o["tag"].startswith("cand-")]
-    assert len(proxies) == 2 and len(cands) == 1  # the third allowlisted server is probed only
+    # Every allowlisted server is in the static probe set, the assigned ones included.
+    assert len(proxies) == 2 and len(cands) == 3
 
     def probe(tag: str, ok: bool, secs: str = "") -> dict:
         return {
@@ -919,3 +923,334 @@ async def test_heartbeat_with_junk_pulse_keeps_only_known_targets_and_survives_i
     detail = (await http.get(f"/api/admin/routers/{device_id}", headers=admin)).json()
     assert len(detail["games"]["paths"]) <= 6
     assert [r["target"] for r in detail["games"]["rows"]] == ["aws-fra", "aws-sto", "rbx-fra"]
+
+
+# --- «Мой роутер»: «Напрямую», the location pin, the v8 light check ------------------------
+
+
+async def _set_device(container: ApiTestContainer, device_id: int, **fields: object) -> None:
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+        for name, value in fields.items():
+            setattr(device, name, value)
+        await uow.commit()
+
+
+async def _fetch(http: httpx.AsyncClient, container: ApiTestContainer, device_id: int, token: str):
+    container.redis.store.pop(f"agent:cfg:{device_id}", None)
+    return await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+
+
+async def test_direct_mode_config_sends_everything_direct_and_keeps_probing(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import datetime as dt
+
+    http, container = client
+    container.remnawave_client.hosts = [
+        _host("host-aa", remark="NL", address="203.0.113.1"),
+        _host("host-bb", remark="DE", address="203.0.113.2"),
+        _host("host-cc", remark="FI", address="203.0.113.3"),
+    ]
+    device_id, token = await _create_device(
+        http, container, telegram_id=50, host_uuids=["host-aa", "host-bb", "host-cc"]
+    )
+    vpn_cfg = (await _fetch(http, container, device_id, token)).json()
+
+    until = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
+    await _set_device(container, device_id, direct_until=until)
+    res = await _fetch(http, container, device_id, token)
+    cfg = res.json()
+    rules = cfg["routing"]["rules"]
+    client_rules = [r for r in rules if "inboundTag" not in r]
+    assert client_rules == [{"type": "field", "network": "tcp,udp", "outboundTag": "direct"}]
+    # Everything the agent measures with is still there: outbounds, ports, observatory.
+    assert [o["tag"] for o in cfg["outbounds"]] == [o["tag"] for o in vpn_cfg["outbounds"]]
+    assert cfg["inbounds"] == vpn_cfg["inbounds"]
+    assert cfg["burstObservatory"] == vpn_cfg["burstObservatory"]
+    assert any(i["tag"] == "cwtest-cand-host-aa" for i in cfg["inbounds"])
+
+    # The timer runs out: no sweep, just a different answer (etag and revision both move).
+    etag_on = res.headers["ETag"]
+    rev_on = res.headers["X-Config-Rev"]
+    await _set_device(
+        container, device_id, direct_until=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=5)
+    )
+    off = await _fetch(http, container, device_id, token)
+    assert off.headers["ETag"] != etag_on and off.headers["X-Config-Rev"] != rev_on
+    assert off.json()["routing"]["rules"] == vpn_cfg["routing"]["rules"]
+
+
+async def test_direct_mode_skips_vpn_alerts_and_autotune(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-aa", remark="NL", address="203.0.113.1")]
+    device_id, token = await _create_device(http, container, telegram_id=51, host_uuids=["host-aa"])
+    await _fetch(http, container, device_id, token)
+    await _set_device(container, device_id, direct_forever=True)
+    sent: list[str] = []
+
+    async def fake_report(_container, code: str, text: str, **_kw) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr("src.infrastructure.services.reports.send_topic_report", fake_report)
+    headers = {"Authorization": f"Bearer {token}"}
+    leak = {"diagnostics": _selftest({"ok": True, "ip": "91.0.0.1", "big": "ok"})}
+    for _ in range(3):
+        container.redis.store.pop(f"agent:hb:{device_id}", None)
+        assert (
+            await http.post("/api/agent/heartbeat", headers=headers, json=leak)
+        ).status_code == 204
+    assert sent == []  # the customer's own «Напрямую» is not a broken VPN
+    assert f"agent:tune:{device_id}" not in container.redis.store  # autotune left alone
+    assert f"agent:vpn:{device_id}" not in container.redis.store
+
+    row = (await http.get("/api/admin/routers", headers=await _login(http))).json()["items"][0]
+    assert row["vpn"]["state"] == "paused" and row["direct_active"] is True
+
+
+async def test_pin_survives_autotune_and_goes_when_host_leaves_the_allowlist(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [
+        _host("nl-host-1", remark="NL", address="203.0.113.1"),
+        _host("fi-host-2", remark="FI", address="203.0.113.2"),
+        _host("us-host-3", remark="US", address="203.0.113.3"),
+    ]
+    device_id, token = await _create_device(
+        http, container, telegram_id=52, host_uuids=["nl-host-1", "fi-host-2", "us-host-3"]
+    )
+    await _set_device(container, device_id, pinned_host_uuid="fi-host-2")
+    res = await _fetch(http, container, device_id, token)
+    proxies = [o["tag"] for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
+    assert proxies[0] == "proxy-fi-host-" and len(set(proxies)) == 2  # pin first, distinct backup
+
+    def probe(tag: str, secs: str) -> dict:
+        return {"name": tag, "ok": True, "ip": "x", "secs": secs, "big": "", "error": ""}
+
+    all_tags = [o["tag"] for o in res.json()["outbounds"] if o["tag"][:5] in ("proxy", "cand-")]
+    tests = [probe(t, "0.10" if "us" in t else "0.90") for t in all_tags]
+    container.redis.store.pop(f"agent:hb:{device_id}", None)
+    await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"diagnostics": {"agent_version": "8", "self_test": tests}},
+    )
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+    assert device.pinned_host_uuid == "fi-host-2"
+    assert device.primary_host_uuid == "us-host-3"  # autotune's own choice moved...
+    res = await _fetch(http, container, device_id, token)
+    proxies = [o["tag"] for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
+    assert proxies[0] == "proxy-fi-host-"  # ...but the pin still leads, and the backup differs
+    assert proxies[1] != proxies[0]
+
+    await http.put(
+        "/api/admin/routers/config/eligible-hosts",
+        headers=await _login(http),
+        json={"host_uuids": ["nl-host-1", "us-host-3"]},
+    )
+    res = await _fetch(http, container, device_id, token)
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+    assert device.pinned_host_uuid is None  # back to «Авто», no action from anyone
+    proxies = [o["tag"] for o in res.json()["outbounds"] if o["tag"].startswith("proxy-")]
+    assert proxies[0] != "proxy-fi-host-"
+
+
+async def test_failed_pin_notifies_owner_once_a_day_and_keeps_the_pin(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, str]] = []
+
+        async def notify_user(self, telegram_id: int, text: str) -> bool:
+            self.sent.append((telegram_id, text))
+            return True
+
+    notifier = _Recording()
+    container.notifier = notifier  # type: ignore[assignment]
+    container.remnawave_client.hosts = [
+        _host("nl-host-1", remark="NL", address="203.0.113.1"),
+        _host("fi-host-2", remark="FI", address="203.0.113.2"),
+    ]
+    device_id, token = await _create_device(
+        http, container, telegram_id=53, host_uuids=["nl-host-1", "fi-host-2"]
+    )
+    await _set_device(container, device_id, pinned_host_uuid="fi-host-2")
+    await _fetch(http, container, device_id, token)
+
+    tests = [{"name": "proxy-fi-host-", "ok": False, "ip": "", "secs": "", "big": "", "error": "x"}]
+
+    async def report() -> None:
+        container.redis.store.pop(f"agent:hb:{device_id}", None)
+        await http.post(
+            "/api/agent/heartbeat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"diagnostics": {"agent_version": "8", "self_test": tests}},
+        )
+
+    await report()
+    assert notifier.sent == []  # one bad report may be a blip
+    await report()
+    await report()
+    assert len(notifier.sent) == 1  # throttled: once a day, not every 5 minutes
+    assert notifier.sent[0][0] == 53 and "резервный" in notifier.sent[0][1]
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+    assert device.pinned_host_uuid == "fi-host-2"
+
+    # Location pings keep the time of the measurement for the cabinet.
+    pings = json.loads(container.redis.store[f"agent:locpings:{device_id}"])
+    assert pings["fi-host-2"]["ok"] is False and pings["fi-host-2"]["at"]
+
+
+async def test_static_candidates_keep_the_etag_when_the_primary_changes(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [
+        _host("host-aa", remark="NL", address="203.0.113.1"),
+        _host("host-bb", remark="DE", address="203.0.113.2"),
+        _host("host-cc", remark="FI", address="203.0.113.3"),
+    ]
+    device_id, token = await _create_device(
+        http, container, telegram_id=54, host_uuids=["host-aa", "host-bb", "host-cc"]
+    )
+    first = await _fetch(http, container, device_id, token)
+    second = await _fetch(http, container, device_id, token)
+    assert first.headers["ETag"] == second.headers["ETag"]  # cycle to cycle: no restart
+    cand = [o["tag"] for o in first.json()["outbounds"] if o["tag"].startswith("cand-")]
+    assert cand == ["cand-host-aa", "cand-host-bb", "cand-host-cc"]
+
+    # A different primary (autotune) reshuffles the proxies only — the probe set stays put.
+    async with container.uow() as uow:
+        device = await uow.router_devices.get(device_id)
+        current = (device.primary_host_uuid, device.backup_host_uuid)
+    await _set_device(
+        container, device_id, primary_host_uuid=current[1], backup_host_uuid=current[0]
+    )
+    moved = await _fetch(http, container, device_id, token)
+    assert [o["tag"] for o in moved.json()["outbounds"] if o["tag"].startswith("cand-")] == cand
+
+
+async def test_rev_endpoint_answers_without_panel_or_db_writes(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-aa", remark="NL", address="203.0.113.1")]
+    device_id, token = await _create_device(http, container, telegram_id=55, host_uuids=["host-aa"])
+    assert (await http.get("/api/agent/rev")).status_code == 401
+    headers = {"Authorization": f"Bearer {token}"}
+    cfg = await _fetch(http, container, device_id, token)
+    rev = cfg.headers["X-Config-Rev"]
+
+    async def no_panel(*_a: object, **_k: object) -> None:
+        raise AssertionError("/rev must not call the panel")
+
+    monkeypatch.setattr(container.remnawave_client, "get_hosts", no_panel)
+    monkeypatch.setattr(container.remnawave_client, "get_user", no_panel)
+
+    same = await http.get("/api/agent/rev", headers={**headers, "If-None-Match": f'"{rev}"'})
+    assert same.status_code == 304 and same.content == b""
+    assert (await http.get("/api/agent/rev", headers=headers)).status_code == 429
+
+    # Switching «Напрямую» in the cabinet shows up on the next check.
+    await _set_device(container, device_id, direct_forever=True)
+    container.redis.store.pop(f"agent:rev:{device_id}", None)
+    moved = await http.get("/api/agent/rev", headers={**headers, "If-None-Match": f'"{rev}"'})
+    assert moved.status_code == 200 and moved.text != rev
+
+
+async def test_older_agent_without_light_check_still_gets_direct_on_its_next_poll(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-aa", remark="NL", address="203.0.113.1")]
+    device_id, token = await _create_device(http, container, telegram_id=56, host_uuids=["host-aa"])
+    await _fetch(http, container, device_id, token)
+    await _set_device(container, device_id, direct_forever=True)
+    # A v7 agent: the same If-None-Match poll as ever, no /rev.
+    cfg = await http.get(
+        "/api/agent/config",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "If-None-Match": '"stale"',
+        },
+    )
+    assert cfg.status_code == 429  # its 5-minute cadence never hits the 50 s window...
+    container.redis.store.pop(f"agent:cfg:{device_id}", None)
+    cfg = await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    rules = [r for r in cfg.json()["routing"]["rules"] if "inboundTag" not in r]
+    assert rules == [{"type": "field", "network": "tcp,udp", "outboundTag": "direct"}]
+
+
+async def test_new_agent_goes_only_to_the_rollout_list(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    agent = await http.get("/api/agent/agent.sh")
+    current = agent.text.split('AGENT_VERSION="', 1)[1].split('"', 1)[0]
+    container.remnawave_client.hosts = [_host("host-a")]
+    first_id, first = await _create_device(http, container, telegram_id=60, host_uuids=["host-a"])
+    second_id, second = await _create_device(http, container, telegram_id=61, host_uuids=["host-a"])
+    admin = await _login(http)
+
+    async def advertised(device_id: int, token: str) -> str:
+        res = await _fetch(http, container, device_id, token)
+        return res.headers["X-Agent-Version"]
+
+    # Nothing listed: nobody is offered the new agent.
+    assert await advertised(first_id, first) == "7"
+    put = await http.put(
+        "/api/admin/routers/config/agent-rollout",
+        headers=admin,
+        json={"device_ids": [first_id]},
+    )
+    assert put.status_code == 200
+    got = (await http.get("/api/admin/routers/config/agent-rollout", headers=admin)).json()
+    assert got == {"all": False, "device_ids": [first_id]}
+    assert await advertised(first_id, first) == current
+    assert await advertised(second_id, second) == "7"
+
+    # A router that already runs it is never told to go back.
+    await http.put(
+        "/api/admin/routers/config/agent-rollout", headers=admin, json={"device_ids": []}
+    )
+    container.redis.store.pop(f"agent:hb:{first_id}", None)
+    await http.post(
+        "/api/agent/heartbeat",
+        headers={"Authorization": f"Bearer {first}"},
+        json={"diagnostics": {"agent_version": current}},
+    )
+    assert await advertised(first_id, first) == current
+
+    # «*» = every router.
+    await http.put("/api/admin/routers/config/agent-rollout", headers=admin, json={"all": True})
+    assert await advertised(second_id, second) == current
+
+
+async def test_config_fetch_window_lets_the_light_check_through(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """The light check asks /config right after /rev answers «changed» — possibly half a minute
+    after the full cycle's own fetch. The /config window must be shorter than that minute."""
+    http, container = client
+    container.remnawave_client.hosts = [_host("host-a")]
+    device_id, token = await _create_device(http, container, telegram_id=62, host_uuids=["host-a"])
+    windows: dict[str, int | None] = {}
+    original = container.redis.set
+
+    async def recording_set(key: str, value: str, nx: bool = False, ex: int | None = None) -> bool:
+        windows[key] = ex
+        return await original(key, value, nx=nx, ex=ex)
+
+    container.redis.set = recording_set  # type: ignore[method-assign]
+    await http.get("/api/agent/config", headers={"Authorization": f"Bearer {token}"})
+    assert windows[f"agent:cfg:{device_id}"] == 30

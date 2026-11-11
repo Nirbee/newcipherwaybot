@@ -271,6 +271,7 @@ def _to_panel_host(
         service_name=grpc.get("serviceName") or None,
         is_disabled=bool(host.get("isDisabled")),
         squad_uuids=squad_uuids,
+        tag=str(host["tag"]) if host.get("tag") else None,
     )
 
 
@@ -317,8 +318,11 @@ class RemnawaveHttpClient:
             else:
                 if resp.status_code in (401, 403):
                     log.warning(
-                        "panel rejected credentials", method=method, path=shown,
-                        status=resp.status_code, body=resp.text[:300],
+                        "panel rejected credentials",
+                        method=method,
+                        path=shown,
+                        status=resp.status_code,
+                        body=resp.text[:300],
                     )
                     raise RemnawaveAuthError(f"panel rejected credentials ({resp.status_code})")
                 if resp.status_code >= 500:
@@ -327,8 +331,12 @@ class RemnawaveHttpClient:
                     # payload shape and the body carries the real reason, e.g. a stack trace or
                     # validation message naming the offending field.
                     log.warning(
-                        "panel request failed", method=method, path=shown,
-                        status=resp.status_code, body=resp.text[:500], attempt=attempt,
+                        "panel request failed",
+                        method=method,
+                        path=shown,
+                        status=resp.status_code,
+                        body=resp.text[:500],
+                        attempt=attempt,
                     )
                     last_exc = RemnawaveTransientError(
                         f"panel {resp.status_code}: {resp.text[:200]}"
@@ -338,8 +346,11 @@ class RemnawaveHttpClient:
                     # "panel returned an error" message for the admin UI — the raw status/body
                     # (the actual field-name/route mismatch, if any) would otherwise be lost.
                     log.warning(
-                        "panel request rejected", method=method, path=shown,
-                        status=resp.status_code, body=resp.text[:300],
+                        "panel request rejected",
+                        method=method,
+                        path=shown,
+                        status=resp.status_code,
+                        body=resp.text[:300],
                     )
                     raise RemnawaveError(f"panel {resp.status_code}: {resp.text[:200]}")
                 else:
@@ -465,7 +476,9 @@ class RemnawaveHttpClient:
                     return panel_id
         log.warning(
             "panel v3: could not resolve numeric user id",
-            short_id=r.short_id, panel_id=r.panel_id, uuid=str(r.uuid) if r.uuid else None,
+            short_id=r.short_id,
+            panel_id=r.panel_id,
+            uuid=str(r.uuid) if r.uuid else None,
             telegram_id=r.telegram_id,
         )
         raise RemnawaveError("panel v3: cannot resolve the numeric user id from this reference")
@@ -495,9 +508,9 @@ class RemnawaveHttpClient:
             for field in fk_fields:
                 dropped = remaining.pop(field)
                 log.warning(
-                    "panel rejected a squad reference (FK violation, A039) — retrying"
-                    " without it",
-                    field=field, value=dropped,
+                    "panel rejected a squad reference (FK violation, A039) — retrying without it",
+                    field=field,
+                    value=dropped,
                 )
                 try:
                     return await self._request(method, _PATHS["users"], json=remaining)
@@ -880,7 +893,8 @@ class RemnawaveHttpClient:
             if inbound is None:
                 log.warning(
                     "host references an inbound not found in any squad",
-                    host_uuid=h.get("uuid"), inbound_uuid=ib_uuid,
+                    host_uuid=h.get("uuid"),
+                    inbound_uuid=ib_uuid,
                 )
                 continue
             excluded = {str(x) for x in (h.get("excludedInternalSquads") or [])}

@@ -9,6 +9,7 @@ until an admin explicitly adds hosts — see the "config/eligible-hosts" routes)
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -22,6 +23,7 @@ from sqlalchemy import func, select
 from src.application.dto.pricing import PurchaseRequest
 from src.application.services import game_pulse
 from src.application.services import router_onboarding as onboarding
+from src.application.services.router_config import is_router_location
 from src.core.enums import (
     PaymentGatewayType,
     PlanCategory,
@@ -39,12 +41,17 @@ from src.web.deps import get_container
 from src.web.routes.admin._common import OkOut, audit, iso
 from src.web.routes.admin.deps import AdminIdentity, require_admin
 from src.web.routes.agent import (
+    AGENT_ROLLOUT_KEY,
+    ELIGIBLE_STAMP_KEY,
     PULSE_DEVICES_KEY,
     ROUTER_XRAY_VERSION,
     agent_events,
+    agent_rollout,
     autotune_note,
     config_info,
     current_install_code,
+    device_is_direct,
+    device_is_online,
     drop_install_code,
     issue_install_code,
     pulse_device_ids,
@@ -60,19 +67,12 @@ router = APIRouter(prefix="/routers")
 # A single bot_config row (not a registered registry key — this doesn't belong on the generic
 # settings screen, only this one purpose-built UI): a JSON list of eligible panel host uuids.
 _ELIGIBLE_HOSTS_KEY = "ROUTER_ELIGIBLE_HOSTS"
-_STALE_AFTER = dt.timedelta(minutes=15)
 
 
 async def _eligible_host_uuids(uow: UnitOfWork) -> set[str]:
     row = await uow.bot_config.find_one(key=_ELIGIBLE_HOSTS_KEY)
     value = row.value if row is not None else []
     return {str(v) for v in (value or [])}
-
-
-def _is_online(device: RouterDevice) -> bool:
-    if device.status is not RouterDeviceStatus.ONLINE or device.last_seen_at is None:
-        return False
-    return dt.datetime.now(dt.UTC) - device.last_seen_at < _STALE_AFTER
 
 
 async def _subscription_label(uow: UnitOfWork, subscription_id: int) -> str | None:
@@ -115,9 +115,13 @@ def _row(device: RouterDevice, sub_label: str | None, sub: Any = None) -> dict[s
         "awaiting_claim": device.claim_code is not None,
         "mode": device.mode.value,
         "status": device.status.value,
-        "is_online": _is_online(device),
+        "is_online": device_is_online(device),
         "primary_host_uuid": device.primary_host_uuid,
         "backup_host_uuid": device.backup_host_uuid,
+        "pinned_host_uuid": device.pinned_host_uuid,
+        "direct_active": device_is_direct(device),
+        "direct_until": iso(device.direct_until),
+        "direct_forever": device.direct_forever,
         "config_etag": device.config_etag,
         "last_seen_at": iso(device.last_seen_at),
         "xray_version": device.xray_version,
@@ -129,6 +133,7 @@ def _row(device: RouterDevice, sub_label: str | None, sub: Any = None) -> dict[s
             device.diagnostics,
             device.external_ip,
             subscription_live(sub) if sub is not None else None,
+            direct_mode=device_is_direct(device),
         ),
         "note": device.note,
         "created_at": iso(device.created_at),
@@ -186,7 +191,7 @@ async def get_eligible_hosts(container: AppContainer = Depends(get_container)) -
                 "eligible": h.uuid in eligible,
             }
             for h in hosts
-            if h.protocol == "vless"
+            if is_router_location(h)
         ]
     }
 
@@ -205,6 +210,38 @@ async def set_eligible_hosts(
         uuids = list(dict.fromkeys(body.host_uuids))  # de-dupe, keep order
         await uow.bot_config.upsert(_ELIGIBLE_HOSTS_KEY, uuids)
         await audit(uow, identity, "routers.eligible_hosts", None, count=len(uuids))
+        await uow.commit()
+    # Picked up by the per-minute check right away, not after its 30-second cache.
+    with contextlib.suppress(Exception):
+        await container.redis.delete(ELIGIBLE_STAMP_KEY)
+    return OkOut()
+
+
+# --- staged agent rollout (agent v8) ----------------------------------------------------------
+
+
+@router.get("/config/agent-rollout")
+async def get_agent_rollout(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+    everyone, ids = await agent_rollout(container)
+    return {"all": everyone, "device_ids": sorted(ids)}
+
+
+class AgentRolloutIn(BaseModel):
+    all: bool = False
+    device_ids: list[int] = Field(default_factory=list, max_length=5000)
+
+
+@router.put("/config/agent-rollout")
+async def set_agent_rollout(
+    body: AgentRolloutIn,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> OkOut:
+    """Which routers get the new agent: «*» = all, else these ids (empty = nobody)."""
+    value: Any = "*" if body.all else sorted({i for i in body.device_ids if i > 0})
+    async with container.uow() as uow:
+        await uow.bot_config.upsert(AGENT_ROLLOUT_KEY, value)
+        await audit(uow, identity, "routers.agent_rollout", None, value=value)
         await uow.commit()
     return OkOut()
 

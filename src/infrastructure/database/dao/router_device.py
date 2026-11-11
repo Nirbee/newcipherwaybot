@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from src.core.enums import RouterDeviceStatus
 from src.infrastructure.database.dao.base import BaseDAO
 from src.infrastructure.database.models.router_device import RouterDevice
+from src.infrastructure.database.models.subscription import Subscription
 
 
 class RouterDeviceDAO(BaseDAO[RouterDevice]):
@@ -17,6 +18,19 @@ class RouterDeviceDAO(BaseDAO[RouterDevice]):
 
     async def by_token_hash(self, token_hash: str) -> RouterDevice | None:
         return await self.find_one(token_hash=token_hash)
+
+    async def list_for_user(self, user_id: int) -> Sequence[RouterDevice]:
+        """A customer's routers (through the subscription they ride on), revoked ones excluded."""
+        stmt = (
+            select(RouterDevice)
+            .join(Subscription, RouterDevice.subscription_id == Subscription.id)
+            .where(
+                Subscription.user_id == user_id,
+                RouterDevice.status != RouterDeviceStatus.REVOKED,
+            )
+            .order_by(RouterDevice.id)
+        )
+        return (await self.session.scalars(stmt)).all()
 
     async def list_stale(self, older_than: dt.datetime) -> Sequence[RouterDevice]:
         """ONLINE devices whose last heartbeat is older than ``older_than`` — due to flip

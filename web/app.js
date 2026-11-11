@@ -395,6 +395,8 @@ async function cabinetView() {
     sub && sub.expire_at ? el("div", { class: "li" }, [el("span", { class: "muted" }, "Действует до"), el("b", {}, new Date(sub.expire_at).toLocaleDateString("ru-RU"))]) : null,
   ]));
 
+  root.append(routersBlock(me.user.language));
+
   if (usable && sub.subscription_url) {
     root.append(el("div", { class: "card" }, [
       el("h2", {}, "Подключение"),
@@ -424,6 +426,157 @@ async function cabinetView() {
     el("span", { class: "link", onclick: async () => { try { await api("POST", `${A}/logout`, { refresh_token: store.refresh }); } catch {} store.clear(); route("auth"); } }, "Выйти"),
   ]));
   return root;
+}
+
+/* ---------- «Мой роутер» ---------- */
+
+const RT_TEXTS = {
+  ru: {
+    title: "Мой роутер", on: "на связи", off: "не на связи", vpn: "VPN", direct: "Напрямую",
+    goFor: "Напрямую на:", d1h: "1 час", dToday: "До конца дня", dForever: "Пока не выключу",
+    until: (t) => `VPN выключен, включится в ${t}`, forever: "VPN выключен, пока вы его не включите",
+    home: (n, s) => `Роутер «${n}» — ${s}`,
+    applying: "Применяется…", later: "Применится, когда роутер выйдет на связь",
+    loc: "Локация", auto: "Авто (рекомендуем)", now: "сейчас",
+    locWarn: "Смена локации на несколько секунд оборвёт интернет дома.",
+    switchTo: (n) => `Переключить на «${n}»`,
+    ms: "мс", noPing: "нет замера", unavailable: "недоступна",
+    noSub: "Подписка закончилась — продлите её, чтобы управлять роутером.",
+    forced: "Локацию этого роутера задаёт администратор.",
+    noLocs: "Список локаций пока недоступен.", tooOften: "Слишком часто — попробуйте позже",
+  },
+  en: {
+    title: "My router", on: "online", off: "offline", vpn: "VPN", direct: "Direct",
+    goFor: "Go direct for:", d1h: "1 hour", dToday: "Till end of day", dForever: "Until I turn it off",
+    until: (t) => `VPN is off, turns back on at ${t}`, forever: "VPN is off until you turn it back on",
+    home: (n, s) => `Router “${n}” — ${s}`,
+    applying: "Applying…", later: "Will apply once the router comes online",
+    loc: "Location", auto: "Auto (recommended)", now: "now",
+    locWarn: "Changing location drops the home internet for a few seconds.",
+    switchTo: (n) => `Switch to “${n}”`,
+    ms: "ms", noPing: "not measured", unavailable: "unavailable",
+    noSub: "Your subscription has ended — renew it to manage the router.",
+    forced: "The location of this router is set by the administrator.",
+    noLocs: "The location list is unavailable right now.", tooOften: "Too many changes — try again later",
+  },
+};
+let RT = RT_TEXTS.ru;
+const rt = { items: [], dur: "1h", pick: null, poll: null, pollUntil: 0, holder: null };
+
+function rtClock(iso) {
+  return new Date(iso).toLocaleTimeString(RT === RT_TEXTS.ru ? "ru-RU" : "en-GB", { hour: "2-digit", minute: "2-digit" });
+}
+function rtBanner(r) {
+  if (r.vpn_mode !== "direct") return "";
+  return r.direct_until && !r.direct_forever ? RT.until(rtClock(r.direct_until)) : RT.forever;
+}
+function rtError(e) { return e && e.status === 429 ? RT.tooOften : (e && e.message) || "Ошибка"; }
+
+async function rtRefresh() {
+  try {
+    const d = await api("GET", `${C}/routers`, null, true);
+    rt.items = d.items || [];
+    rtDraw();
+    if (rt.items.some((r) => !r.applied)) rtPollStart();
+  } catch {}
+}
+// Until the agent reports back: every 5 s, for at most 6 minutes (a v7 agent takes up to 5).
+function rtPollStart() {
+  rt.pollUntil = Date.now() + 6 * 60 * 1000;
+  if (rt.poll) return;
+  rt.poll = setInterval(async () => {
+    if (document.hidden) return;
+    if (Date.now() > rt.pollUntil || !rt.items.some((r) => !r.applied)) {
+      clearInterval(rt.poll);
+      rt.poll = null;
+      rtDraw();
+      return;
+    }
+    await rtRefresh();
+  }, 5000);
+}
+async function rtSetDirect(r, duration) {
+  try {
+    const d = await api("POST", `${C}/routers/${r.id}/direct`, { duration, tz_offset_minutes: -new Date().getTimezoneOffset() }, true);
+    Object.assign(r, { vpn_mode: d.vpn_mode, direct_until: d.direct_until, direct_forever: d.direct_forever, applied: false });
+    rtDraw();
+    rtPollStart();
+  } catch (e) { toast(rtError(e)); }
+}
+async function rtSetLocation(r, pick) {
+  try {
+    await api("POST", `${C}/routers/${r.id}/location`, { host: pick.id }, true);
+    rt.pick = null;
+    r.location = pick.id ? { auto: false, id: pick.id, name: pick.name } : { auto: true, id: null, name: null };
+    r.applied = false;
+    rtDraw();
+    rtPollStart();
+  } catch (e) { toast(rtError(e)); }
+}
+function rtLocations(r) {
+  const cur = r.location || { auto: true };
+  const pick = rt.pick && rt.pick.routerId === r.id ? rt.pick : null;
+  const row = (id, name, meta, off, on) => el("div", {
+    class: `plan rt-loc${on ? " on" : ""}${off ? " off" : ""}${pick && pick.id === id ? " pick" : ""}`,
+    onclick: () => {
+      if (off) return;
+      rt.pick = on ? null : { routerId: r.id, id, name };
+      rtDraw();
+    },
+  }, [el("span", { class: "name" }, name), el("span", { class: "muted" }, meta)]);
+  const box = el("div", { style: "margin-top:14px" }, [el("div", { class: "cap" }, RT.loc)]);
+  if (!(r.locations || []).length) box.append(el("div", { class: "hint" }, RT.noLocs));
+  box.append(row(null, RT.auto, cur.auto && cur.name ? `${RT.now}: ${cur.name}` : "", false, cur.auto));
+  (r.locations || []).forEach((l) => {
+    const meta = !l.available ? RT.unavailable : l.ping_ms != null ? `${l.ping_ms} ${RT.ms}` : RT.noPing;
+    box.append(row(l.id, l.name, meta, !l.available, !cur.auto && cur.id === l.id));
+  });
+  box.append(el("div", { class: "hint" }, RT.locWarn));
+  if (pick) {
+    box.append(el("button", { class: "btn primary", disabled: r.can_manage ? null : "", onclick: () => rtSetLocation(r, pick) }, RT.switchTo(pick.name)));
+  }
+  return box;
+}
+function rtCard(r) {
+  const direct = r.vpn_mode === "direct";
+  const locked = !r.can_manage;
+  const seg = (on, text, action) => el("div", { class: `tab rt-seg${on ? " on" : ""}${locked ? " rt-off" : ""}`, onclick: () => { if (!on && !locked) action(); } }, text);
+  const card = el("div", { class: "card" }, [
+    el("div", { class: "li" }, [el("b", {}, r.label), el("span", { class: `pill ${r.online ? "ok" : "warn"}` }, r.online ? RT.on : RT.off)]),
+    el("div", { class: "tabs", style: "margin-top:10px" }, [
+      seg(!direct, RT.vpn, () => rtSetDirect(r, "off")),
+      seg(direct, RT.direct, () => rtSetDirect(r, rt.dur)),
+    ]),
+  ]);
+  const banner = rtBanner(r);
+  if (banner) card.append(el("div", { class: "rt-banner" }, banner));
+  if (!direct && !locked) {
+    const durs = el("div", { class: "durs" });
+    [["1h", RT.d1h], ["today", RT.dToday], ["forever", RT.dForever]].forEach(([id, text]) => {
+      durs.append(el("div", { class: `dur${rt.dur === id ? " on" : ""}`, onclick: () => { rt.dur = id; rtDraw(); } }, text));
+    });
+    card.append(el("div", { class: "cap", style: "margin-top:12px" }, RT.goFor), durs);
+  }
+  if (r.applied === false) card.append(el("div", { class: "rt-applying" }, rt.poll ? RT.applying : RT.later));
+  if (locked) card.append(el("div", { class: "hint", style: "color:var(--warn)" }, RT.noSub));
+  if (r.can_choose_location) card.append(rtLocations(r));
+  else card.append(el("div", { class: "hint", style: "margin-top:12px" }, RT.forced + (r.location && r.location.name ? ` ${RT.now}: ${r.location.name}` : "")));
+  return card;
+}
+function rtDraw() {
+  if (!rt.holder) return;
+  rt.holder.innerHTML = "";
+  if (!rt.items.length) return;
+  rt.items.filter((r) => r.vpn_mode === "direct").forEach((r) => {
+    rt.holder.append(el("div", { class: "rt-banner", style: "margin:0 0 14px" }, RT.home(r.label, rtBanner(r))));
+  });
+  rt.holder.append(el("h2", { style: "font-size:16px;margin:4px 0 10px" }, RT.title), ...rt.items.map(rtCard));
+}
+function routersBlock(language) {
+  RT = language === "en" ? RT_TEXTS.en : RT_TEXTS.ru;
+  rt.holder = el("div", {});
+  rtRefresh();
+  return rt.holder;
 }
 
 /* ---------- account & sign-in methods (linking) ---------- */

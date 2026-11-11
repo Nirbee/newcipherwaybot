@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -31,15 +32,20 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from src.application.services import game_pulse
 from src.application.services.router_config import (
     CANDIDATE_PREFIX,
-    MAX_CANDIDATES,
     ProbeScore,
     RoutingTemplate,
     autotune,
     build_outbounds,
     candidate_tag,
     config_etag,
+    config_revision,
+    direct_active,
+    effective_assignment,
+    eligible_stamp,
     hosts_within_squads,
     is_stub_subscription,
+    location_hosts,
+    pin_still_allowed,
     proxies_from_subscription,
     proxy_tag,
     routing_template_from_subscription,
@@ -61,6 +67,9 @@ short_router = APIRouter(tags=["agent"])
 # A hair under the agent's 5-minute poll interval's floor — generous margin for a misbehaving
 # script or clock drift, never tight enough to bite a legitimately-timed poll.
 _RATE_LIMIT_SECONDS = 50
+# /config: v8's light check fetches it the moment /rev says something changed, possibly ~35 s
+# after the full cycle's own fetch — a customer's switch must not wait a whole extra minute.
+_CONFIG_RATE_LIMIT_SECONDS = 30
 _LAST_ERROR_MAX = 512
 _TEMPLATE_TTL_SECONDS = 600
 _DIAGNOSTICS_MAX = 16_384
@@ -293,9 +302,11 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def _rate_limit_ok(container: AppContainer, key: str) -> bool:
+async def _rate_limit_ok(
+    container: AppContainer, key: str, seconds: int = _RATE_LIMIT_SECONDS
+) -> bool:
     try:
-        return bool(await container.redis.set(key, "1", nx=True, ex=_RATE_LIMIT_SECONDS))
+        return bool(await container.redis.set(key, "1", nx=True, ex=seconds))
     except Exception:
         return True  # a redis hiccup must not block a legitimate poll
 
@@ -364,6 +375,48 @@ async def _eligible_hosts(container: AppContainer) -> set[str]:
     return {str(v) for v in ((row.value if row is not None else None) or [])}
 
 
+ELIGIBLE_STAMP_KEY = "agent:elig:stamp"
+_ELIGIBLE_STAMP_TTL_SECONDS = 30
+
+
+async def _cached_eligible_stamp(container: AppContainer) -> str:
+    """The allowlist's fingerprint for the per-minute /rev check, cached so that check costs no
+    bot_config query; saving the list in the admin drops the key (see set_eligible_hosts)."""
+    stamp = await _redis_get(container, ELIGIBLE_STAMP_KEY)
+    if stamp:
+        return stamp
+    stamp = eligible_stamp(await _eligible_hosts(container))
+    await _redis_set(container, ELIGIBLE_STAMP_KEY, stamp, _ELIGIBLE_STAMP_TTL_SECONDS)
+    return stamp
+
+
+def device_is_direct(device: RouterDevice, now: dt.datetime | None = None) -> bool:
+    return direct_active(device.direct_forever, device.direct_until, now or dt.datetime.now(dt.UTC))
+
+
+def device_revision(device: RouterDevice, stamp: str, now: dt.datetime | None = None) -> str:
+    """What /rev compares and /config stores: changes when a switch this router must react to
+    changes (or a «Напрямую» timer runs out) — see router_config.config_revision."""
+    return config_revision(
+        mode=device.mode.value,
+        pinned=device.pinned_host_uuid if device.mode is RouterDeviceMode.AUTO else None,
+        primary=device.primary_host_uuid,
+        backup=device.backup_host_uuid,
+        direct_on=device_is_direct(device, now),
+        eligible_stamp=stamp,
+    )
+
+
+# Same window the admin list uses: a router that hasn't reported for this long is offline.
+DEVICE_STALE_AFTER = dt.timedelta(minutes=15)
+
+
+def device_is_online(device: RouterDevice) -> bool:
+    if device.status is not RouterDeviceStatus.ONLINE or device.last_seen_at is None:
+        return False
+    return dt.datetime.now(dt.UTC) - device.last_seen_at < DEVICE_STALE_AFTER
+
+
 async def config_info(container: AppContainer, device_id: int) -> dict[str, Any] | None:
     """What the last /config actually gave this router: which servers, from where, and any
     substitution warning — shown on the router card."""
@@ -387,6 +440,53 @@ async def pulse_device_ids(container: AppContainer) -> set[int]:
         except (TypeError, ValueError):
             continue
     return ids
+
+
+# --- staged agent rollout -----------------------------------------------------------------
+# Which routers are offered the current agent (v8) — a bot_config row like the pulse list: a list
+# of device ids, or "*" for every router. Nothing listed = nobody: the rest keep being told the
+# previous version, which this server still fully serves (a v7 agent sees «7» and stays put).
+AGENT_ROLLOUT_KEY = "ROUTER_AGENT_V8_DEVICES"
+PREVIOUS_AGENT_VERSION = "7"
+
+
+async def agent_rollout(container: AppContainer) -> tuple[bool, set[int]]:
+    """(everyone, device ids)."""
+    async with container.uow() as uow:
+        row = await uow.bot_config.find_one(key=AGENT_ROLLOUT_KEY)
+    value = row.value if row is not None else None
+    if value == "*" or (isinstance(value, list) and "*" in value):
+        return True, set()
+    ids: set[int] = set()
+    for v in value if isinstance(value, list) else []:
+        try:
+            ids.add(int(v))
+        except (TypeError, ValueError):
+            continue
+    return False, ids
+
+
+def _reported_agent_version(device: RouterDevice) -> int:
+    try:
+        return int(str((device.diagnostics or {}).get("agent_version") or "0"))
+    except ValueError:
+        return 0
+
+
+async def advertised_agent_version(container: AppContainer, device: RouterDevice) -> str:
+    """X-Agent-Version for this router. A router already on the current agent is never told an
+    older one (the script served is always the current one, so that would only fail and log);
+    the others get it only once they're in the rollout list."""
+    if not _AGENT_VERSION.isdigit():
+        return _AGENT_VERSION
+    if _reported_agent_version(device) >= int(_AGENT_VERSION):
+        return _AGENT_VERSION
+    try:
+        everyone, ids = await agent_rollout(container)
+    except Exception:
+        log.warning("agent rollout list unavailable", device_id=device.id)
+        return PREVIOUS_AGENT_VERSION
+    return _AGENT_VERSION if everyone or device.id in ids else PREVIOUS_AGENT_VERSION
 
 
 async def pulse_targets(container: AppContainer) -> list[dict[str, str]]:
@@ -507,7 +607,7 @@ async def get_config(
     device: RouterDevice = Depends(require_device),
     container: AppContainer = Depends(get_container),
 ) -> Any:
-    if not await _rate_limit_ok(container, f"agent:cfg:{device.id}"):
+    if not await _rate_limit_ok(container, f"agent:cfg:{device.id}", _CONFIG_RATE_LIMIT_SECONDS):
         raise HTTPException(429, "too many requests")
 
     async with container.uow() as uow:
@@ -530,12 +630,6 @@ async def get_config(
         try:
             panel_user = await container.remnawave_client.get_user(panel_ref)
             all_hosts = await container.remnawave_client.get_hosts()
-            by_uuid = {h.uuid: h for h in all_hosts}
-            hosts = [
-                by_uuid[u]
-                for u in (device.primary_host_uuid, device.backup_host_uuid)
-                if u and u in by_uuid
-            ]
         except Exception as exc:
             log.warning("agent config: panel unavailable", device_id=device.id, error=str(exc))
             raise HTTPException(503, "panel temporarily unavailable") from exc
@@ -563,6 +657,35 @@ async def get_config(
     )
     subscription_outbounds = None
     eligible = await _eligible_hosts(container)
+    now = dt.datetime.now(dt.UTC)
+    is_auto = device.mode is RouterDeviceMode.AUTO
+    if (
+        is_auto
+        and device.pinned_host_uuid
+        and not pin_still_allowed(device.pinned_host_uuid, all_hosts, eligible, user_squads)
+    ):
+        # The location left the allowlist (or the customer's plan no longer grants it): the
+        # router returns to «Авто» here, in one place, instead of on every read of the pin.
+        async with container.uow() as uow:
+            fresh_device = await uow.router_devices.get(device.id)
+            if fresh_device is not None:
+                fresh_device.pinned_host_uuid = None
+                await uow.commit()
+        log.info("router location unpinned", device_id=device.id)
+        device.pinned_host_uuid = None
+    # Static on purpose: see location_hosts() — this set must not depend on the current primary.
+    locations = location_hosts(all_hosts, eligible, user_squads)
+    by_uuid = {h.uuid: h for h in all_hosts}
+    hosts = [
+        by_uuid[u]
+        for u in effective_assignment(
+            device.pinned_host_uuid if is_auto else None,
+            device.primary_host_uuid,
+            device.backup_host_uuid,
+            [h.uuid for h in locations],
+        )
+        if u and u in by_uuid
+    ]
     if sub_proxies:
         pick = select_subscription_outbounds(
             sub_proxies, hosts, preferred=[h for h in all_hosts if h.uuid in eligible]
@@ -574,6 +697,9 @@ async def get_config(
             "warning": pick.warning,
             "tags": pick.tags,
         }
+        # The tags really in the config: a server substituted for one outside the customer's
+        # squads is scored as itself, not left without a score.
+        proxy_hosts = dict(pick.hosts)
     else:
         hosts, squad_warning = hosts_within_squads(
             hosts, user_squads, [h for h in all_hosts if h.uuid in eligible]
@@ -584,25 +710,14 @@ async def get_config(
             "tags": {f"proxy-{h.uuid[:8]}": h.remark for h in hosts},
             "warning": squad_warning,
         }
+        proxy_hosts = {proxy_tag(h.uuid): h.uuid for h in hosts}
     info["split_rules"] = len(template.rules) if template else 0
 
-    # AUTO routers: a light probe through other allowlisted servers the customer's squads grant,
-    # so the heartbeat can move the router to what works best from its ISP (autotune()).
-    candidates: list[Any] = []
-    if device.mode is RouterDeviceMode.AUTO:
-        assigned = {h.uuid for h in hosts}
-        granted = set(user_squads)
-        candidates = [
-            h
-            for h in all_hosts
-            if h.uuid in eligible
-            and h.uuid not in assigned
-            and not h.is_disabled
-            and h.protocol == "vless"
-            and (not granted or not h.squad_uuids or granted & set(h.squad_uuids))
-        ][:MAX_CANDIDATES]
+    # AUTO routers: a light probe through every location, so the heartbeat can move the router
+    # to what works best from its ISP (autotune()) and the cabinet can show a ping per location.
+    candidates: list[Any] = locations if is_auto else []
     info["tag_hosts"] = {
-        **{proxy_tag(h.uuid): h.uuid for h in hosts},
+        **proxy_hosts,
         **{candidate_tag(h.uuid): h.uuid for h in candidates},
     }
     info["tags"] = {
@@ -623,8 +738,11 @@ async def get_config(
         template=template,
         subscription_outbounds=subscription_outbounds,
         candidates=candidates,
+        direct_mode=device_is_direct(device, now),
     )
     etag = config_etag(config)
+    rev = device_revision(device, eligible_stamp(eligible), now)
+    advertised = await advertised_agent_version(container, device)
     # v7 agents re-read /pulse when this changes, so switching the pulse on in the card takes
     # effect on the next poll instead of within the hour. Never allowed to cost the config.
     try:
@@ -634,21 +752,53 @@ async def get_config(
         pulse_rev = ""
 
     if if_none_match and if_none_match.strip('"') == etag:
+        # Writes only when the revision moved: a 304 is the usual answer and must stay free.
+        if device.config_rev != rev:
+            async with container.uow() as uow:
+                fresh = await uow.router_devices.get(device.id)
+                if fresh is not None:
+                    fresh.config_rev = rev
+                    await uow.commit()
         return Response(
             status_code=304,
-            headers={"X-Agent-Version": _AGENT_VERSION, "X-Pulse-Rev": pulse_rev},
+            headers={
+                "X-Agent-Version": advertised,
+                "X-Pulse-Rev": pulse_rev,
+                "X-Config-Rev": rev,
+            },
         )
 
     async with container.uow() as uow:
         fresh = await uow.router_devices.get(device.id)
         if fresh is not None:
             fresh.config_etag = etag
+            fresh.config_rev = rev
             await uow.commit()
 
     response.headers["ETag"] = f'"{etag}"'
-    response.headers["X-Agent-Version"] = _AGENT_VERSION
+    response.headers["X-Agent-Version"] = advertised
     response.headers["X-Pulse-Rev"] = pulse_rev
+    response.headers["X-Config-Rev"] = rev
     return config
+
+
+@router.get("/rev", response_class=PlainTextResponse)
+async def config_revision_check(
+    if_none_match: str | None = Header(None, alias="If-None-Match"),
+    device: RouterDevice = Depends(require_device),
+    container: AppContainer = Depends(get_container),
+) -> Response:
+    """Agent v8's once-a-minute question: has anything this router must react to changed? Reads
+    the device row (already loaded for auth) and a cached allowlist fingerprint — no panel call
+    and no DB write — so polling this every minute stays cheap. 304 = nothing to do; 200 = the
+    agent fetches /config as usual. Older agents never call it and pick changes up from /config
+    on their 5-minute cycle."""
+    if not await _rate_limit_ok(container, f"agent:rev:{device.id}"):
+        raise HTTPException(429, "too many requests")
+    rev = device_revision(device, await _cached_eligible_stamp(container))
+    if if_none_match and if_none_match.strip('"') == rev:
+        return Response(status_code=304, headers={"X-Config-Rev": rev})
+    return PlainTextResponse(rev, headers={"X-Config-Rev": rev})
 
 
 @router.get("/pulse")
@@ -709,6 +859,8 @@ def vpn_verdict(
     diagnostics: dict[str, Any] | None,
     isp_ip: str | None = None,
     sub_live: bool | None = None,
+    *,
+    direct_mode: bool = False,
 ) -> dict[str, Any] | None:
     """Plain-language verdict from the agent's self-test (agent v3+), or None without one.
 
@@ -718,7 +870,8 @@ def vpn_verdict(
     ``slow``    — exits via VPN, but large transfers stall (ISP throttling to that server);
     ``fail``    — nothing passes through the balancer at all;
     ``unknown`` — the balancer passed, but its exit address can't be tied to a server and the
-                  router's own address is unknown, so "works" can't be confirmed.
+                  router's own address is unknown, so "works" can't be confirmed;
+    ``paused``  — the customer switched «Напрямую» on: VPN is off on purpose, nothing is broken.
 
     ``isp_ip`` (the router's address from its heartbeat) stands in for the direct probe's
     address when that probe itself failed — without either, a balancer that fell back to
@@ -736,14 +889,30 @@ def vpn_verdict(
             "candidates": [],
         }
     tests = (diagnostics or {}).get("self_test")
-    if not isinstance(tests, list) or not tests:
-        return None
-    by_name = {str(t.get("name")): t for t in tests if isinstance(t, dict)}
+    by_name = {
+        str(t.get("name")): t
+        for t in (tests if isinstance(tests, list) else [])
+        if isinstance(t, dict)
+    }
     direct = by_name.get("direct") or {}
     balancer = by_name.get("balancer")
     servers = [t for name, t in by_name.items() if name.startswith("proxy-")]
     candidates = [t for name, t in by_name.items() if name.startswith(CANDIDATE_PREFIX)]
     direct_ip = str(direct.get("ip") or "")
+    if direct_mode:
+        # Not a fault: «direct» below would read as a broken VPN. The probes keep running, so
+        # the per-server results stay useful on the card.
+        return {
+            "state": "paused",
+            "text": "Клиент включил режим «Напрямую» — VPN намеренно выключен",
+            "exit_ip": "",
+            "direct_ip": direct_ip,
+            "routed": None,
+            "servers": servers,
+            "candidates": candidates,
+        }
+    if not isinstance(tests, list) or not tests:
+        return None
     own_ip = direct_ip or str(isp_ip or "")
     server_ips = {str(t.get("ip")) for t in servers if t.get("ok") and t.get("ip")}
     if balancer is None:
@@ -829,6 +998,10 @@ def _probe_scores(
         host_uuid = tag_hosts.get(str(t.get("name")))
         if not host_uuid:
             continue
+        if host_uuid in scores and str(t.get("name")).startswith(CANDIDATE_PREFIX):
+            # The same server's «proxy-*» probe carries the big-download check; agents below v8
+            # also probe its «cand-*» twin (the static set includes the assigned servers).
+            continue
         try:
             secs = float(t.get("secs") or "") if t.get("ok") else None
         except ValueError:
@@ -841,6 +1014,78 @@ def _probe_scores(
             big_ok=None if not big else big == "ok",
         )
     return scores
+
+
+LOCATION_PINGS_TTL_SECONDS = 7 * 86400
+
+
+async def location_pings(container: AppContainer, device_id: int) -> dict[str, dict[str, Any]]:
+    """Per location: {host uuid: {ok, ms, at}} — the last measurement from this router."""
+    raw = await _redis_get(container, f"agent:locpings:{device_id}")
+    try:
+        value = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def _store_location_pings(
+    container: AppContainer, device_id: int, diagnostics: dict[str, Any] | None
+) -> None:
+    """Candidate probes run only every few cycles (agent v8), so unlike the self-test in
+    ``diagnostics`` the last result per location is kept, with its time, between reports."""
+    tag_hosts = (await config_info(container, device_id) or {}).get("tag_hosts") or {}
+    tests = (diagnostics or {}).get("self_test")
+    if not tag_hosts or not isinstance(tests, list):
+        return
+    known = set(tag_hosts.values())
+    pings = {u: p for u, p in (await location_pings(container, device_id)).items() if u in known}
+    at = dt.datetime.now(dt.UTC).isoformat()
+    measured = False
+    for t in tests:
+        host_uuid = tag_hosts.get(str(t.get("name"))) if isinstance(t, dict) else None
+        if not host_uuid:
+            continue
+        measured = True
+        ms = None
+        if t.get("ok"):
+            try:
+                secs = float(t.get("secs") or "")
+            except (TypeError, ValueError):
+                secs = math.nan
+            ms = round(secs * 1000) if math.isfinite(secs) else None
+        pings[host_uuid] = {"ok": bool(t.get("ok")), "ms": ms, "at": at}
+    if measured:
+        await _redis_set(
+            container,
+            f"agent:locpings:{device_id}",
+            json.dumps(pings, separators=(",", ":")),
+            LOCATION_PINGS_TTL_SECONDS,
+        )
+
+
+_PIN_DOWN_THROTTLE_SECONDS = 86400
+
+
+async def _notify_pin_down(
+    container: AppContainer, device_id: int, telegram_id: int, label: str, host_name: str
+) -> None:
+    """One heads-up a day: the pinned server failed, the balancer has already moved the home to
+    the backup and comes back on its own. The pin itself stays."""
+    try:
+        first = await container.redis.set(
+            f"agent:pin-down:{device_id}", "1", nx=True, ex=_PIN_DOWN_THROTTLE_SECONDS
+        )
+    except Exception:
+        return  # without the throttle, silence beats a message every 5 minutes
+    if not first:
+        return
+    await container.notifier.notify_user(
+        telegram_id,
+        f"⚠️ Сервер «{host_name}», выбранный для роутера «{label}», сейчас не работает. "
+        "Интернет дома не пропал: роутер автоматически перешёл на резервный сервер и вернётся "
+        "на выбранный, когда тот заработает. Другую локацию можно выбрать в разделе «Роутер».",
+    )
 
 
 async def autotune_note(container: AppContainer, device_id: int) -> dict[str, Any] | None:
@@ -868,6 +1113,15 @@ async def _autotune_device(
         device = await uow.router_devices.get(device_id)
         if device is None or device.mode is not RouterDeviceMode.AUTO:
             return
+        # autotune only ever works out primary/backup; a pin is laid over them when the config
+        # is built (effective_assignment), so it is not touched here whatever the probes say.
+        pinned = device.pinned_host_uuid
+        pin_down: tuple[int, str] | None = None
+        if pinned and streaks.get(pinned, 0) >= 2:
+            sub = await uow.subscriptions.get(device.subscription_id)
+            owner = await uow.users.get(sub.user_id) if sub else None
+            if owner is not None and owner.telegram_id:
+                pin_down = (owner.telegram_id, device.label)
         decision = autotune(
             device.primary_host_uuid,
             device.backup_host_uuid,
@@ -919,6 +1173,9 @@ async def _autotune_device(
         ),
         30 * 86400,
     )
+    if pin_down is not None and pinned:
+        name = (info.get("tags") or {}).get(proxy_tag(pinned)) or "выбранная локация"
+        await _notify_pin_down(container, device_id, pin_down[0], pin_down[1], str(name))
 
 
 async def _alert_on_vpn_change(
@@ -926,7 +1183,9 @@ async def _alert_on_vpn_change(
 ) -> None:
     """One message to the «alerts» topic when a router's VPN breaks (confirmed by two reports
     in a row, so a restart's first seconds don't page anyone) and one when it recovers."""
-    if verdict is None or verdict["state"] in ("none", "unknown", "expired"):
+    # «paused»: the customer's own «Напрямую» — not an outage, and any earlier streak is left as
+    # it was so a router that really is broken still alerts when VPN comes back on.
+    if verdict is None or verdict["state"] in ("none", "unknown", "expired", "paused"):
         return
     key = f"agent:vpn:{device.id}"
     prev_raw = await _redis_get(container, key)
@@ -991,10 +1250,15 @@ async def heartbeat(
         await uow.commit()
         live = subscription_live(await uow.subscriptions.get(fresh.subscription_id))
     if stored:
+        direct_on = device_is_direct(fresh)
         await _alert_on_vpn_change(
-            container, fresh, vpn_verdict(diagnostics, fresh.external_ip, live)
+            container,
+            fresh,
+            vpn_verdict(diagnostics, fresh.external_ip, live, direct_mode=direct_on),
         )
-        await _autotune_device(container, device.id, diagnostics)
+        if not direct_on:
+            await _autotune_device(container, device.id, diagnostics)
+        await _store_location_pings(container, device.id, diagnostics)
     # Agent v7: event journal + game pulse (top level; inside diagnostics also accepted).
     # Older agents send neither — nothing changes for them.
     extra = diagnostics if isinstance(diagnostics, dict) else {}

@@ -43,6 +43,20 @@ window.__MOCK__ = {
       { id: 3, gb: 0, price_minor: 15000 },
     ],
   },
+  // Preview of the Router tab's panel («Мой роутер»), same shape as GET /api/cabinet/routers.
+  routers: {
+    items: [{
+      id: 1, label: "Дом", online: true, can_manage: true, can_choose_location: true,
+      vpn_mode: "direct", direct_until: new Date(Date.now() + 36e5).toISOString(), direct_forever: false,
+      applied: true,
+      location: { auto: true, id: null, name: "Нидерланды" },
+      locations: [
+        { id: "aaa", name: "Нидерланды", ping_ms: 48, available: true, measured_at: new Date().toISOString() },
+        { id: "bbb", name: "Германия", ping_ms: 61, available: true, measured_at: new Date().toISOString() },
+        { id: "ccc", name: "Финляндия", ping_ms: null, available: false, measured_at: new Date().toISOString() },
+      ],
+    }],
+  },
   plans: {
     currency: "RUB",
     items: [

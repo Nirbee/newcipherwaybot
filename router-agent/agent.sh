@@ -1,10 +1,13 @@
 #!/bin/sh
 # CipherWay router agent — keeps a Keenetic router's Xray (XKeen) config in sync with the bot.
 #
-# Runs on the router (Entware/busybox ash — POSIX sh only). Invoked from cron every 5 minutes
-# by the installer (install.sh); safe to run by hand. Talks to src/web/routes/agent.py:
+# Runs on the router (Entware/busybox ash — POSIX sh only). Invoked from cron every minute by
+# the installer (install.sh); safe to run by hand. Most runs only ask the server one cheap
+# question (GET /api/agent/rev) and exit; a full cycle (self-test, heartbeat, pulse) still runs
+# every 5 minutes. Talks to src/web/routes/agent.py:
 #   GET  /api/agent/config     -> Xray config fragment (outbounds/routing/dns) for XKeen's
 #                                  confdir; X-Agent-Version header advertises the current agent
+#   GET  /api/agent/rev        -> has anything this router must react to changed? (v8)
 #   GET  /api/agent/agent.sh   -> this script (self-update)
 #   GET  /api/agent/pulse      -> game pulse settings (v7, off unless enabled for this router)
 #   POST /api/agent/heartbeat  -> status + diagnostics shown in the admin panel
@@ -25,17 +28,24 @@
 
 set -eu
 
-AGENT_VERSION="7"
+AGENT_VERSION="8"
 
 CONF_FILE="${CIPHERWAY_AGENT_CONF:-/opt/etc/cipherway-agent/agent.conf}"
+# Where crond may read our line from (see cron_state); overridable for tests only.
+CRONTABS="${CIPHERWAY_AGENT_CRONTABS:-/opt/var/spool/cron/crontabs/root /opt/etc/crontabs/root}"
 SELF="/opt/etc/cipherway-agent/agent.sh"
-STATE_DIR="/opt/var/lib/cipherway-agent"
-LOG_FILE="/opt/var/log/cipherway-agent.log"
-LOCK_DIR="/opt/var/run/cipherway-agent.lock"
+STATE_DIR="${CIPHERWAY_AGENT_STATE_DIR:-/opt/var/lib/cipherway-agent}"
+LOG_FILE="${CIPHERWAY_AGENT_LOG:-/opt/var/log/cipherway-agent.log}"
+LOCK_DIR="${CIPHERWAY_AGENT_LOCK:-/opt/var/run/cipherway-agent.lock}"
 XRAY_ASSET_DIR="/opt/etc/xray/dat"
 XKEEN_CFG_DIR="/opt/etc/xkeen"
 LOG_MAX_BYTES=524288
 DNS_PROBE_DOMAIN="4pda.to"
+# Cron fires every minute; the full cycle runs when this many seconds have passed since the
+# last one (a little under 5 minutes, so a run a few seconds early doesn't slip a whole minute).
+FULL_CYCLE_SECONDS=270
+# Locations are probed every N-th full cycle (see self_test).
+CAND_EVERY_RUNS=3
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
@@ -65,8 +75,9 @@ rotate_log_if_needed() {
 
 acquire_lock() {
     mkdir -p "$(dirname "$LOCK_DIR")"
-    # A lock older than 10 minutes belongs to a run that was killed mid-way (power cut).
-    if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    # A lock older than 15 minutes belongs to a run that was killed mid-way (power cut) — a full
+    # cycle with 8 locations to probe and the pulse can take a few minutes, never fifteen.
+    if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
         rmdir "$LOCK_DIR" 2>/dev/null || true
     fi
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -191,6 +202,11 @@ self_update() {
         return 0
     fi
     chmod +x "$tmp"
+    # Going back below v8 (never planned — agents only go forward): the older agent has no light
+    # check and would run its full cycle every minute, so the cron line goes back to */5 first.
+    case "$wanted" in
+        [0-7]) restore_five_minute_cron ;;
+    esac
     mv "$tmp" "$SELF"
     log "self-updated v$AGENT_VERSION -> v$wanted (takes effect next run)"
     event self_update "v$AGENT_VERSION -> v$wanted"
@@ -287,6 +303,18 @@ probe() {
 
 self_test() {
     [ -f "$TARGET" ] && is_xray_running || { echo '[]'; return 0; }
+    # Up to 8 locations, each a probe of up to 10 s: every 15 minutes is plenty on a weak router.
+    # The first run after an install or update measures them, so the server's first choice of
+    # server has numbers to go on.
+    cand_runs="$(cat "$STATE_DIR/cand_runs" 2>/dev/null || echo 0)"
+    case "$cand_runs" in ''|*[!0-9]*) cand_runs=0 ;; esac
+    cand_runs=$((cand_runs + 1))
+    echo "$cand_runs" > "$STATE_DIR/cand_runs" 2>/dev/null || true
+    measure_cands=0
+    if [ $((cand_runs % CAND_EVERY_RUNS)) -eq 1 ]; then measure_cands=1; fi
+    # A location that is also an assigned server already gets its full probe under its proxy tag.
+    t_tags=" $(jq -r '.inbounds[]? | select(.tag | startswith("cwtest-")) | .tag' \
+        "$TARGET" 2>/dev/null | tr '\n' ' ') "
     {
         probe direct ""
         jq -r '.inbounds[]? | select(.tag | startswith("cwtest-")) | "\(.tag) \(.port)"' \
@@ -296,6 +324,8 @@ self_test() {
             elif [ "${t_tag#cwtest-cand-}" != "$t_tag" ]; then
                 # Candidate server (AUTO routers): light probe only — the server just needs to
                 # know it passes and how fast; no 256 KB download per candidate every 5 min.
+                [ "$measure_cands" = "1" ] || continue
+                case "$t_tags" in *" cwtest-proxy-${t_tag#cwtest-cand-} "*) continue ;; esac
                 probe "${t_tag#cwtest-}" "$t_port" "$API_BASE/api/agent/ip"
             else
                 probe "${t_tag#cwtest-}" "$t_port"
@@ -543,11 +573,136 @@ watchdog() {
     elif [ -x /opt/etc/init.d/S05xkeen ]; then
         /opt/etc/init.d/S05xkeen stop >> "$LOG_FILE" 2>&1 </dev/null || true
     fi
-    # Retry right away with a full fetch (no etag), so the fresh config restarts Xray.
-    rm -f "$STATE_DIR/net_fail" "$ETAG_FILE" "$STATE_DIR/headers.tmp" "$STATE_DIR/body.tmp"
+    # Retry right away with a full fetch (no etag), so the fresh config restarts Xray. Without
+    # the cycle stamp the re-run below would fall into the light check instead of a full cycle.
+    rm -f "$STATE_DIR/net_fail" "$ETAG_FILE" "$STATE_DIR/headers.tmp" "$STATE_DIR/body.tmp" \
+        "$STATE_DIR/last_full"
     rmdir "$LOCK_DIR" 2>/dev/null || true
     trap - EXIT INT TERM
     exec sh "$SELF"
+}
+
+# --- light check (v8): is there a new config? --------------------------------------------
+# Runs every minute between full cycles. Deliberately does nothing but ask the server whether
+# this router's state changed and, if so, take the new config the same way a full cycle would
+# — no self-test, heartbeat or pulse, and any error just ends the run: a problem here can never
+# break the 5-minute cycle that carries self-update and the watchdog.
+
+full_cycle_due() {
+    fc_last="$(cat "$STATE_DIR/last_full" 2>/dev/null || echo 0)"
+    case "$fc_last" in ''|*[!0-9]*) return 0 ;; esac
+    fc_now="$(date +%s)"
+    case "$fc_now" in ''|*[!0-9]*) return 0 ;; esac
+    # The clock jumped back (routers often boot without NTP): don't wait for it to catch up.
+    [ "$fc_now" -ge "$fc_last" ] || return 0
+    [ $((fc_now - fc_last)) -ge "$FULL_CYCLE_SECONDS" ]
+}
+
+fetch_config() {
+    inm=""
+    [ -f "$ETAG_FILE" ] && inm="$(cat "$ETAG_FILE")"
+    # An empty $inm still yields a valid (never-matching) If-None-Match header — keeping it
+    # unconditional sidesteps POSIX sh's awkward rules for optionally-quoted arguments.
+    http_code="$(curl -sS -m 20 -o "$body_tmp" -D "$headers_tmp" -w '%{http_code}' \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "If-None-Match: \"$inm\"" \
+        "$API_BASE/api/agent/config" 2>>"$LOG_FILE" || echo "000")"
+
+    # curl prints 000 on a network failure and `|| echo` appends another: normalise.
+    case "$http_code" in 000*) http_code="000" ;; esac
+}
+
+store_config_rev() {
+    # Also after a rejected config: otherwise the light check would re-download and re-test the
+    # same broken config every minute. The full cycle keeps retrying it, as it always has.
+    new_rev="$(grep -i '^x-config-rev:' "$headers_tmp" 2>/dev/null | sed 's/^[^:]*: *//; s/[[:space:]]*$//')"
+    [ -z "$new_rev" ] || printf '%s' "$new_rev" > "$STATE_DIR/rev" 2>/dev/null || true
+}
+
+apply_fetched_config() {
+    case "$http_code" in
+        200)
+            if ! jq empty "$body_tmp" >/dev/null 2>&1; then
+                LAST_ERROR="server sent invalid JSON, kept previous config"
+                log "ERROR: $LAST_ERROR"
+            else
+                new_etag="$(grep -i '^etag:' "$headers_tmp" | sed 's/^[Ee][Tt][Aa][Gg]: *"\{0,1\}//; s/"\{0,1\}[[:space:]]*$//')"
+                mkdir -p "$CONFDIR"
+                if apply_config "$body_tmp"; then
+                    [ -n "$new_etag" ] && printf '%s' "$new_etag" > "$ETAG_FILE"
+                    log "config applied -> $TARGET (etag=$new_etag)"
+                    event config_applied "etag=$(printf '%s' "$new_etag" | cut -c1-12)"
+                else
+                    rm -f "$ETAG_FILE"
+                fi
+            fi
+            store_config_rev
+            ;;
+        304)
+            store_config_rev
+            ;;
+        401|403)
+            LAST_ERROR="token rejected by server (http $http_code) — device revoked or wrong token"
+            log "ERROR: $LAST_ERROR"
+            ;;
+        429)
+            log "rate limited (429), will retry next run"
+            ;;
+        503)
+            LAST_ERROR="panel temporarily unavailable, kept previous config"
+            log "WARN: $LAST_ERROR"
+            ;;
+        *)
+            LAST_ERROR="unexpected response fetching config (http $http_code)"
+            log "ERROR: $LAST_ERROR"
+            ;;
+    esac
+}
+
+light_cycle() {
+    # A watchdog stop is the full cycle's business (it decides when VPN comes back).
+    [ ! -f "$STATE_DIR/stopped_by_agent" ] || return 0
+    lc_rev="$(cat "$STATE_DIR/rev" 2>/dev/null || true)"
+    # 304 = no change; anything but a clean 200 (network down, 429, old server) = not this time.
+    lc_code="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "If-None-Match: \"$lc_rev\"" \
+        "$API_BASE/api/agent/rev" 2>/dev/null || echo "000")"
+    [ "$lc_code" = "200" ] || return 0
+    fetch_config
+    case "$http_code" in
+        200|304) apply_fetched_config ;;
+        *) log "light check: new revision, config fetch got http $http_code (will retry)" ;;
+    esac
+    rm -f "$headers_tmp" "$body_tmp"
+}
+
+# Routers installed before v8 have a */5 cron line; the light check needs */1. Only an existing
+# line is rewritten (never one added, so no duplicates, and an install without our entry stays
+# the installer's business). crond is NOT restarted: a restart that goes wrong costs the router
+# its agent for good. `sed -i` swaps the file by rename, busybox crond notices a changed
+# crontabs directory on its next minute tick; until it does, the */5 line simply keeps working
+# as a v7-style schedule.
+ensure_minute_cron() {
+    for mc_file in $CRONTABS; do
+        grep -q '^\*/5 .*cipherway-agent' "$mc_file" 2>/dev/null || continue
+        if sed -i 's#^\*/5 \(.*cipherway-agent\)#*/1 \1#' "$mc_file" 2>/dev/null; then
+            log "cron: set to run every minute in $mc_file"
+            event cron_updated "$mc_file"
+        else
+            log "WARN: could not update the schedule in $mc_file"
+        fi
+    done
+    return 0
+}
+
+restore_five_minute_cron() {
+    for mc_file in $CRONTABS; do
+        grep -q '^\*/1 .*cipherway-agent' "$mc_file" 2>/dev/null || continue
+        sed -i 's#^\*/1 \(.*cipherway-agent\)#*/5 \1#' "$mc_file" 2>/dev/null \
+            && log "cron: back to every 5 minutes in $mc_file (older agent)"
+    done
+    return 0
 }
 
 main() {
@@ -572,60 +727,23 @@ main() {
     TARGET="$CONFDIR/$OUTFILE"
     LAST_ERROR=""
     NEED_RESTART=0
+    headers_tmp="$STATE_DIR/headers.tmp"
+    body_tmp="$STATE_DIR/body.tmp"
+
+    if ! full_cycle_due; then
+        light_cycle
+        return 0
+    fi
+    # Stamped at the start: a full cycle that dies halfway must not repeat every minute.
+    date +%s > "$STATE_DIR/last_full" 2>/dev/null || true
+
     EXTERNAL_IP="$(curl -sS -m 5 https://api.ipify.org 2>/dev/null || true)"
 
     enforce_route_only_false
 
-    inm=""
-    [ -f "$ETAG_FILE" ] && inm="$(cat "$ETAG_FILE")"
-    headers_tmp="$STATE_DIR/headers.tmp"
-    body_tmp="$STATE_DIR/body.tmp"
-    # An empty $inm still yields a valid (never-matching) If-None-Match header — keeping it
-    # unconditional sidesteps POSIX sh's awkward rules for optionally-quoted arguments.
-    http_code="$(curl -sS -m 20 -o "$body_tmp" -D "$headers_tmp" -w '%{http_code}' \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "If-None-Match: \"$inm\"" \
-        "$API_BASE/api/agent/config" 2>>"$LOG_FILE" || echo "000")"
-
-    # curl prints 000 on a network failure and `|| echo` appends another: normalise.
-    case "$http_code" in 000*) http_code="000" ;; esac
+    fetch_config
     watchdog "$http_code"
-
-    case "$http_code" in
-        200)
-            if ! jq empty "$body_tmp" >/dev/null 2>&1; then
-                LAST_ERROR="server sent invalid JSON, kept previous config"
-                log "ERROR: $LAST_ERROR"
-            else
-                new_etag="$(grep -i '^etag:' "$headers_tmp" | sed 's/^[Ee][Tt][Aa][Gg]: *"\{0,1\}//; s/"\{0,1\}[[:space:]]*$//')"
-                mkdir -p "$CONFDIR"
-                if apply_config "$body_tmp"; then
-                    [ -n "$new_etag" ] && printf '%s' "$new_etag" > "$ETAG_FILE"
-                    log "config applied -> $TARGET (etag=$new_etag)"
-                    event config_applied "etag=$(printf '%s' "$new_etag" | cut -c1-12)"
-                else
-                    rm -f "$ETAG_FILE"
-                fi
-            fi
-            ;;
-        304)
-            ;;
-        401|403)
-            LAST_ERROR="token rejected by server (http $http_code) — device revoked or wrong token"
-            log "ERROR: $LAST_ERROR"
-            ;;
-        429)
-            log "rate limited (429), will retry next run"
-            ;;
-        503)
-            LAST_ERROR="panel temporarily unavailable, kept previous config"
-            log "WARN: $LAST_ERROR"
-            ;;
-        *)
-            LAST_ERROR="unexpected response fetching config (http $http_code)"
-            log "ERROR: $LAST_ERROR"
-            ;;
-    esac
+    apply_fetched_config
 
     if [ "$NEED_RESTART" = "1" ]; then
         restart_xray || true
@@ -652,6 +770,12 @@ main() {
         # back to an older agent): under set -e a jq/curl error here would end the run first.
         send_heartbeat || true
         self_update "$advertised"
+        # Going back below v8 already restored */5 in self_update; this (old) code is still
+        # running and must not flip it straight back to */1.
+        case "$advertised" in
+            [0-7]) ;;
+            *) ensure_minute_cron || true ;;
+        esac
     fi
 }
 

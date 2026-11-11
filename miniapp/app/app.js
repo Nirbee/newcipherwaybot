@@ -16,6 +16,21 @@
     tabHome: "Главная", tabConnect: "Подключение", tabRouter: "Роутер", tabAccount: "Кабинет",
     routerHint: "VPN для роутера — один тариф защищает всю домашнюю сеть, без установки приложений на каждое устройство.",
     routerEmpty: "Тарифы для роутера скоро появятся", routerEmptySub: "Мы уже их готовим — загляните позже.",
+    rtMine: "Мой роутер", rtOnline: "на связи", rtOffline: "не на связи",
+    rtVpn: "VPN", rtDirect: "Напрямую", rtDirectFor: "Напрямую на:",
+    rtDur1h: "1 час", rtDurToday: "До конца дня", rtDurForever: "Пока не выключу",
+    rtBannerUntil: (t) => `VPN выключен, включится в ${t}`,
+    rtBannerForever: "VPN выключен, пока вы его не включите",
+    rtBannerHome: (n, s) => `Роутер «${n}» — ${s}`,
+    rtApplying: "Применяется…", rtApplyLater: "Применится, когда роутер выйдет на связь",
+    rtLocation: "Локация", rtAuto: "Авто (рекомендуем)", rtNow: "сейчас",
+    rtLocWarn: "Смена локации на несколько секунд оборвёт интернет дома.",
+    rtSwitchTo: (n) => `Переключить на «${n}»`,
+    rtMs: "мс", rtNoPing: "нет замера", rtUnavailable: "недоступна",
+    rtNoSub: "Подписка закончилась — продлите её, чтобы управлять роутером.",
+    rtForced: "Локацию этого роутера задаёт администратор.",
+    rtNoLocs: "Список локаций пока недоступен.",
+    rtTooOften: "Слишком часто — попробуйте позже",
     active: "Подписка активна", inactive: "Нет подписки", trial: "Пробный период",
     daysLeft: "дней осталось", till: "до", renew: "Продлить", buy: "Купить",
     choosePlan: "Тариф", payMethod: "Оплата", refTitle: "Пригласи друга",
@@ -80,6 +95,21 @@
     tabHome: "Home", tabConnect: "Connect", tabRouter: "Router", tabAccount: "Account",
     routerHint: "VPN for your router — one plan protects the whole home network, no apps to install on every device.",
     routerEmpty: "Router plans coming soon", routerEmptySub: "We're setting them up — check back later.",
+    rtMine: "My router", rtOnline: "online", rtOffline: "offline",
+    rtVpn: "VPN", rtDirect: "Direct", rtDirectFor: "Go direct for:",
+    rtDur1h: "1 hour", rtDurToday: "Till end of day", rtDurForever: "Until I turn it off",
+    rtBannerUntil: (t) => `VPN is off, turns back on at ${t}`,
+    rtBannerForever: "VPN is off until you turn it back on",
+    rtBannerHome: (n, s) => `Router “${n}” — ${s}`,
+    rtApplying: "Applying…", rtApplyLater: "Will apply once the router comes online",
+    rtLocation: "Location", rtAuto: "Auto (recommended)", rtNow: "now",
+    rtLocWarn: "Changing location drops the home internet for a few seconds.",
+    rtSwitchTo: (n) => `Switch to “${n}”`,
+    rtMs: "ms", rtNoPing: "not measured", rtUnavailable: "unavailable",
+    rtNoSub: "Your subscription has ended — renew it to manage the router.",
+    rtForced: "The location of this router is set by the administrator.",
+    rtNoLocs: "The location list is unavailable right now.",
+    rtTooOften: "Too many changes — try again later",
     active: "Subscription active", inactive: "No subscription", trial: "Trial",
     daysLeft: "days left", till: "till", renew: "Renew", buy: "Buy",
     choosePlan: "Plan", payMethod: "Payment", refTitle: "Invite a friend",
@@ -157,7 +187,13 @@
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    if (!res.ok) {
+      const body = await res.text();
+      const err = new Error(body.slice(0, 200));
+      err.status = res.status;
+      try { err.detail = JSON.parse(body).detail; } catch {}
+      throw err;
+    }
     return res.json();
   }
 
@@ -275,7 +311,7 @@
   }
 
   // ---------- state ----------
-  const state = { tab: "home", me: null, plans: null, constructor: null, referral: null, payments: null, connection: null, tariffSel: 0, planSel: 0, routerTariffSel: 0, routerPlanSel: 0, cPerSel: 0, cPackSel: 0, paySel: "balance", devices: undefined, topupOpen: false, topupAmountSel: 0, topupPaySel: "balance", topupCustom: "" };
+  const state = { tab: "home", me: null, routers: null, routerDur: "1h", routerPick: null, routerPoll: null, routerPollUntil: 0, plans: null, constructor: null, referral: null, payments: null, connection: null, tariffSel: 0, planSel: 0, routerTariffSel: 0, routerPlanSel: 0, cPerSel: 0, cPackSel: 0, paySel: "balance", devices: undefined, topupOpen: false, topupAmountSel: 0, topupPaySel: "balance", topupCustom: "" };
   // Preset top-up amounts (RUB) offered in the mini-app — mirrors the bot's own topup_amount
   // presets (src/bot/handlers/purchase.py); the server re-validates against MIN_DEPOSIT_AMOUNT
   // regardless of which preset the client claims to have tapped.
@@ -500,6 +536,15 @@
     // Owner greeting (from admin config) — shown once at the very top of Home.
     const greeting = me && me.app && me.app.greeting;
     if (greeting) frag.push(el("div", { class: "card fade", text: greeting }));
+
+    // A router on «Напрямую» means this home has no VPN right now — say so up front.
+    routerItems()
+      .filter((r) => r.vpn_mode === "direct")
+      .forEach((r) => frag.push(el("button", {
+        class: "rt-banner rt-banner-btn fade",
+        onclick: () => { haptic(); state.tab = "router"; render(); },
+        text: T.rtBannerHome(r.label, routerBannerText(r)),
+      })));
 
     // status card
     frag.push(
@@ -830,6 +875,141 @@
 
   function wizSet(patch) { Object.assign(state.wiz, patch); haptic(); render(); }
 
+  // ---------- «Мой роутер» ----------
+  function routerItems() {
+    return (state.routers && state.routers.items) || [];
+  }
+  function clockTime(iso) {
+    return new Date(iso).toLocaleTimeString(T === RU ? "ru-RU" : "en-GB", { hour: "2-digit", minute: "2-digit" });
+  }
+  function routerBannerText(r) {
+    if (r.vpn_mode !== "direct") return "";
+    return r.direct_until && !r.direct_forever ? T.rtBannerUntil(clockTime(r.direct_until)) : T.rtBannerForever;
+  }
+  function routerError(e) {
+    return e && e.status === 429 ? T.rtTooOften : (e && e.detail) || T.error;
+  }
+  async function refreshRouters() {
+    if (mock) return;
+    try {
+      const fresh = await api("GET", "/api/cabinet/routers");
+      if (JSON.stringify(fresh) !== JSON.stringify(state.routers)) { state.routers = fresh; render(); }
+      if (routerItems().some((r) => !r.applied)) routerPollStart();
+    } catch {}
+  }
+  // Until the agent reports back: every 5 s, for at most 6 minutes (a v7 agent takes up to 5).
+  function routerPollStart() {
+    if (mock) return;
+    state.routerPollUntil = Date.now() + 6 * 60 * 1000;
+    if (state.routerPoll) return;
+    state.routerPoll = setInterval(async () => {
+      if (document.hidden) return;
+      if (Date.now() > state.routerPollUntil || !routerItems().some((r) => !r.applied)) {
+        clearInterval(state.routerPoll);
+        state.routerPoll = null;
+        render();
+        return;
+      }
+      await refreshRouters();
+    }, 5000);
+  }
+  function routerPatch(r, fields) {
+    Object.assign(r, fields, { applied: mock });  // the preview has no agent to wait for
+    render();
+    routerPollStart();
+  }
+  async function routerSetDirect(r, duration) {
+    haptic();
+    try {
+      const res = await api("POST", `/api/cabinet/routers/${r.id}/direct`, { duration, tz_offset_minutes: -new Date().getTimezoneOffset() });
+      const on = duration !== "off";
+      routerPatch(r, res.vpn_mode
+        ? { vpn_mode: res.vpn_mode, direct_until: res.direct_until, direct_forever: res.direct_forever }
+        : { vpn_mode: on ? "direct" : "vpn", direct_until: duration === "1h" ? new Date(Date.now() + 36e5).toISOString() : null, direct_forever: on && duration !== "1h" });
+      haptic("ok");
+    } catch (e) {
+      toast(routerError(e));
+    }
+  }
+  async function routerSetLocation(r, loc) {
+    haptic();
+    try {
+      await api("POST", `/api/cabinet/routers/${r.id}/location`, { host: loc ? loc.id : null });
+      state.routerPick = null;
+      routerPatch(r, { location: loc ? { auto: false, id: loc.id, name: loc.name } : { auto: true, id: null, name: null } });
+      haptic("ok");
+    } catch (e) {
+      toast(routerError(e));
+    }
+  }
+  function routerLocations(r) {
+    const cur = r.location || { auto: true };
+    const pick = state.routerPick && state.routerPick.routerId === r.id ? state.routerPick : null;
+    const row = (loc, name, meta, off, on) => el("button", {
+      class: `rt-loc${on ? " on" : ""}${off ? " off" : ""}${pick && pick.loc === (loc ? loc.id : null) ? " pick" : ""}`,
+      ...(off ? { disabled: "" } : {}),
+      onclick: () => { if (off) return; state.routerPick = on ? null : { routerId: r.id, loc: loc ? loc.id : null, name }; haptic(); render(); },
+    }, [
+      el("span", { class: "rt-loc-name", text: name }),
+      el("span", { class: "rt-loc-meta", text: meta }),
+    ]);
+    const list = [row(null, T.rtAuto, cur.auto && cur.name ? `${T.rtNow}: ${cur.name}` : "", false, cur.auto)];
+    (r.locations || []).forEach((l) => {
+      const meta = !l.available ? T.rtUnavailable : l.ping_ms != null ? `${l.ping_ms} ${T.rtMs}` : T.rtNoPing;
+      list.push(row(l, l.name, meta, !l.available, !cur.auto && cur.id === l.id));
+    });
+    return el("div", { style: "margin-top:12px" }, [
+      el("div", { class: "h-cap", text: T.rtLocation }),
+      r.locations && r.locations.length ? null : el("div", { class: "sub", style: "font-size:12.5px;margin-bottom:6px", text: T.rtNoLocs }),
+      el("div", { class: "rt-locs" }, list),
+      el("div", { class: "sub", style: "font-size:12px;margin-top:8px", text: T.rtLocWarn }),
+      pick
+        ? el("button", { class: "btn primary", style: "margin-top:10px", ...(r.can_manage ? {} : { disabled: "" }), onclick: () => routerSetLocation(r, pick.loc ? (r.locations || []).find((l) => l.id === pick.loc) : null), text: T.rtSwitchTo(pick.name) })
+        : null,
+    ]);
+  }
+  function routerCard(r) {
+    const direct = r.vpn_mode === "direct";
+    const dur = state.routerDur || "1h";
+    const locked = !r.can_manage;
+    const seg = (on, text, action) => el("button", { class: `rt-seg${on ? " on" : ""}`, ...(locked ? { disabled: "" } : {}), onclick: () => { if (!on) action(); }, text });
+    const durChip = (id, text) => el("button", { class: `chip${dur === id ? " on" : ""}`, onclick: () => { state.routerDur = id; haptic(); render(); }, text });
+    const banner = routerBannerText(r);
+    return el("div", { class: "card fade" }, [
+      el("div", { class: "row spread" }, [
+        el("b", { text: r.label }),
+        el("span", { class: "row", style: "gap:6px" }, [
+          el("span", { class: `dot${r.online ? "" : " off"}` }),
+          el("span", { class: "sub", style: "font-size:12.5px", text: r.online ? T.rtOnline : T.rtOffline }),
+        ]),
+      ]),
+      el("div", { class: "rt-switch", style: "margin-top:12px" }, [
+        seg(!direct, "🛡 " + T.rtVpn, () => routerSetDirect(r, "off")),
+        seg(direct, "↗ " + T.rtDirect, () => routerSetDirect(r, dur)),
+      ]),
+      banner ? el("div", { class: "rt-banner", text: banner }) : null,
+      !direct && !locked
+        ? el("div", { style: "margin-top:10px" }, [
+            el("div", { class: "h-cap", text: T.rtDirectFor }),
+            el("div", { class: "chips" }, [durChip("1h", T.rtDur1h), durChip("today", T.rtDurToday), durChip("forever", T.rtDurForever)]),
+          ])
+        : null,
+      r.applied === false
+        ? el("div", { class: "rt-applying", text: state.routerPoll ? T.rtApplying : T.rtApplyLater })
+        : null,
+      locked ? el("div", { class: "sub", style: "font-size:12.5px;margin-top:10px;color:var(--warn)", text: T.rtNoSub }) : null,
+      r.can_choose_location
+        ? routerLocations(r)
+        : el("div", { class: "sub", style: "font-size:12.5px;margin-top:12px", text: T.rtForced + (r.location && r.location.name ? ` ${T.rtNow}: ${r.location.name}` : "") }),
+    ]);
+  }
+  // Above the storefront of the Router tab; absent for customers with no router.
+  function routerPanel() {
+    const items = routerItems();
+    if (!items.length) return [];
+    return [el("div", { class: "h-cap fade", style: "margin:2px 2px 0", text: T.rtMine })].concat(items.map(routerCard));
+  }
+
   // Separate storefront for router-flashed plans (plans.category === "router") — same
   // purchase mechanics as Home, but its own tariff/duration selection so switching tabs
   // never resets what the user picked on the other one.
@@ -840,8 +1020,9 @@
     const routerPlans = ((state.plans && state.plans.items) || []).filter((p) => p.category === "router");
     const hint = [el("div", { class: "card fade" }, [el("div", { class: "sub", style: "font-size:13px", text: T.routerHint })])];
     const custom = customItems("router");
+    const panel = routerPanel();
     if (routerPlans.length === 0) {
-      return hint.concat(
+      return panel.concat(hint,
         [
           el("div", { class: "card fade", style: "text-align:center" }, [
             el("div", { class: "h-cap", text: T.routerEmpty }),
@@ -901,7 +1082,7 @@
         text: `${btnText("renew", usable ? T.renew : T.buy)} · ${sel ? money(sel.price_minor) : ""}`,
       }),
     ]);
-    return hint.concat([card], custom);
+    return panel.concat(hint, [card], custom);
   }
 
   function connectScreen() {
@@ -1499,14 +1680,16 @@
       // Only /me and /plans are load-critical. A failure in a secondary call (referral /
       // payments / constructor) must NOT drop the whole app to the error screen — degrade it
       // to null so the relevant tab just renders empty.
-      const [me, plans, constructor, referral, payments] = await Promise.all([
+      const [me, plans, constructor, referral, payments, routers] = await Promise.all([
         api("GET", "/api/cabinet/me"),
         api("GET", "/api/cabinet/plans"),
         api("GET", "/api/cabinet/constructor").catch(() => null), // pre-constructor backends
         api("GET", "/api/cabinet/referral").catch(() => null),
         api("GET", "/api/cabinet/payments").catch(() => null),
+        api("GET", "/api/cabinet/routers").catch(() => null),
       ]);
-      Object.assign(state, { me, plans, constructor, referral, payments });
+      Object.assign(state, { me, plans, constructor, referral, payments, routers });
+      if (routerItems().some((r) => !r.applied)) routerPollStart();
       // Keep the selected payment method valid for whatever the operator actually offers —
       // the default ("balance") or a method disabled/removed since the last load (e.g. Stars
       // taken off the storefront) must not stay silently selected with no matching chip drawn.
@@ -1581,6 +1764,7 @@
       state.tab = b.dataset.tab;
       haptic();
       render();
+      if (state.tab === "router" || state.tab === "home") refreshRouters();
       if (state.tab === "connect" && !state.connection && mock) state.connection = window.__MOCK__.connection, render();
     });
   });

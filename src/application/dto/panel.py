@@ -177,3 +177,4 @@ class PanelHost:
     service_name: str | None  # grpc
     is_disabled: bool
     squad_uuids: tuple[str, ...]  # internal squads this host is reachable through
+    tag: str | None = None  # panel host tag (MultiScript: MS_AUTO, MS_AUTO_ENTRY…)

@@ -90,6 +90,10 @@ class _FakeRedis:
     async def expire(self, key: str, seconds: int) -> bool:
         return key in self.store
 
+    async def ttl(self, key: str) -> int:
+        # Expiry isn't modelled: report "has a TTL" so limiters don't re-arm on every hit.
+        return 60 if key in self.store else -2
+
     async def aclose(self) -> None: ...
 
 

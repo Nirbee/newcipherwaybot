@@ -21,7 +21,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, String
+from sqlalchemy import Boolean, Enum, ForeignKey, String, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.core.enums import RouterDeviceMode, RouterDeviceStatus
@@ -45,10 +45,23 @@ class RouterDevice(IntPk, TimestampMixin, Base):
     )
     primary_host_uuid: Mapped[str | None] = mapped_column(String(64))
     backup_host_uuid: Mapped[str | None] = mapped_column(String(64))
+    # The customer's own location choice (AUTO routers only, from the cabinet): overlaid on top
+    # of primary/backup when the config is built, so autotune keeps working those two out and
+    # can never move it. NULL = «Авто». Unpinned when the host leaves the allowlist.
+    pinned_host_uuid: Mapped[str | None] = mapped_column(String(64))
+
+    # «Напрямую»: the home's traffic goes direct, Xray and the probes keep running. Either until
+    # a moment (compared with now each time a config is built — no sweep needed) or until
+    # switched off. Past values are simply inactive.
+    direct_until: Mapped[dt.datetime | None] = mapped_column(AwareDateTime)
+    direct_forever: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     # Set after generating a config; compared against the agent's If-None-Match so an
     # unchanged config short-circuits to a 304 instead of resending the same JSON every poll.
     config_etag: Mapped[str | None] = mapped_column(String(64))
+    # Revision of the customer-facing state the agent last fetched (router_config.config_revision):
+    # equal to the current one means the router has taken the latest switch («применено»).
+    config_rev: Mapped[str | None] = mapped_column(String(32))
 
     status: Mapped[RouterDeviceStatus] = mapped_column(
         Enum(RouterDeviceStatus, native_enum=False, length=16), default=RouterDeviceStatus.PENDING

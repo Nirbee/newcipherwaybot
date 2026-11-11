@@ -11,10 +11,11 @@ keeps this a pure, trivially-testable function.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import hashlib
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from src.application.dto.panel import PanelHost
@@ -168,6 +169,7 @@ def build_outbounds(
     template: RoutingTemplate | None = None,
     subscription_outbounds: Sequence[dict[str, Any]] | None = None,
     candidates: Sequence[PanelHost] = (),
+    direct_mode: bool = False,
 ) -> dict[str, Any]:
     """``hosts`` must already be the small candidate set picked for ONE router (its primary +
     optional backup) — never a whole squad.
@@ -183,6 +185,10 @@ def build_outbounds(
     ``subscription_outbounds`` (see :func:`select_subscription_outbounds`) are the proxy
     outbounds exactly as the customer's Happ receives them — preferred over rebuilding them
     from panel host data, which can drift from what the node actually accepts.
+
+    ``direct_mode`` is the customer's «Напрямую» switch: every client connection leaves direct,
+    while the proxy outbounds, observatory and self-test ports stay exactly as they are — the
+    agent keeps measuring, and turning VPN back on needs no other change.
     """
     proxies: list[dict[str, Any]] = []
     if subscription_active:
@@ -197,9 +203,10 @@ def build_outbounds(
                     proxies.append(outbound)
     proxy_tags = [str(o["tag"]) for o in proxies if str(o.get("tag", "")).startswith("proxy-")]
 
-    # AUTO routers also get a light probe through other allowlisted servers («cand-*»): never
-    # in the balancer or its health check, only measured by the agent so the server can move
-    # the router to whatever actually works best from the customer's ISP (see autotune()).
+    # AUTO routers also get a light probe through every allowlisted server («cand-*», the
+    # static location set — see location_hosts()): never in the balancer or its health check,
+    # only measured by the agent, so the server can move the router to whatever works best
+    # from the customer's ISP (see autotune()) and show the customer a ping per location.
     cand_outbounds: list[dict[str, Any]] = []
     if subscription_active and proxy_tags:
         for host in candidates:
@@ -237,7 +244,10 @@ def build_outbounds(
         }
         routing: dict[str, Any] = {"balancers": [balancer]}
         rules: list[dict[str, Any]] = []
-        if template is not None:
+        if direct_mode:
+            # Nothing of the split-tunnel template applies: no block lists, no VPN DNS.
+            rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "direct"})
+        elif template is not None:
             rules.extend(template.rules)
             if template.fallback_tag:
                 balancer["fallbackTag"] = template.fallback_tag
@@ -247,7 +257,8 @@ def build_outbounds(
                 routing["domainMatcher"] = template.domain_matcher
             if template.dns:
                 config["dns"] = template.dns
-        rules.append({"type": "field", "network": "tcp,udp", "balancerTag": _BALANCER_TAG})
+        if not direct_mode:
+            rules.append({"type": "field", "network": "tcp,udp", "balancerTag": _BALANCER_TAG})
         inbounds, test_rules = _self_test_plumbing([*proxy_tags, *cand_tags])
         config["inbounds"] = inbounds
         routing["rules"] = test_rules + rules
@@ -394,6 +405,9 @@ class SubscriptionPick:
     servers: list[str]  # human names, in priority order
     warning: str | None
     tags: dict[str, str]  # outbound tag -> human name (labels the agent's per-server probes)
+    # outbound tag -> panel host uuid, for the servers that are known panel hosts (a substitute
+    # included) — what the agent's probes are scored against.
+    hosts: dict[str, str] = field(default_factory=dict)
 
 
 def _tagged(sp: SubscriptionProxy, tag: str) -> list[dict[str, Any]]:
@@ -439,6 +453,7 @@ def select_subscription_outbounds(
     allowlist (``preferred``), and the substitution is reported instead of staying silent."""
     by_endpoint = {(p.address, p.port): p for p in available}
     chosen: list[tuple[str, SubscriptionProxy]] = []
+    tag_hosts: dict[str, str] = {}
     missing: list[str] = []
     for host in assigned:
         sp = by_endpoint.get((host.address, host.port))
@@ -446,6 +461,7 @@ def select_subscription_outbounds(
             missing.append(host.remark or host.address)
         elif all(sp is not c for _, c in chosen):
             chosen.append((f"proxy-{host.uuid[:8]}", sp))
+            tag_hosts[f"proxy-{host.uuid[:8]}"] = host.uuid
 
     want = min(limit, len(assigned)) if assigned else limit
     if len(chosen) < want:
@@ -465,6 +481,8 @@ def select_subscription_outbounds(
                 else _fallback_tag(sp.address, sp.port)
             )
             chosen.append((tag, sp))
+            if known is not None:
+                tag_hosts[tag] = known.uuid
 
     outbounds: list[dict[str, Any]] = []
     for tag, sp in chosen:
@@ -483,6 +501,7 @@ def select_subscription_outbounds(
         [sp.remark for _, sp in chosen],
         warning,
         {tag: sp.remark for tag, sp in chosen},
+        tag_hosts,
     )
 
 
@@ -540,6 +559,125 @@ def config_etag(config: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# --- the customer's switches: «Напрямую» and the location pin ------------------------------
+
+
+def direct_active(forever: bool, until: dt.datetime | None, now: dt.datetime) -> bool:
+    """Is «Напрямую» on right now? Compared at config time, so a timer needs no sweep."""
+    if forever:
+        return True
+    if until is None:
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=dt.UTC)
+    return until > now
+
+
+def effective_assignment(
+    pinned: str | None,
+    primary: str | None,
+    backup: str | None,
+    fallback: Sequence[str] = (),
+) -> tuple[str | None, str | None]:
+    """The (primary, backup) a config is built from. A pin takes the primary slot; the backup
+    stays automatic — whichever of autotune's two is not the pin, else any other location —
+    and is never the pinned server itself."""
+    if not pinned:
+        return primary, backup
+    others = [u for u in (primary, backup, *fallback) if u and u != pinned]
+    return pinned, (others[0] if others else None)
+
+
+def config_revision(
+    *,
+    mode: str,
+    pinned: str | None,
+    primary: str | None,
+    backup: str | None,
+    direct_on: bool,
+    eligible_stamp: str,
+) -> str:
+    """Cheap fingerprint of everything the customer or admin can flip about a config, computed
+    from the device row alone — the per-minute agent check must never cost a panel call. Panel
+    side changes (hosts, subscription) are still picked up by the 5-minute full fetch."""
+    raw = "|".join(
+        [mode, pinned or "-", primary or "-", backup or "-", str(direct_on), eligible_stamp]
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def eligible_stamp(eligible: Collection[str]) -> str:
+    return hashlib.sha256(",".join(sorted(eligible)).encode()).hexdigest()[:16]
+
+
+def location_id(host_uuid: str) -> str:
+    """The opaque id a customer sees for a location — a panel host uuid stays server-side."""
+    return hashlib.sha256(f"router-location:{host_uuid}".encode()).hexdigest()[:12]
+
+
+# MultiScript's «⚡ Автовыбор» is a subscription template over the other hosts, not a server a
+# router could dial on its own — never a location.
+_AUTO_ENTRY_TAG = "MS_AUTO_ENTRY"
+
+
+def is_router_location(host: PanelHost) -> bool:
+    return (
+        host.protocol == "vless"
+        and host.tag != _AUTO_ENTRY_TAG
+        and "автовыбор" not in host.remark.lower()
+        and "⚡" not in host.remark
+    )
+
+
+def squads_grant(host: PanelHost, user_squads: Collection[str]) -> bool:
+    """Unknown squad data on either side = allowed (can't judge), as in hosts_within_squads."""
+    return not user_squads or not host.squad_uuids or bool(set(user_squads) & set(host.squad_uuids))
+
+
+def location_hosts(
+    all_hosts: Sequence[PanelHost],
+    eligible: Collection[str],
+    user_squads: Collection[str],
+    *,
+    include_disabled: bool = False,
+) -> list[PanelHost]:
+    """The locations of one customer: allowlisted router-capable hosts their squads grant, at
+    most MAX_LOCATIONS, ordered by host uuid. Also the router's static probe set — deliberately
+    independent of which server is currently primary and of the panel's own ordering: a set
+    that changes between cycles changes the etag, and every etag change restarts Xray and drops
+    the home's internet (a host dragged around in the panel would otherwise do it fleet-wide).
+    Display order is the caller's business."""
+    return sorted(
+        (
+            h
+            for h in all_hosts
+            if h.uuid in eligible
+            and is_router_location(h)
+            and (include_disabled or not h.is_disabled)
+            and squads_grant(h, user_squads)
+        ),
+        key=lambda h: h.uuid,
+    )[:MAX_LOCATIONS]
+
+
+def pin_still_allowed(
+    pinned: str,
+    all_hosts: Sequence[PanelHost],
+    eligible: Collection[str],
+    user_squads: Collection[str],
+) -> bool:
+    """Whether a location pin survives this config: gone from the allowlist, the panel or the
+    customer's squads → it goes (back to «Авто»). A host merely switched off in the panel keeps
+    its pin — that's maintenance, and the balancer rides it out on the backup. Without panel
+    data at all (``all_hosts`` empty) only the allowlist can be judged."""
+    if pinned not in eligible:
+        return False
+    if not all_hosts:
+        return True
+    host = next((h for h in all_hosts if h.uuid == pinned), None)
+    return host is not None and is_router_location(host) and squads_grant(host, user_squads)
+
+
 def hosts_within_squads(
     assigned: Sequence[PanelHost],
     user_squads: Sequence[str],
@@ -574,7 +712,8 @@ def hosts_within_squads(
 # --- smart AUTO assignment ------------------------------------------------------------------
 
 CANDIDATE_PREFIX = "cand-"
-MAX_CANDIDATES = 6
+# A weak router runs one extra outbound + test port per location.
+MAX_LOCATIONS = 8
 
 
 def candidate_tag(host_uuid: str) -> str:
@@ -638,8 +777,14 @@ def autotune(
         new_primary = best[0]
         new_backup = best[1] if len(best) > 1 else (backup if backup != new_primary else None)
         if (new_primary, new_backup) == (primary, backup):
-            return AutotuneDecision(primary, backup, "первая проверка с роутера: назначенные серверы и так лучшие")
-        return AutotuneDecision(new_primary, new_backup, "первая проверка с роутера: выбраны самые быстрые рабочие серверы")
+            return AutotuneDecision(
+                primary, backup, "первая проверка с роутера: назначенные серверы и так лучшие"
+            )
+        return AutotuneDecision(
+            new_primary,
+            new_backup,
+            "первая проверка с роутера: выбраны самые быстрые рабочие серверы",
+        )
 
     if primary is not None and fail_streaks.get(primary, 0) >= 2:
         best = healthy_by_speed({primary})
@@ -648,11 +793,28 @@ def autotune(
         # a healthy backup is the natural successor; else the fastest healthy one
         new_primary = backup if backup in best else best[0]
         rest = [u for u in best if u != new_primary]
-        return AutotuneDecision(new_primary, rest[0] if rest else None, "основной сервер не прошёл 2 проверки подряд")
+        if not rest:
+            if new_primary == backup:
+                # Only the backup measured healthy (locations are probed every few cycles):
+                # promoting it now would leave the router with no backup at all — and once that
+                # one fails too, the balancer falls back to direct, VPN silently off. The
+                # balancer already rides on the backup; decide on a report with locations in it.
+                return None
+            # The backup is down too: keep it as the backup rather than none, it is replaced
+            # (by the branch below) as soon as a healthy alternative is measured.
+            return AutotuneDecision(
+                new_primary, backup, "основной и резервный серверы не прошли 2 проверки подряд"
+            )
+        return AutotuneDecision(new_primary, rest[0], "основной сервер не прошёл 2 проверки подряд")
 
     if backup is not None and fail_streaks.get(backup, 0) >= 2:
         best = healthy_by_speed({primary, backup})
         if not best:
             return None
         return AutotuneDecision(primary, best[0], "резервный сервер не прошёл 2 проверки подряд")
+
+    if primary is not None and (backup is None or backup == primary):
+        best = healthy_by_speed({primary})
+        if best:
+            return AutotuneDecision(primary, best[0], "у роутера не было резервного сервера")
     return None

@@ -29,6 +29,7 @@ from src.web.routes import (
     cabinet,
     cabinet_auth,
     cabinet_link,
+    cabinet_routers,
     health,
     panel,
     payments,
@@ -186,6 +187,7 @@ def create_app() -> FastAPI:
     app.include_router(cabinet.router)
     app.include_router(cabinet_auth.router)
     app.include_router(cabinet_link.router)
+    app.include_router(cabinet_routers.router)
     app.include_router(app_api.router)  # Windows app: support chat by subscription link
     app.include_router(agent.router)
     app.include_router(agent.short_router)

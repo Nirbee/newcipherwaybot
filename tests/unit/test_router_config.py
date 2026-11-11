@@ -501,3 +501,182 @@ def test_candidates_are_probe_only_never_in_the_balancer() -> None:
     assert "cwtest-cand-cccccccc" in listeners
     rule = [r for r in cfg["routing"]["rules"] if r.get("inboundTag") == ["cwtest-cand-cccccccc"]]
     assert rule and rule[0]["outboundTag"] == "cand-cccccccc"
+
+
+def _vless(uuid: str, **overrides: object) -> PanelHost:
+    return _host(uuid=uuid, address=f"203.0.113.{len(uuid)}", **overrides)
+
+
+def test_direct_mode_routes_all_clients_direct_but_keeps_test_plumbing() -> None:
+    from src.application.services.router_config import TEST_PORT_BASE
+
+    host = _host(uuid="aaaaaaaa-1")
+    cand = _host(uuid="bbbbbbbb-2")
+    normal = build_outbounds([host], vless_uuid=VLESS_UUID, subscription_active=True)
+    direct = build_outbounds(
+        [host],
+        vless_uuid=VLESS_UUID,
+        subscription_active=True,
+        candidates=[cand],
+        direct_mode=True,
+        template=RoutingTemplate(rules=({"type": "field", "outboundTag": "block"},)),
+    )
+    client_rules = [r for r in direct["routing"]["rules"] if "inboundTag" not in r]
+    assert client_rules == [{"type": "field", "network": "tcp,udp", "outboundTag": "direct"}]
+    tags = [o["tag"] for o in direct["outbounds"]]
+    assert "proxy-aaaaaaaa" in tags and "cand-bbbbbbbb" in tags and "direct" in tags
+    ports = {i["port"] for i in direct["inbounds"]}
+    assert TEST_PORT_BASE in ports and TEST_PORT_BASE + 1 in ports
+    assert direct["routing"]["balancers"] == normal["routing"]["balancers"]
+    assert config_etag(direct) != config_etag(normal)
+
+
+def test_direct_mode_on_an_unpaid_router_stays_plain_freedom() -> None:
+    cfg = build_outbounds([], vless_uuid="", subscription_active=False, direct_mode=True)
+    assert [o["tag"] for o in cfg["outbounds"]] == ["direct", "block"]
+
+
+def test_direct_active_compares_with_now() -> None:
+    import datetime as dt
+
+    from src.application.services.router_config import direct_active
+
+    now = dt.datetime(2026, 11, 9, 12, 0, tzinfo=dt.UTC)
+    assert direct_active(True, None, now) is True
+    assert direct_active(False, None, now) is False
+    assert direct_active(False, now + dt.timedelta(seconds=1), now) is True
+    assert direct_active(False, now, now) is False
+    assert direct_active(False, now.replace(tzinfo=None), now) is False  # naive = UTC
+
+
+def test_pin_takes_the_primary_slot_and_backup_is_always_another_server() -> None:
+    from src.application.services.router_config import effective_assignment
+
+    # autotune's own pair is untouched when nothing is pinned
+    assert effective_assignment(None, "a", "b") == ("a", "b")
+    # pin -> primary; backup = autotune's primary if different
+    assert effective_assignment("x", "a", "b") == ("x", "a")
+    # the pin equals autotune's primary -> its backup; equals both -> the location list
+    assert effective_assignment("a", "a", "b") == ("a", "b")
+    assert effective_assignment("a", "a", "a", ["a", "c"]) == ("a", "c")
+    assert effective_assignment("a", None, None) == ("a", None)
+
+
+def test_location_list_excludes_autoselect_hysteria_and_is_capped() -> None:
+    from src.application.services.router_config import MAX_LOCATIONS, location_hosts
+
+    hosts = [
+        _vless("h-auto", remark="⚡ Автовыбор"),
+        _vless("h-tag", remark="Anything", tag="MS_AUTO_ENTRY"),
+        _host(uuid="h-hy", remark="Hysteria2", protocol="hysteria", address="203.0.113.90"),
+        _vless("h-off", remark="Off", is_disabled=True),
+        _vless("h-other-squad", remark="Other", squad_uuids=("sq-2",)),
+        *[_vless(f"h-{i:02d}", remark=f"Loc {i}") for i in range(12)],
+    ]
+    eligible = {h.uuid for h in hosts}
+    got = location_hosts(hosts, eligible, ("sq-1",))
+    assert [h.uuid for h in got] == [f"h-{i:02d}" for i in range(MAX_LOCATIONS)]
+    off = [h for h in hosts if h.uuid == "h-off"]
+    assert location_hosts(off, eligible, ()) == []
+    assert location_hosts(off, eligible, (), include_disabled=True) == off
+    assert MAX_LOCATIONS == 8
+
+
+def test_pin_is_dropped_only_for_lasting_reasons() -> None:
+    from src.application.services.router_config import pin_still_allowed
+
+    host = _vless("h-a")
+    assert pin_still_allowed("h-a", [host], {"h-a"}, ()) is True
+    assert pin_still_allowed("h-a", [host], set(), ()) is False  # left the allowlist
+    assert pin_still_allowed("h-a", [_vless("h-b")], {"h-a"}, ()) is False  # gone from the panel
+    assert pin_still_allowed("h-a", [host], {"h-a"}, ()) is True
+    # Disabled in the panel: maintenance, the balancer covers it; the pin stays.
+    assert pin_still_allowed("h-a", [_vless("h-a", is_disabled=True)], {"h-a"}, ()) is True
+    # No panel data at all: can only judge the allowlist.
+    assert pin_still_allowed("h-a", [], {"h-a"}, ()) is True
+
+
+def test_config_revision_tracks_the_switches_only() -> None:
+    from src.application.services.router_config import config_revision, eligible_stamp
+
+    base = {
+        "mode": "auto",
+        "pinned": None,
+        "primary": "a",
+        "backup": "b",
+        "direct_on": False,
+        "eligible_stamp": eligible_stamp({"a", "b"}),
+    }
+    rev = config_revision(**base)
+    assert rev == config_revision(**base)
+    for change in ({"pinned": "x"}, {"primary": "c"}, {"direct_on": True}):
+        assert config_revision(**{**base, **change}) != rev
+    assert config_revision(**{**base, "eligible_stamp": eligible_stamp({"a"})}) != rev
+    assert len(rev) == 16
+
+
+def test_autotune_never_touches_a_pin_directly() -> None:
+    """The pin lives outside autotune's inputs and outputs: whatever it decides, the config layer
+    still puts the pinned server first."""
+    from src.application.services.router_config import ProbeScore, autotune, effective_assignment
+
+    scores = {
+        "a": ProbeScore("a", False, None, None),
+        "b": ProbeScore("b", True, 0.5, None),
+        "c": ProbeScore("c", True, 0.2, None),
+    }
+    decision = autotune("a", "b", scores, {"a": 2, "b": 0, "c": 0}, tuned=True)
+    assert decision is not None and decision.primary != "a"
+    assert effective_assignment("a", decision.primary, decision.backup) == ("a", decision.primary)
+
+
+def test_autotune_keeps_the_backup_when_only_it_was_measured() -> None:
+    """Locations are probed every few cycles. The primary fails in a cycle without them: the
+    backup is the only healthy server known — promoting it now would leave no backup at all."""
+    from src.application.services.router_config import ProbeScore, autotune
+
+    scores = {
+        "a": ProbeScore("a", False, None, None),
+        "b": ProbeScore("b", True, 0.3, True),
+    }
+    assert autotune("a", "b", scores, {"a": 2, "b": 0}, tuned=True) is None
+    # A cycle with the locations measured: the backup moves up, a measured server backs it.
+    scores["c"] = ProbeScore("c", True, 0.5, None)
+    decision = autotune("a", "b", scores, {"a": 3, "b": 0, "c": 0}, tuned=True)
+    assert decision is not None and (decision.primary, decision.backup) == ("b", "c")
+
+
+def test_autotune_both_down_keeps_a_backup_and_fills_a_missing_one() -> None:
+    from src.application.services.router_config import ProbeScore, autotune
+
+    scores = {
+        "a": ProbeScore("a", False, None, None),
+        "b": ProbeScore("b", False, None, None),
+        "c": ProbeScore("c", True, 0.4, None),
+    }
+    decision = autotune("a", "b", scores, {"a": 2, "b": 2, "c": 0}, tuned=True)
+    assert decision is not None and (decision.primary, decision.backup) == ("c", "b")
+    # A router left without a backup gets the best healthy other server.
+    healthy = {"a": ProbeScore("a", True, 0.2, True), "c": ProbeScore("c", True, 0.4, None)}
+    decision = autotune("a", None, healthy, {"a": 0, "c": 0}, tuned=True)
+    assert decision is not None and (decision.primary, decision.backup) == ("a", "c")
+    # ...but never the primary itself, and nothing to do without a candidate.
+    assert autotune("a", None, {"a": healthy["a"]}, {"a": 0}, tuned=True) is None
+
+
+def test_location_set_ignores_the_panel_order() -> None:
+    from src.application.services.router_config import location_hosts
+
+    hosts = [_vless(f"h-{i:02d}", remark=f"Loc {i}") for i in range(10)]
+    eligible = {h.uuid for h in hosts}
+    first = location_hosts(hosts, eligible, ())
+    again = location_hosts(list(reversed(hosts)), eligible, ())
+    assert [h.uuid for h in first] == [h.uuid for h in again]
+
+
+def test_substituted_server_is_scored_as_itself() -> None:
+    subs = proxies_from_subscription([_sub_server("🇳🇱 NL", "203.0.113.2")])
+    assigned = [_host(uuid="aaaaaaaa-1", remark="DE", address="203.0.113.9")]
+    nl = _host(uuid="bbbbbbbb-2", remark="NL", address="203.0.113.2")
+    pick = select_subscription_outbounds(subs, assigned, preferred=[nl])
+    assert pick.hosts == {"proxy-bbbbbbbb": "bbbbbbbb-2"}
