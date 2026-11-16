@@ -69,6 +69,7 @@
     wizAppTitle: "Приложение",
     wizAppSub: (a) => `Установите приложение ${a}\nи вернитесь к этому экрану`,
     wizInstall: "Установить приложение",
+    wizNoStore: "Не скачивается из App Store?",
     wizNext: "Следующий шаг",
     wizSubTitle: "Подписка",
     wizSubSub: (a) => `Добавьте подписку в приложение\n${a} с помощью кнопки ниже`,
@@ -148,6 +149,7 @@
     wizAppTitle: "The app",
     wizAppSub: (a) => `Install the ${a} app\nand come back to this screen`,
     wizInstall: "Install the app",
+    wizNoStore: "Not in your App Store?",
     wizNext: "Next step",
     wizSubTitle: "Subscription",
     wizSubSub: (a) => `Add the subscription to ${a}\nusing the button below`,
@@ -1160,6 +1162,16 @@
         }));
       }
       install.slice(1).forEach((b) => actions.append(wizNote(b, "↗")));
+      // Happ & co. are gone from the Russian App Store — a guide to switching the region.
+      const os = wizOs();
+      if (os === "ios" || os === "macos") {
+        const guide = location.origin + "/help/appstore.html";
+        actions.append(el("button", {
+          class: "btn ghost wiz-btn",
+          onclick: () => { haptic(); wa && wa.openLink ? wa.openLink(guide) : window.open(guide, "_blank"); },
+          text: "? " + T.wizNoStore,
+        }));
+      }
       actions.append(
         el("button", { class: "btn ghost wiz-btn", onclick: () => wizSet({ step: 2 }), text: T.wizNext + " →" }),
         back(0),
