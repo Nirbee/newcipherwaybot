@@ -14,6 +14,7 @@ type TicketRow = {
   status: "open" | "waiting" | "closed";
   is_premium: boolean;
   channel: TicketChannel;
+  sources: TicketSource[];
   priority: number;
   effective_priority: number;
   waiting_minutes: number | null;
@@ -25,24 +26,41 @@ type TicketList = {
   open_count: number;
   open_regular: number;
   open_premium: number;
+  open_by_source: Record<TicketSource, number>;
 };
-type Section = "all" | "premium" | "regular";
 type TicketChannel = "bot" | "cabinet" | "app";
-/* Where the conversation lives. Bot is the default and gets no badge; the Windows app is a
-   separate thread per subscription (the customer only proved that subscription's link). */
-const CHANNEL_BADGE: Record<TicketChannel, string | null> = {
-  bot: null,
-  cabinet: "🌐 Кабинет",
-  app: "💻 Приложение",
-};
-const ChannelBadge = ({ channel }: { channel: TicketChannel }) =>
-  CHANNEL_BADGE[channel] ? <span className="cap-pill">{CHANNEL_BADGE[channel]}</span> : null;
+/* Where the customer wrote from — decided on the server by how they authenticated (the
+   mini-app and the site share one endpoint). The bot and the cabinet share ONE thread per
+   account, so a conversation can carry several sources and is listed under each of them;
+   the Windows app is a separate thread per subscription. */
+type TicketSource = "bot" | "miniapp" | "web" | "app";
+const SOURCES: { id: TicketSource; label: string; badge: string }[] = [
+  { id: "bot", label: "Бот", badge: "🤖 Бот" },
+  { id: "miniapp", label: "Мини-приложение", badge: "📱 Мини-приложение" },
+  { id: "web", label: "Сайт", badge: "🌐 Сайт" },
+  { id: "app", label: "Приложение Windows", badge: "💻 Windows" },
+];
+const SOURCE_BADGE = Object.fromEntries(SOURCES.map((x) => [x.id, x.badge])) as Record<TicketSource, string>;
+const SourceBadges = ({ sources }: { sources: TicketSource[] }) => (
+  <>
+    {sources.map((src) => (
+      <span key={src} className="cap-pill" style={{ marginRight: 4 }}>
+        {SOURCE_BADGE[src] ?? src}
+      </span>
+    ))}
+  </>
+);
+/* «Обычные» (= not premium) gave way to the source tabs: premium threads are pinned to the
+   top of «Все» anyway, and seven tabs in a row read worse than six. */
+type Section = "all" | "premium" | TicketSource;
+const SECTIONS: Section[] = ["all", "premium", ...SOURCES.map((x) => x.id)];
 type TicketDetail = {
   id: number;
   subject: string;
   status: string;
   is_premium: boolean;
   channel: TicketChannel;
+  sources: TicketSource[];
   subscription_id: number | null;
   priority: number;
   offers: {
@@ -58,6 +76,7 @@ type TicketDetail = {
     text: string;
     attachment_url: string | null;
     attachment_kind: "photo" | "document" | null;
+    source: TicketSource | null;
     at: string | null;
   }[];
 };
@@ -123,11 +142,12 @@ export default function Tickets() {
   const [redirect, setRedirect] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferDraft | null>(null);
   const [sendingOffer, setSendingOffer] = useState(false);
-  // Premium conversations live in their own section; the choice survives a reload.
+  // Premium conversations and each source live in their own section; the choice survives a
+  // reload (a saved «regular» from before the source tabs falls back to «Все»).
   const [section, setSection] = useState<Section>(() => {
     try {
       const v = localStorage.getItem("tickets_section");
-      if (v === "all" || v === "premium" || v === "regular") return v;
+      if (SECTIONS.includes(v as Section)) return v as Section;
     } catch {
       /* storage blocked — default below */
     }
@@ -157,7 +177,11 @@ export default function Tickets() {
     queryKey: ["tickets", section],
     queryFn: () =>
       api.get<TicketList>(
-        section === "all" ? "/api/admin/tickets" : `/api/admin/tickets?premium=${section === "premium"}`,
+        section === "all"
+          ? "/api/admin/tickets"
+          : section === "premium"
+            ? "/api/admin/tickets?premium=true"
+            : `/api/admin/tickets?source=${section}`,
       ),
     refetchInterval: 8_000,
   });
@@ -340,7 +364,11 @@ export default function Tickets() {
                   count: (tickets.data?.open_regular ?? 0) + (tickets.data?.open_premium ?? 0) || undefined,
                 },
                 { id: "premium", label: "💎 Премиум", count: tickets.data?.open_premium || undefined },
-                { id: "regular", label: "Обычные", count: tickets.data?.open_regular || undefined },
+                ...SOURCES.map((x) => ({
+                  id: x.id,
+                  label: x.label,
+                  count: tickets.data?.open_by_source?.[x.id] || undefined,
+                })),
               ]}
             />
             {section !== "premium" && (tickets.data?.open_premium ?? 0) > 0 && (
@@ -363,7 +391,7 @@ export default function Tickets() {
                   <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     <span className="mono dim">#{tk.id}</span>{" "}
                     {tk.is_premium && <span className="cap-pill">💎 {t.premiumBadge}</span>}{" "}
-                    <ChannelBadge channel={tk.channel} />{" "}
+                    <SourceBadges sources={tk.sources ?? []} />
                     {tk.username ? `@${tk.username}` : "—"} · {tk.subject}
                   </div>
                   <div className="dim" style={{ fontSize: 11.5 }}>
@@ -394,7 +422,11 @@ export default function Tickets() {
           })}
           {tickets.data && tickets.data.items.length === 0 && (
             <div className="tr dim">
-              {section === "premium" ? "Премиум-обращений пока нет" : "Обращений нет"}
+              {section === "premium"
+                ? "Премиум-обращений пока нет"
+                : section === "all"
+                  ? "Обращений нет"
+                  : `Обращений из раздела «${SOURCES.find((x) => x.id === section)?.label}» нет`}
             </div>
           )}
         </div>
@@ -407,7 +439,7 @@ export default function Tickets() {
                 <span>
                   <b className="mono">#{d.id}</b> ·{" "}
                   {d.is_premium && <span className="cap-pill">💎 {t.premiumBadge}</span>}{" "}
-                  <ChannelBadge channel={d.channel} />
+                  <SourceBadges sources={d.sources ?? []} />
                   {d.channel === "app" && d.subscription_id !== null && (
                     <span className="dim"> подписка #{d.subscription_id}</span>
                   )}{" "}
@@ -510,6 +542,7 @@ export default function Tickets() {
                       className="mono"
                       style={{ fontSize: 9.5, opacity: 0.6, marginTop: 4, textAlign: "right" }}
                     >
+                      {m.source && (d.sources ?? []).length > 1 && `${SOURCE_BADGE[m.source] ?? m.source} · `}
                       {dtTime(m.at)}
                     </div>
                   </div>

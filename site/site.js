@@ -12,6 +12,7 @@
 
   var RU = {
     navPlans: "Тарифы", navFeatures: "Возможности", navFaq: "Вопросы", cabinet: "Личный кабинет",
+    navSupport: "Поддержка", supportTelegram: "Написать в Telegram",
     buy: "Купить подписку", statusOn: "Защита включена", daysShort: "дней", speed: "Скорость",
     plansTitle: "Тарифы", plansSub: "Оплата картой, СБП, криптой или Telegram Stars",
     featuresTitle: "Почему мы", faqTitle: "Частые вопросы", ctaBand: "Готовы подключиться?",
@@ -21,6 +22,7 @@
   };
   var EN = {
     navPlans: "Plans", navFeatures: "Features", navFaq: "FAQ", cabinet: "Account",
+    navSupport: "Support", supportTelegram: "Message us on Telegram",
     buy: "Get a plan", statusOn: "Protected", daysShort: "days", speed: "Speed",
     plansTitle: "Plans", plansSub: "Pay by card, SBP, crypto or Telegram Stars",
     featuresTitle: "Why us", faqTitle: "FAQ", ctaBand: "Ready to connect?",
@@ -47,6 +49,7 @@
   var DEMO = {
     enabled: true, template: "a", title: "VPN", accent_color: null, headline: "", subheadline: "",
     features: [], faq: [], cta_target: "web", bot_username: "", cabinet_url: "/web/", currency: "RUB",
+    support_web: true, support_telegram: "",
     plans: [
       { name: "Старт", description: "Для одного устройства", durations: [{ months: 1, days: 30, price_minor: 19900 }, { months: 6, days: 180, price_minor: 99900 }, { months: 12, days: 365, price_minor: 179900 }] },
       { name: "Премиум", description: "5 устройств · для семьи", durations: [{ months: 1, days: 30, price_minor: 29900 }, { months: 6, days: 180, price_minor: 149900 }, { months: 12, days: 365, price_minor: 269900 }] },
@@ -86,6 +89,17 @@
     var u = cfg.cabinet_url || "/web/";
     // Only http(s)/relative targets — never let a tampered config yield javascript:/data:.
     return /^(https?:\/\/|\/)/i.test(u) ? u : "/web/";
+  }
+  function tgHref(name) {
+    var n = String(name || "").replace(/[^A-Za-z0-9_]/g, "");
+    return n ? "https://t.me/" + n : "";
+  }
+  // «Поддержка»: the web cabinet's chat (it asks to log in first — no anonymous tickets);
+  // without the web cabinet, the support Telegram account, else the bot itself.
+  function supportLinks(cfg) {
+    var tg = tgHref(cfg.support_telegram);
+    if (cfg.support_web) return { main: "/web/#support", telegram: tg };
+    return { main: tg || tgHref(cfg.bot_username), telegram: "" };
   }
   function openCabinet(href) {
     return function (e) { if (e) e.preventDefault(); window.open(href, href.charAt(0) === "/" ? "_self" : "_blank"); };
@@ -197,6 +211,21 @@
       a.href = href;
       a.setAttribute("target", href.charAt(0) === "/" ? "_self" : "_blank");
     });
+    var sup = supportLinks(cfg);
+    ["#navSupport", "#footSupport"].forEach(function (sel) {
+      var a = $(sel);
+      if (!a) return;
+      a.hidden = !sup.main;
+      if (!sup.main) return;
+      a.href = sup.main;
+      a.setAttribute("target", sup.main.charAt(0) === "/" ? "_self" : "_blank");
+      if (sup.main.charAt(0) !== "/") a.setAttribute("rel", "noopener");
+    });
+    var tg = $("#footTelegram");
+    if (tg) {
+      tg.hidden = !sup.telegram;
+      if (sup.telegram) tg.href = sup.telegram;
+    }
   }
 
   function boot(cfg) {

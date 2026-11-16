@@ -13,7 +13,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from src.core.enums import Availability, Currency, PlanCategory, TicketAuthor, TicketStatus
+from src.core.enums import (
+    Availability,
+    Currency,
+    PlanCategory,
+    TicketAuthor,
+    TicketSource,
+    TicketStatus,
+)
 from src.infrastructure.database.base import utcnow
 from src.infrastructure.database.models.plan import Plan, PlanDuration, PlanPrice
 from src.infrastructure.database.models.ticket import Ticket, TicketMessage
@@ -72,7 +79,12 @@ async def open_request(uow: UnitOfWork, user: User, text: str) -> tuple[Ticket, 
     else:
         ticket.is_premium = True
     await uow.ticket_messages.add(
-        TicketMessage(ticket_id=ticket.id, author=TicketAuthor.USER, text=text[:4096])
+        TicketMessage(
+            ticket_id=ticket.id,
+            author=TicketAuthor.USER,
+            text=text[:4096],
+            source=TicketSource.BOT,  # the request form lives in the bot only
+        )
     )
     ticket.status = TicketStatus.OPEN
     ticket.updated_at = utcnow()

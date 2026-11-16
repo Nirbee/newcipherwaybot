@@ -85,6 +85,8 @@ function brand() {
 // Social logins the owner actually configured; until /config answers we show none (an
 // unconfigured button used to 400 with "provider not configured" — a dead button).
 let oauthProviders = [];
+// Telegram username of support (bot or account) — «Написать в Telegram» in the support tab.
+let supportTelegram = "";
 async function loadBrand() {
   try {
     const c = await api("GET", `${C}/config`);
@@ -92,6 +94,7 @@ async function loadBrand() {
       brandTitle = String(c.title);
       document.title = brandTitle;
     }
+    if (c && c.support_telegram) supportTelegram = String(c.support_telegram).replace(/[^A-Za-z0-9_]/g, "");
     if (c && Array.isArray(c.oauth_providers)) {
       oauthProviders = c.oauth_providers;
       render();
@@ -182,6 +185,15 @@ function authView() {
     el("div", { class: `tab${authTab === "renew" ? " on" : ""}`, onclick: () => { authTab = "renew"; render(); } }, "Продлить"),
   ]);
   root.append(tabs);
+  if (wantsSupport() && (authTab === "login" || authTab === "register")) {
+    root.append(el("div", { class: "card" }, [
+      el("h2", {}, "Поддержка"),
+      el("div", { class: "hint" }, "Войдите или зарегистрируйтесь — так мы увидим вашу подписку и ответим прямо в кабинете."),
+      supportTelegram
+        ? el("a", { class: "btn ghost", href: `https://t.me/${supportTelegram}`, target: "_blank", rel: "noopener" }, "Написать в Telegram")
+        : null,
+    ]));
+  }
 
   if (authTab === "guest") { root.append(guestCard()); return root; }
   if (authTab === "renew") { root.append(renewCard()); return root; }
@@ -486,8 +498,13 @@ function planPicker(plans, onPay, guest) {
 
 /* ---------- cabinet ---------- */
 
+function cabTabs(active) {
+  const tab = (id, text) => el("div", { class: `tab${active === id ? " on" : ""}`, onclick: () => { if (active !== id) route(id); } }, text);
+  return el("div", { class: "tabs" }, [tab("cabinet", "Кабинет"), tab("support", "Поддержка")]);
+}
+
 async function cabinetView() {
-  const root = el("div", {}, [brand()]);
+  const root = el("div", {}, [brand(), cabTabs("cabinet")]);
   let me;
   try { me = await api("GET", `${C}/me`, null, true); }
   catch (e) {
@@ -776,6 +793,160 @@ function linkEmailForm(card) {
   card.append(box);
 }
 
+/* ---------- «Поддержка» ----------
+   The same chat as the mini-app (/api/cabinet/support): the AI answers at once, an operator
+   replies here (and in Telegram, if it is linked). Logged-in users only — no anonymous
+   tickets. The server tags these messages «Сайт» by the web session itself. */
+
+const sup = { messages: [], status: null, sending: false, poll: null, list: null, note: null };
+
+// /web/#support (the site's «Поддержка») — remembered for this tab until the visitor is in,
+// so it survives the login form and an OAuth round-trip.
+function wantsSupport() { try { return sessionStorage.getItem("wc_support") === "1"; } catch { return false; } }
+function setWantsSupport(on) {
+  try { if (on) sessionStorage.setItem("wc_support", "1"); else sessionStorage.removeItem("wc_support"); } catch {}
+}
+
+function supStop() { clearInterval(sup.poll); sup.poll = null; }
+
+async function supLoad() {
+  const d = await api("GET", `${C}/support`, null, true);
+  const fresh = d.messages || [];
+  const changed = fresh.length !== sup.messages.length || d.status !== sup.status;
+  sup.messages = fresh;
+  sup.status = d.status;
+  return changed;
+}
+
+function supBubble(m) {
+  const kids = [];
+  // only server-built upload paths (defence in depth: never a javascript:/foreign URL)
+  if (m.image && /^\/uploads\/[\w\/.-]+$/.test(m.image) && !m.image.includes("..")) kids.push(el("img", { src: m.image, alt: "скриншот", onclick: () => window.open(m.image, "_blank") }));
+  if (m.text) kids.push(el("div", {}, m.text));
+  if (m.at) kids.push(el("div", { class: "at" }, new Date(m.at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })));
+  return el("div", { class: `bubble ${m.from === "you" ? "you" : "them"}` }, kids);
+}
+
+function supDraw() {
+  if (!sup.list) return;
+  sup.list.innerHTML = "";
+  if (!sup.messages.length) {
+    sup.list.append(el("div", { class: "hint" }, "Опишите вопрос — ответим здесь. Можно приложить скриншот (📎)."));
+  }
+  sup.messages.forEach((m) => sup.list.append(supBubble(m)));
+  sup.list.scrollTop = sup.list.scrollHeight;
+  // The last word is the customer's and the thread is open — nobody (AI included) has
+  // answered: an operator is on the way. Derived from the server, so it survives a reload.
+  const last = sup.messages[sup.messages.length - 1];
+  sup.note.innerHTML = "";
+  if (sup.sending) sup.note.append(el("div", { class: "hint" }, "Отправляем…"));
+  else if (last && last.from === "you" && sup.status === "open") {
+    sup.note.append(el("div", { class: "sup-wait" }, "Подключаем оператора — ответ появится здесь. Можно закрыть страницу и вернуться позже."));
+  }
+}
+
+// Operator replies arrive without a reload: a quiet poll while the tab is visible.
+function supPollStart() {
+  if (sup.poll) return;
+  sup.poll = setInterval(async () => {
+    if (view !== "support") { supStop(); return; }
+    if (document.hidden || sup.sending) return;
+    try { if (await supLoad()) supDraw(); } catch {}
+  }, 10000);
+}
+
+// Multipart upload with the same one-shot token refresh as api().
+async function supUpload(file, text, _retried) {
+  const form = new FormData();
+  form.append("file", file);
+  if (text) form.append("text", text);
+  const res = await fetch(`${C}/support/photo`, { method: "POST", headers: { Authorization: "Bearer " + store.access }, body: form });
+  if (res.status === 401 && store.refresh && !_retried && await tryRefresh()) return supUpload(file, text, true);
+  if (res.status === 413) throw new Error("Файл больше 10 МБ");
+  if (res.status === 429) throw new Error("Слишком часто — попробуйте через минуту");
+  if (!res.ok) throw new Error("Не удалось отправить картинку (jpg, png, webp)");
+}
+
+async function supportView() {
+  const root = el("div", {}, [brand(), cabTabs("support")]);
+  try { await supLoad(); }
+  catch (e) {
+    // Session gone: log in again and come straight back to the chat.
+    if (e && (e.status === 401 || e.status === 403)) { store.clear(); setWantsSupport(true); route("auth"); return el("div", {}); }
+    root.append(el("div", { class: "card" }, [
+      el("div", { class: "hint" }, "Не удалось загрузить переписку. Проверь соединение."),
+      el("button", { class: "btn", onclick: () => route("support") }, "Обновить"),
+    ]));
+    return root;
+  }
+  sup.list = el("div", { class: "sup-list" });
+  sup.note = el("div", {});
+  const input = el("textarea", { rows: "2", maxlength: "4000", placeholder: "Опишите вопрос…" });
+  const file = el("input", { type: "file", accept: "image/jpeg,image/png,image/webp", style: "display:none" });
+  const sendBtn = el("button", { class: "btn primary" }, "Отправить");
+  const attachBtn = el("button", { class: "btn ghost", title: "Прикрепить скриншот" }, "📎");
+
+  function busy(on) {
+    sup.sending = on;
+    sendBtn.disabled = on;
+    attachBtn.disabled = on;
+    supDraw();
+  }
+  async function sendText() {
+    const text = input.value.trim();
+    if (!text || sup.sending) return;
+    sup.messages = sup.messages.concat([{ from: "you", text }]);
+    input.value = "";
+    busy(true);
+    try {
+      const r = await api("POST", `${C}/support`, { text }, true);
+      if (r && r.ai_outcome === "escalate") toast("Подключаем оператора");
+    } catch (e) {
+      toast(e.message);
+      input.value = text;
+    }
+    try { await supLoad(); } catch {}
+    busy(false);
+  }
+  async function sendPhoto(f) {
+    if (!f || sup.sending) return;
+    if (f.size > 10 * 1024 * 1024) return toast("Файл больше 10 МБ");
+    const caption = input.value.trim();
+    busy(true);
+    try {
+      await supUpload(f, caption);
+      input.value = "";
+    } catch (e) { toast(e.message); }
+    try { await supLoad(); } catch {}
+    busy(false);
+  }
+  sendBtn.onclick = sendText;
+  attachBtn.onclick = () => file.click();
+  file.addEventListener("change", () => { const f = file.files && file.files[0]; file.value = ""; sendPhoto(f); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); } });
+  input.addEventListener("paste", (e) => {
+    const f = Array.from((e.clipboardData && e.clipboardData.files) || []).find((x) => x.type.startsWith("image/"));
+    if (f) { e.preventDefault(); sendPhoto(f); }
+  });
+
+  root.append(el("div", { class: "card" }, [
+    el("h2", {}, "Поддержка"),
+    sup.list,
+    sup.note,
+    el("div", { class: "sup-row" }, [file, attachBtn, input, sendBtn]),
+    el("div", { class: "hint" }, "Enter — отправить, Shift+Enter — новая строка. Скриншот можно вставить из буфера."),
+  ]));
+  if (supportTelegram) {
+    root.append(el("div", { class: "card" }, [
+      el("div", { class: "hint", style: "margin-top:0" }, "Удобнее в Telegram? Напишите нам там:"),
+      el("a", { class: "btn ghost", href: `https://t.me/${supportTelegram}`, target: "_blank", rel: "noopener" }, "Написать в Telegram"),
+    ]));
+  }
+  supDraw();
+  supPollStart();
+  return root;
+}
+
 /* ---------- router ---------- */
 
 let view = "auth";
@@ -788,11 +959,15 @@ async function render() {
   // then overwrite the freshly drawn auth screen with cabinetView's empty fallback node —
   // a blank white page. The seq check makes a superseded render bail instead of clobbering.
   const seq = ++renderSeq;
+  // Logged in after coming from the site's «Поддержка» → straight to the chat.
+  if (view === "cabinet" && wantsSupport()) { setWantsSupport(false); view = "support"; }
+  if (view !== "support") supStop();
   const a = app();
   a.innerHTML = "";
   a.append(el("div", { class: "muted center" }, "…"));
   let node;
   if (view === "cabinet") node = await cabinetView();
+  else if (view === "support") node = await supportView();
   else if (view === "reset") node = await resetView();
   else if (view === "login-link") node = await loginLinkView();
   else node = authView();
@@ -813,6 +988,11 @@ async function boot() {
     await loadBrand();
     route(resetToken ? "reset" : "login-link");  // asks «это вы?» before using the token
     return;
+  }
+  // /web/#support or ?support — the site's «Поддержка»: the chat, after login if needed.
+  if (params.get("support") !== null || location.hash === "#support") {
+    setWantsSupport(true);
+    history.replaceState({}, "", location.pathname);
   }
   // /web/?renew=1 — straight to «Продлить» (the site's button); ?renewed=1 — back from paying.
   if (params.get("renew") !== null || location.hash === "#renew") authTab = "renew";

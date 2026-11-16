@@ -9,6 +9,8 @@ Which conversation is decided by ``Ticket.channel`` + ``Ticket.subscription_id``
 the subject: ``app_subscription_id=None`` is the shared bot/cabinet thread of the account;
 a subscription id is the Windows-app thread of THAT subscription (its link token is all the
 app proved). The «💻 » subject prefix on app tickets is only a visual hint in the admin queue.
+Each customer message also records its ``TicketSource`` (bot / mini-app / site / app) — the
+caller passes what the AUTH proved, not anything from the request body.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile
 
 from src.application.events import TicketOpened
-from src.core.enums import TicketAuthor, TicketChannel, TicketStatus
+from src.core.enums import TicketAuthor, TicketChannel, TicketSource, TicketStatus
 from src.infrastructure.database.base import utcnow
 from src.infrastructure.database.models.ticket import Ticket, TicketMessage
 from src.infrastructure.database.models.user import User
@@ -117,10 +119,14 @@ async def _post(
     message: TicketMessage,
     subject: str,
     app_subscription_id: int | None,
+    source: TicketSource | None,
 ) -> tuple[int, bool]:
     """Append ``message`` to the open ticket of this conversation (opening one if none) and
-    reopen it. Returns (ticket_id, created); publishes TicketOpened for a new ticket."""
+    reopen it. Returns (ticket_id, created); publishes TicketOpened for a new ticket.
+    ``source`` defaults to the app for an app thread, else the mini-app (the cabinet routes
+    always pass what the auth proved — see cabinet.cabinet_source)."""
     app = app_subscription_id is not None
+    message.source = source or (TicketSource.APP if app else TicketSource.MINIAPP)
     if app:
         subject = APP_TICKET_PREFIX + subject
     subject = subject[:64]
@@ -160,6 +166,7 @@ async def support_send(
     raw_text: str,
     *,
     app_subscription_id: int | None = None,
+    source: TicketSource | None = None,
 ) -> dict[str, Any]:
     """Post a support message; the AI answers/escalates (same engine as the bot tickets).
     In the app channel the AI is pinned to that one subscription (tools act on it only and
@@ -168,7 +175,7 @@ async def support_send(
     if not text:
         raise HTTPException(400, "empty message")
     message = TicketMessage(author=TicketAuthor.USER, text=text)
-    ticket_id, _ = await _post(container, user, message, text, app_subscription_id)
+    ticket_id, _ = await _post(container, user, message, text, app_subscription_id, source)
     if app_subscription_id is None:
         outcome, ai_text = await container.ai_support.handle_ticket(user, ticket_id)
     else:
@@ -185,6 +192,7 @@ async def support_send_photo(
     text: str,
     *,
     app_subscription_id: int | None = None,
+    source: TicketSource | None = None,
 ) -> dict[str, Any]:
     """A screenshot into the support conversation. Stored like the bot's ticket screenshots
     (uploads/tickets/) so the admin thread renders it inline."""
@@ -208,6 +216,6 @@ async def support_send_photo(
         attachment_kind="photo",
     )
     ticket_id, _ = await _post(
-        container, user, message, caption or "📎 Скриншот", app_subscription_id
+        container, user, message, caption or "📎 Скриншот", app_subscription_id, source
     )
     return {"ok": True, "ticket_id": ticket_id}

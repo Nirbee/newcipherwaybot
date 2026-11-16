@@ -47,13 +47,25 @@ async def cabinet_base_url(container: AppContainer, uow: UnitOfWork) -> str:
     return url
 
 
-async def support_contact(container: AppContainer, uow: UnitOfWork) -> str:
-    """«Поддержка: https://t.me/…» from the support settings, or "" when there is none."""
+async def support_username(container: AppContainer, uow: UnitOfWork) -> str:
+    """Telegram username of support for the CURRENT support mode only, without «@»: the support
+    bot in «bot» mode, the redirect account in «redirect» mode, "" otherwise. A leftover value
+    from a mode the owner switched away from (e.g. a personal account) is never exposed — this
+    feeds the public /config and the landing page."""
     cfg = container.bot_config
     mode = str(await cfg.value(uow, "SUPPORT_MODE") or "")
     bot = str(await cfg.value(uow, "SUPPORT_BOT_USERNAME") or "").strip().lstrip("@")
     person = str(await cfg.value(uow, "SUPPORT_REDIRECT_USERNAME") or "").strip().lstrip("@")
-    name = bot if (mode == "bot" and bot) else (person or bot)
+    if mode == "bot":
+        return bot
+    if mode == "redirect":
+        return person
+    return ""
+
+
+async def support_contact(container: AppContainer, uow: UnitOfWork) -> str:
+    """«Поддержка: https://t.me/…» from the support settings, or "" when there is none."""
+    name = await support_username(container, uow)
     return f"Поддержка: https://t.me/{name}" if name else ""
 
 

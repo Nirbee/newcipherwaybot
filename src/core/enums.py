@@ -269,6 +269,18 @@ class TicketChannel(StrEnum):
     APP = "app"
 
 
+class TicketSource(StrEnum):
+    """Which surface a customer's message came from (TicketMessage.source). Finer than
+    TicketChannel: the mini-app and the web cabinet call the same /api/cabinet/support, so the
+    server tells them apart by how the request authenticated (Telegram initData vs a web
+    session) — never by anything the client says."""
+
+    BOT = "bot"
+    MINIAPP = "miniapp"
+    WEB = "web"
+    APP = "app"  # the Windows app
+
+
 class MenuNodeKind(StrEnum):
     """Bot menu-constructor node types (screen == submenu with its own text)."""
 

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from src.application.services import premium
-from src.core.enums import TicketAuthor, TicketChannel, TicketStatus
+from src.core.enums import TicketAuthor, TicketChannel, TicketSource, TicketStatus
 from src.core.logging import get_logger
 from src.infrastructure.database.base import utcnow
 from src.infrastructure.database.models.ticket import TicketMessage
@@ -43,6 +43,10 @@ def _aware(value: dt.datetime) -> dt.datetime:
     return value if value.tzinfo else value.replace(tzinfo=dt.UTC)
 
 
+# Canonical order of the source badges / tab counters.
+_SOURCES = tuple(TicketSource)
+
+
 def effective_priority(manual: int, waiting_min: int | None, is_premium: bool) -> int:
     """The queue's sort key: the higher of the manual priority and the waiting-time
     escalation, bumped one level for premium customers (their support is the product)."""
@@ -60,12 +64,16 @@ def effective_priority(manual: int, waiting_min: int | None, is_premium: bool) -
 
 @router.get("/tickets")
 async def list_tickets(
-    premium: bool | None = None, container: AppContainer = Depends(get_container)
+    premium: bool | None = None,
+    source: TicketSource | None = None,
+    container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
     """``premium=true`` -> only premium conversations (their own «💎 Премиум» section),
-    ``false`` -> only regular ones, omitted -> everything. Filtered in SQL, so an older
-    premium chat never falls off behind the 200 most recent regular tickets."""
-    from sqlalchemy import func, select
+    ``false`` -> only regular ones, omitted -> everything. ``source`` -> only conversations
+    with a customer message from that surface (bot / miniapp / web / app); a shared
+    bot+cabinet thread written from two surfaces is listed under both. Filters combine and
+    run in SQL, so an older chat never falls off behind the 200 most recent other tickets."""
+    from sqlalchemy import distinct, exists, func, select
 
     from src.infrastructure.database.models.ticket import Ticket
     from src.infrastructure.database.models.user import User
@@ -86,8 +94,22 @@ async def list_tickets(
         )
         if premium is not None:
             stmt = stmt.where(Ticket.is_premium.is_(premium))
+        if source is not None:
+            stmt = stmt.where(
+                exists().where(TicketMessage.ticket_id == Ticket.id, TicketMessage.source == source)
+            )
         tickets = (await uow.session.execute(stmt)).all()
         ids = [t.id for t, _u, _c in tickets]
+        seen: dict[int, set[TicketSource]] = {}
+        if ids:
+            for tid, src in (
+                await uow.session.execute(
+                    select(TicketMessage.ticket_id, TicketMessage.source)
+                    .where(TicketMessage.ticket_id.in_(ids), TicketMessage.source.is_not(None))
+                    .distinct()
+                )
+            ).all():
+                seen.setdefault(tid, set()).add(src)
         last_ids = select(func.max(TicketMessage.id)).where(TicketMessage.ticket_id.in_(ids))
         last_ids = last_ids.group_by(TicketMessage.ticket_id)
         last_msgs = (
@@ -122,6 +144,8 @@ async def list_tickets(
                     "status": t.status.value,
                     "is_premium": t.is_premium,
                     "channel": t.channel.value,  # bot | cabinet | app (Windows app)
+                    # Surfaces the customer wrote from: bot | miniapp | web | app.
+                    "sources": [s.value for s in _SOURCES if s in seen.get(t.id, ())],
                     "priority": t.priority,
                     "effective_priority": effective_priority(t.priority, waiting, t.is_premium),
                     "waiting_minutes": waiting,
@@ -147,12 +171,24 @@ async def list_tickets(
                 )
             ).all()
         )
+        by_source: dict[TicketSource | None, int] = {
+            src: int(n)
+            for src, n in (
+                await uow.session.execute(
+                    select(TicketMessage.source, func.count(distinct(Ticket.id)))
+                    .join(Ticket, Ticket.id == TicketMessage.ticket_id)
+                    .where(Ticket.status != TicketStatus.CLOSED, TicketMessage.source.is_not(None))
+                    .group_by(TicketMessage.source)
+                )
+            ).all()
+        }
     return {
         "items": rows[:100],
         "open_count": open_count,
         # Open conversations per section — the tab badges.
         "open_regular": int(by_kind.get(False, 0)),
         "open_premium": int(by_kind.get(True, 0)),
+        "open_by_source": {s.value: by_source.get(s, 0) for s in _SOURCES},
     }
 
 
@@ -167,12 +203,14 @@ async def ticket_detail(
         user = await uow.users.get(t.user_id)
         messages = sorted(await uow.ticket_messages.list(ticket_id=ticket_id), key=lambda m: m.id)
         offers = await premium.customer_offers(uow, user) if user is not None else []
+        seen = {m.source for m in messages if m.source is not None}
         return {
             "id": t.id,
             "subject": t.subject,
             "status": t.status.value,
             "is_premium": t.is_premium,
             "channel": t.channel.value,
+            "sources": [s.value for s in _SOURCES if s in seen],
             "subscription_id": t.subscription_id,
             "priority": t.priority,
             "offers": [
@@ -205,6 +243,7 @@ async def ticket_detail(
                     "text": m.text,
                     "attachment_url": m.attachment_url,
                     "attachment_kind": m.attachment_kind,
+                    "source": m.source.value if m.source is not None else None,
                     "at": iso(m.created_at),
                 }
                 for m in messages

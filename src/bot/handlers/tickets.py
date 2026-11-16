@@ -24,7 +24,7 @@ from src.application.services import premium
 from src.bot.banners import render_screen
 from src.bot.keyboards import simple_keyboard
 from src.bot.screen import ack
-from src.core.enums import TicketAuthor, TicketStatus
+from src.core.enums import TicketAuthor, TicketSource, TicketStatus
 from src.core.logging import get_logger
 from src.infrastructure.database.base import utcnow
 from src.infrastructure.database.models.ticket import Ticket, TicketMessage
@@ -72,6 +72,7 @@ async def _append_ticket_message(
                 text=text[:4096],
                 attachment_url=attachment_url,
                 attachment_kind=attachment_kind,
+                source=TicketSource.BOT,
             )
         )
         active.status = TicketStatus.OPEN
@@ -157,9 +158,7 @@ async def user_message(
         # act_support pointed the user elsewhere; creating a DB ticket nobody is watching
         # would silently orphan the message and contradict what we told them.
         return
-    ticket_id, created, is_premium = await _append_ticket_message(
-        container, db_user, text=text
-    )
+    ticket_id, created, is_premium = await _append_ticket_message(container, db_user, text=text)
 
     if created:
         # Instant "tickets" report topic (screen 14) listens on the bus.

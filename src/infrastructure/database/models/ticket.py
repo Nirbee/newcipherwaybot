@@ -12,7 +12,7 @@ import datetime as dt
 from sqlalchemy import Boolean, Enum, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.core.enums import TicketAuthor, TicketChannel, TicketStatus
+from src.core.enums import TicketAuthor, TicketChannel, TicketSource, TicketStatus
 from src.infrastructure.database.base import AwareDateTime, Base, IntPk, TimestampMixin, utcnow
 
 
@@ -62,5 +62,10 @@ class TicketMessage(IntPk, Base):
     # "document", used client-side to decide whether to render an <img> or a file link.
     attachment_url: Mapped[str | None] = mapped_column(String(255))
     attachment_kind: Mapped[str | None] = mapped_column(String(16))
+    # Where a customer message was written (see TicketSource); None for staff/AI messages.
+    # One bot/cabinet thread can mix sources — the admin queue files it under each of them.
+    source: Mapped[TicketSource | None] = mapped_column(
+        Enum(TicketSource, native_enum=False, length=16)
+    )
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")

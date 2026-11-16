@@ -250,7 +250,7 @@ async def _paid(
 async def test_paid_letter_for_guest_without_telegram(
     uow: UnitOfWork, env: SimpleNamespace, letters: list[dict[str, Any]]
 ) -> None:
-    await _mail_on(uow, env, SUPPORT_REDIRECT_USERNAME="help_desk")
+    await _mail_on(uow, env, SUPPORT_MODE="redirect", SUPPORT_REDIRECT_USERNAME="help_desk")
     pid = await _paid(uow, telegram_id=None)
     await tasks._notify_paid(env, pid)
 

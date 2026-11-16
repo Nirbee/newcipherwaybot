@@ -37,6 +37,7 @@ from src.core.enums import (
     Locale,
     PlanCategory,
     PurchaseType,
+    TicketSource,
     TransactionStatus,
     TransactionType,
     UserStatus,
@@ -113,6 +114,7 @@ async def cabinet_user(request: Request, container: AppContainer = Depends(get_c
         web_user = await web_user_from_bearer(request, container)
         if web_user is None:
             raise HTTPException(401, "bad token")
+        request.state.cabinet_source = TicketSource.WEB
         return web_user
     if not auth.startswith("tma "):
         raise HTTPException(401, "unauthorized")
@@ -142,7 +144,18 @@ async def cabinet_user(request: Request, container: AppContainer = Depends(get_c
         await container.event_bus.publish(UserRegistered(user_id=user.id, telegram_id=tg_id))
     if user.status is UserStatus.BLOCKED:
         raise HTTPException(403, "blocked")
+    request.state.cabinet_source = TicketSource.MINIAPP
     return user
+
+
+def cabinet_source(request: Request) -> TicketSource:
+    """Which surface the request came from, as PROVEN by the auth cabinet_user() accepted:
+    a web-cabinet session (Bearer) is the site, Telegram initData is the mini-app. Set only
+    after a successful auth — never derived from anything the client chose to send."""
+    source = getattr(request.state, "cabinet_source", None)
+    if not isinstance(source, TicketSource):
+        raise RuntimeError("cabinet_source() before cabinet_user() authenticated the request")
+    return source
 
 
 def _sub_payload(sub: Any, *, hide_link: bool = False) -> dict[str, Any] | None:
@@ -477,13 +490,18 @@ async def renew_pay(
 async def public_landing(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
     """Everything the public marketing site (served at ``/``) needs, unauthenticated:
     the chosen theme + branding, hero/features/FAQ copy, the tariff list, and where the
-    «Личный кабинет» button points (the web auth window or the Telegram bot)."""
+    «Личный кабинет» button points (the web auth window or the Telegram bot). «Поддержка»
+    leads to the web cabinet's chat (login first) and, when support has a Telegram account,
+    also to «Написать в Telegram» — there is no anonymous ticket form (spam)."""
+    from src.infrastructure.services.user_mail import support_username
+
     async with container.uow() as uow:
         cfg = container.bot_config
         miniapp = await uow.miniapp.get_or_create()
         landing = dict((miniapp.ui or {}).get("landing") or {})
         web_enabled = bool(await cfg.value(uow, "WEB_CABINET_ENABLED"))
         bot_username = str(await cfg.value(uow, "BOT_USERNAME") or "")
+        support_telegram = await support_username(container, uow)
         # The web cabinet is always mounted at /web on this same origin. Use the relative
         # path (not CABINET_URL, which may be a bare domain now fronted by this landing —
         # that would loop the «Личный кабинет» button back here).
@@ -507,6 +525,9 @@ async def public_landing(container: AppContainer = Depends(get_container)) -> di
         "renew_enabled": web_enabled,  # «Продлить по @username» lives in the web cabinet
         "bot_username": bot_username,
         "cabinet_url": cabinet_url,
+        # The cabinet's support chat (/web/#support) exists only with the web cabinet on.
+        "support_web": web_enabled,
+        "support_telegram": support_telegram,
         "currency": "RUB",
         "plans": await _plan_items(container),
     }
@@ -982,18 +1003,24 @@ async def apply_promocode(
 async def support_history(
     user: User = Depends(cabinet_user), container: AppContainer = Depends(get_container)
 ) -> dict[str, Any]:
-    """Current support conversation (for the mini-app chat + polling operator replies)."""
+    """Current support conversation (mini-app / web-cabinet chat + polling operator replies)."""
     return await support.support_history(container, user)
 
 
 @router.post("/support")
 async def support_send(
     body: SupportIn,
+    request: Request,
     user: User = Depends(cabinet_user),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
-    """Post a support message; the AI answers/escalates (same engine as the bot tickets)."""
-    return await support.support_send(container, user, body.text)
+    """Post a support message; the AI answers/escalates (same engine as the bot tickets).
+    The message is tagged mini-app or site by the auth that was used (cabinet_source)."""
+    from src.web.routes.cabinet_auth import _client_ip, _rate_limit
+
+    await _rate_limit(container, "cab-sup", _client_ip(request), limit=20, window=60)
+    await _rate_limit(container, "cab-sup-u", str(user.id), limit=10, window=60)
+    return await support.support_send(container, user, body.text, source=cabinet_source(request))
 
 
 @router.post("/support/photo")
@@ -1010,7 +1037,9 @@ async def support_send_photo(
     await _rate_limit(container, "cab-photo", _client_ip(request), limit=10, window=60)
     await _rate_limit(container, "cab-photo-u", str(user.id), limit=5, window=60)
     async with support.photo_form(request) as (file, text):
-        return await support.support_send_photo(container, user, file, text)
+        return await support.support_send_photo(
+            container, user, file, text, source=cabinet_source(request)
+        )
 
 
 @router.post("/trial")
@@ -1223,6 +1252,7 @@ async def traffic(
 async def app_config(container: AppContainer = Depends(get_container)) -> dict[str, Any]:
     """Public theming config (no auth) so the shell can paint before initData checks."""
     from src.infrastructure.services.oauth import PROVIDER_NAMES
+    from src.infrastructure.services.user_mail import support_username
 
     async with container.uow() as uow:
         miniapp = await uow.miniapp.get_or_create()
@@ -1235,6 +1265,8 @@ async def app_config(container: AppContainer = Depends(get_container)) -> dict[s
             if str(await cfg.value(uow, f"OAUTH_{name.upper()}_CLIENT_ID") or "")
             and str(await cfg.value(uow, f"OAUTH_{name.upper()}_CLIENT_SECRET") or "")
         ]
+        # Public anyway (the site shows it): the web cabinet's «Написать в Telegram».
+        support_telegram = await support_username(container, uow)
         await uow.commit()
     return {
         "template": miniapp.template,
@@ -1243,6 +1275,7 @@ async def app_config(container: AppContainer = Depends(get_container)) -> dict[s
         "accent_color": miniapp.accent_color,
         "published_at": miniapp.published_at.isoformat() if miniapp.published_at else None,
         "oauth_providers": oauth_providers,
+        "support_telegram": support_telegram,
     }
 
 
