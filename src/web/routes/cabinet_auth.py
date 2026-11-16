@@ -19,16 +19,25 @@ import secrets
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
     from sqlalchemy import CursorResult
 
+    from src.infrastructure.database.uow import UnitOfWork
+
+from src.application.services.account_link import (
+    GUEST_FLAG,
+    PW_CHANGED_AT,
+    is_guest_account,
+    password_changed_at,
+)
 from src.application.services.ids import generate_referral_code
 from src.core.config import get_settings
 from src.core.enums import AuthType, Currency, UserStatus
+from src.core.logging import get_logger
 from src.core.security import hash_password, jwt_decode, jwt_encode, verify_password
 from src.infrastructure.database.models.cabinet_token import CabinetRefreshToken
 from src.infrastructure.database.models.user import User
@@ -36,6 +45,7 @@ from src.infrastructure.di import AppContainer
 from src.web.deps import get_container
 
 router = APIRouter(prefix="/api/cabinet/auth", tags=["cabinet-auth"])
+log = get_logger(__name__)
 
 _ACCESS_TTL = 15 * 60
 _REFRESH_TTL_DAYS = 7
@@ -143,21 +153,28 @@ def _client_ip(request: Request) -> str:
     return real or peer
 
 
-async def _rate_limit(
+async def _over_limit(
     container: AppContainer, bucket: str, ident: str, *, limit: int, window: int
-) -> None:
-    """Fixed-window per-identity limiter for the auth endpoints (brute-force / enumeration /
-    account-creation spam). Fail-OPEN: a Redis hiccup must never lock real users out."""
+) -> bool:
+    """Count one hit in a fixed window; True once ``limit`` is exceeded. Fail-OPEN."""
     if not ident:
-        return
+        return False
     key = f"rl:auth:{bucket}:{ident}"
     try:
         n = int(await container.redis.incr(key))
         if n == 1:
             await container.redis.expire(key, window)
     except Exception:  # availability over enforcement — never lock out on a Redis hiccup
-        return
-    if n > limit:
+        return False
+    return n > limit
+
+
+async def _rate_limit(
+    container: AppContainer, bucket: str, ident: str, *, limit: int, window: int
+) -> None:
+    """Fixed-window per-identity limiter for the auth endpoints (brute-force / enumeration /
+    account-creation spam). Fail-OPEN: a Redis hiccup must never lock real users out."""
+    if await _over_limit(container, bucket, ident, limit=limit, window=window):
         raise HTTPException(429, "too many attempts — try again later")
 
 
@@ -351,10 +368,54 @@ async def web_user_from_bearer(request: Request, container: AppContainer) -> Use
         user = await uow.users.get(int(payload["sub"]))
     if user is None or user.status is UserStatus.BLOCKED:
         return None  # blocked -> cabinet_user() raises 401, same as the bot/tma block
+    # A password reset ends sessions opened before it. Strict «<»: the session the reset
+    # itself hands out (same second) stays valid.
+    if int(payload.get("iat") or 0) < password_changed_at(user):
+        return None
     return user
 
 
 # --- guest purchase (buy without any prior registration) --------------------
+
+# GUEST_FLAG marks an account the guest purchase created with a random password nobody knows.
+# Only such an account gets a one-click login link in its letters (see user_mail), and until
+# the mailbox owner claims it, it can't be bound to anything else (Telegram, OAuth).
+GUEST_CLAIM_FIRST = "Сначала задайте пароль по ссылке из письма (или «Забыли пароль?»)"
+
+
+def clear_guest_flag(user: User) -> None:
+    settings_ = user.notification_settings or {}
+    if GUEST_FLAG in settings_:
+        user.notification_settings = {k: v for k, v in settings_.items() if k != GUEST_FLAG}
+
+
+async def _claim_mailbox(uow: UnitOfWork, user: User, now: dt.datetime) -> None:
+    """The owner of the address just proved the mailbox (reset link, OAuth with that e-mail).
+
+    Whoever pre-claimed the account before them (a guest purchase on someone else's address
+    hands its buyer an auto-login token) is shut out: the guest flag goes, every session /
+    auto-login token / link code minted before ``now`` dies (PW_CHANGED_AT), and every refresh
+    token is revoked. Commit is the caller's."""
+    from sqlalchemy import update
+
+    user.notification_settings = {
+        **{k: v for k, v in (user.notification_settings or {}).items() if k != GUEST_FLAG},
+        PW_CHANGED_AT: int(now.timestamp()),
+    }
+    await uow.session.execute(
+        update(CabinetRefreshToken)
+        .where(
+            CabinetRefreshToken.user_id == user.id,
+            CabinetRefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+
+
+def _mask_email(email: str | None) -> str:
+    """a***@example.com — enough to recognise your own address, not to harvest someone's."""
+    local, _, domain = (email or "").partition("@")
+    return f"{local[:1]}***@{domain}" if local and domain else "***"
 
 
 def _auto_login_token(container: AppContainer, user_id: int) -> str:
@@ -416,6 +477,7 @@ async def guest_purchase(
                 email_verified=not verify,
                 referral_code=generate_referral_code(),
                 currency=Currency.RUB,
+                notification_settings={GUEST_FLAG: True},
             )
             await uow.users.add(user)
             created = True
@@ -455,22 +517,238 @@ class AutoLoginIn(BaseModel):
     token: str = Field(..., min_length=8)
 
 
+async def _auto_login_user(container: AppContainer, token: str) -> User:
+    """The account an auto-login token may open — or an HTTPException. No side effects."""
+    payload = jwt_decode(token, _jwt_secret(container))
+    if payload is None or payload.get("type") != "auto_login":
+        raise HTTPException(401, "invalid token")
+    async with container.uow() as uow:
+        user = await uow.users.get(int(payload["sub"]))
+    if user is None:
+        raise HTTPException(401, "user gone")
+    # never let an auto-login token (weak proof) unlock a staff account
+    if user.role.is_staff:
+        raise HTTPException(403, "not allowed for staff accounts")
+    # One-click login exists only for a still-unclaimed guest account: once the mailbox owner
+    # set a password (or claimed it via OAuth), and for tokens older than the last reset, no.
+    if not is_guest_account(user) or int(payload.get("iat") or 0) < password_changed_at(user):
+        raise HTTPException(401, "invalid token")
+    return user
+
+
 @router.post("/login/auto")
 async def login_auto(
     body: AutoLoginIn, request: Request, container: AppContainer = Depends(get_container)
 ) -> dict[str, Any]:
     """Exchange a guest auto-login token for a full session (post-purchase convenience)."""
-    payload = jwt_decode(body.token, _jwt_secret(container))
-    if payload is None or payload.get("type") != "auto_login":
-        raise HTTPException(401, "invalid token")
-    async with container.uow() as uow:
-        user = await uow.users.get(int(payload["sub"]))
-        if user is None:
-            raise HTTPException(401, "user gone")
-        # never let an auto-login token (weak proof) unlock a staff account
-        if user.role.is_staff:
-            raise HTTPException(403, "not allowed for staff accounts")
+    user = await _auto_login_user(container, body.token)
     return await _auth_response(container, user, device=request.headers.get("user-agent"))
+
+
+@router.post("/login/auto/preview")
+async def login_auto_preview(
+    body: AutoLoginIn, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    """Which account a letter's one-click link opens (masked e-mail), so the page can ask
+    «Войти как a***@…?» before exchanging it. POST, not GET: the token must stay out of the
+    access logs, which is why it travels in the URL fragment in the first place."""
+    await _rate_limit(container, "auto_preview", _client_ip(request), limit=30, window=3600)
+    user = await _auto_login_user(container, body.token)
+    return {"email": _mask_email(user.email)}
+
+
+# --- «Забыли пароль?» (one-time link by e-mail) ------------------------------
+
+_RESET_TTL = 3600
+# Only the SHA-256 of a reset token is ever stored, never the token itself.
+_RESET_TOKEN_PREFIX = "pwreset:t:"  # + sha256(token) -> {"uid", "ph"}
+_RESET_USER_PREFIX = "pwreset:u:"  # + user id -> hash of the one live link of that account
+_RESET_INVALID = "ссылка недействительна или устарела — запросите новую"
+
+
+def _password_fingerprint(user: User) -> str:
+    """Binds a link to the password it was issued against: once the password changes by any
+    route, every older link is dead even inside its hour."""
+    return _hash(user.password_hash or "")[:16]
+
+
+class PasswordForgotIn(BaseModel):
+    email: str = Field(..., max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v: str) -> str:
+        return v.strip().lower()
+
+
+async def _send_reset_link(container: AppContainer, email: str) -> None:
+    """Runs AFTER the response (BackgroundTasks): the lookup and the SMTP round-trip must not
+    shape the answer or its timing — otherwise «forgot» becomes an «is this address
+    registered?» oracle. Silent for unknown, staff and blocked accounts."""
+    import json
+
+    from src.infrastructure.services.user_mail import brand_title, cabinet_base_url, render_html
+
+    try:
+        async with container.uow() as uow:
+            user = await uow.users.get_by_email(email)
+            # Staff never: e-mail access must not be enough to take over an admin account
+            # (mirrors the guard in login_auto).
+            if (
+                user is None
+                or not user.email
+                or user.role.is_staff
+                or user.status is UserStatus.BLOCKED
+            ):
+                return
+            cabinet = await cabinet_base_url(container, uow)
+            brand = await brand_title(uow)
+            user_id, to, fingerprint = user.id, user.email, _password_fingerprint(user)
+        if not cabinet:
+            log.warning("password reset: no cabinet URL configured", user_id=user_id)
+            return
+        token = secrets.token_urlsafe(32)
+        token_hash = _hash(token)
+        # One live link per account: a fresh request kills the previous one.
+        old = await container.redis.get(f"{_RESET_USER_PREFIX}{user_id}")
+        if old:
+            old = old.decode() if isinstance(old, bytes) else str(old)
+            await container.redis.delete(f"{_RESET_TOKEN_PREFIX}{old}")
+        await container.redis.set(
+            f"{_RESET_TOKEN_PREFIX}{token_hash}",
+            json.dumps({"uid": user_id, "ph": fingerprint}),
+            ex=_RESET_TTL,
+        )
+        await container.redis.set(f"{_RESET_USER_PREFIX}{user_id}", token_hash, ex=_RESET_TTL)
+        # In the fragment: never sent to the server, so it can't land in access logs / Referer.
+        link = f"{cabinet}#reset={token}"
+        text = (
+            "Здравствуйте!\n\n"
+            "Кто-то (возможно, вы) запросил смену пароля для входа в личный кабинет.\n"
+            f"Чтобы задать новый пароль, перейдите по ссылке:\n{link}\n\n"
+            "Ссылка действует 1 час и сработает один раз. Если вы не запрашивали смену "
+            "пароля — просто проигнорируйте это письмо, пароль останется прежним."
+        )
+        mailer = await container.build_mailer()
+        await mailer.send(
+            to,
+            "Восстановление пароля",
+            text,
+            html=render_html(text, brand=brand, button=("Задать новый пароль", link)),
+        )
+    except Exception as exc:  # background: nobody to report to but the log
+        log.warning("password reset mail failed", error=str(exc))
+
+
+@router.post("/password/forgot")
+async def password_forgot(
+    body: PasswordForgotIn,
+    request: Request,
+    background: BackgroundTasks,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Step 1 of «Забыли пароль?»: always the same «ok» for any address."""
+    await _require_web_enabled(container)
+    await _rate_limit(container, "pw_forgot", _client_ip(request), limit=10, window=3600)
+    mailer = await container.build_mailer()
+    if not mailer.configured:  # independent of the address — reveals nothing about it
+        raise HTTPException(503, "почта не настроена — обратитесь к владельцу сервиса")
+    # Per-address caps answer the same «ok» and just send nothing: a 429 here would differ
+    # by address, and the caps exist to stop someone's mailbox being flooded.
+    email = str(body.email)
+    hourly = await _over_limit(container, "pw_forgot_email", email, limit=3, window=3600)
+    daily = await _over_limit(container, "pw_forgot_email_day", email, limit=10, window=86400)
+    if not (hourly or daily):
+        background.add_task(_send_reset_link, container, email)
+    return {"ok": True}
+
+
+class PasswordResetIn(BaseModel):
+    token: str = Field(..., min_length=16, max_length=128)
+    password: str = Field(..., min_length=8, max_length=128)  # same rule as RegisterIn
+
+
+@router.post("/password/reset")
+async def password_reset(
+    body: PasswordResetIn, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    """Step 2: spend the link, set the new password, end every other cabinet session."""
+    import json
+
+    from sqlalchemy import update
+
+    await _require_web_enabled(container)
+    await _rate_limit(container, "pw_reset", _client_ip(request), limit=20, window=3600)
+    # GETDEL = atomic single use: two concurrent requests with one link can't both pass.
+    raw = await container.redis.getdel(f"{_RESET_TOKEN_PREFIX}{_hash(body.token)}")
+    if raw is None:
+        raise HTTPException(400, _RESET_INVALID)
+    data = json.loads(raw)
+    user_id = int(data["uid"])
+    now = dt.datetime.now(dt.UTC)
+    async with container.uow() as uow:
+        user = await uow.users.get(user_id)
+        if user is None:
+            raise HTTPException(400, _RESET_INVALID)
+        if user.role.is_staff:  # same guard as login_auto: e-mail alone never unlocks staff
+            raise HTTPException(403, "not allowed for staff accounts")
+        _ensure_active(user)
+        if not secrets.compare_digest(_password_fingerprint(user), str(data.get("ph") or "")):
+            raise HTTPException(400, _RESET_INVALID)  # password changed since the link was sent
+        # Compare-and-set on the old hash: of two links racing for one account (issued just
+        # before each other) only one can apply — the loser matches no row.
+        old_hash, new_hash = user.password_hash, hash_password(body.password)
+        result = await uow.session.execute(
+            update(User)
+            .where(
+                User.id == user_id,
+                User.password_hash.is_(None)
+                if old_hash is None
+                else User.password_hash == old_hash,
+            )
+            .values(password_hash=new_hash)
+            .execution_options(synchronize_session=False)
+        )
+        if (cast("CursorResult[Any]", result).rowcount or 0) == 0:
+            raise HTTPException(400, _RESET_INVALID)
+        user.password_hash = new_hash
+        user.email_verified = True  # following the link proved the mailbox is theirs
+        user.notification_settings = {
+            k: v
+            for k, v in (user.notification_settings or {}).items()
+            if k not in ("verify_token", "verify_expires")
+        }
+        # Guest flag off, every older session / auto-login token / link code dead, refresh
+        # tokens revoked. Access JWTs issued before ``now`` are refused by web_user_from_bearer.
+        await _claim_mailbox(uow, user, now)
+        await uow.commit()
+    await container.redis.delete(f"{_RESET_USER_PREFIX}{user_id}")
+    await container.redis.delete(f"link_email:{user_id}")  # a pending «Привязать почту» too
+    return await _auth_response(container, user, device=request.headers.get("user-agent"))
+
+
+class PasswordPreviewIn(BaseModel):
+    token: str = Field(..., min_length=16, max_length=128)
+
+
+@router.post("/password/reset/preview")
+async def password_reset_preview(
+    body: PasswordPreviewIn, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    """Masked e-mail of the account a reset link is for («Задать пароль для a***@…?»).
+    Only reads — the link stays usable. POST so the token never lands in access logs."""
+    import json
+
+    await _require_web_enabled(container)
+    await _rate_limit(container, "pw_preview", _client_ip(request), limit=30, window=3600)
+    raw = await container.redis.get(f"{_RESET_TOKEN_PREFIX}{_hash(body.token)}")
+    if raw is None:
+        raise HTTPException(400, _RESET_INVALID)
+    async with container.uow() as uow:
+        user = await uow.users.get(int(json.loads(raw)["uid"]))
+    if user is None:
+        raise HTTPException(400, _RESET_INVALID)
+    return {"email": _mask_email(user.email)}
 
 
 # --- «Войти через Telegram» (deep-link + confirm in the bot) -----------------
@@ -586,7 +864,10 @@ async def oauth_authorize(
         from src.web.routes.cabinet import cabinet_user
 
         user = await cabinet_user(request, container)
+        if is_guest_account(user):  # an unclaimed guest account binds nothing (pre-claim)
+            raise HTTPException(403, GUEST_CLAIM_FIRST)
         payload["link_user_id"] = user.id
+        payload["link_issued"] = int(dt.datetime.now(dt.UTC).timestamp())
     challenge = None
     if prov.needs_pkce:
         verifier, challenge = make_pkce_pair()
@@ -624,7 +905,13 @@ async def _oauth_login(container: AppContainer, provider: str, info: Any) -> Use
         user = None
         if info.email and info.email_verified:
             user = await uow.users.get_by_email(info.email)
-            if user is not None and not user.email_verified:
+            if user is not None and is_guest_account(user):
+                # The provider vouches for the mailbox: its owner claims the guest account a
+                # purchase created for this address. Whoever bought it (and holds its auto-login
+                # token) is shut out; nobody ever knew its random password.
+                user.email_verified = True
+                await _claim_mailbox(uow, user, dt.datetime.now(dt.UTC))
+            elif user is not None and not user.email_verified:
                 # a never-confirmed local account must not be taken over via OAuth
                 raise HTTPException(409, "email exists but is unverified — log in and link instead")
         if user is None:
@@ -660,15 +947,20 @@ async def _oauth_login(container: AppContainer, provider: str, info: Any) -> Use
 
 
 async def _oauth_link(
-    container: AppContainer, provider: str, info: Any, user_id: int
+    container: AppContainer, provider: str, info: Any, user_id: int, *, issued: int = 0
 ) -> dict[str, Any]:
-    """Attach the provider identity to an already-authenticated account."""
+    """Attach the provider identity to an already-authenticated account. ``issued`` — when the
+    link flow was started; a password reset since then voids it."""
     from src.infrastructure.database.models.linked_account import LinkedAccount
 
     async with container.uow() as uow:
         user = await uow.users.get(user_id)
         if user is None:
             raise HTTPException(401, "user gone")
+        if is_guest_account(user):
+            raise HTTPException(403, GUEST_CLAIM_FIRST)
+        if issued < password_changed_at(user):
+            raise HTTPException(401, "invalid or expired state")
         ident = await uow.linked_accounts.get_identity(provider, info.provider_id)
         if ident is not None:
             if ident.user_id != user.id:
@@ -724,6 +1016,12 @@ async def oauth_callback(
 
     link_user_id = saved.get("link_user_id")
     if link_user_id:
-        return await _oauth_link(container, body.provider, info, int(link_user_id))
+        return await _oauth_link(
+            container,
+            body.provider,
+            info,
+            int(link_user_id),
+            issued=int(saved.get("link_issued") or 0),
+        )
     user = await _oauth_login(container, body.provider, info)
     return await _auth_response(container, user, device=request.headers.get("user-agent"))

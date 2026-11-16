@@ -41,6 +41,45 @@ TG_LINK_PREFIX = "link_tg:"
 # the bot, then carries the Telegram user's id for the site's poll to pick up.
 TG_WEBLOGIN_PREFIX = "weblogin:"
 
+# notification_settings keys of a web account:
+# GUEST_FLAG — created by the guest purchase with a random password nobody knows; cleared the
+# moment the owner of the address proves the mailbox (password reset, OAuth with that e-mail)
+# or sets a password of their own.
+GUEST_FLAG = "guest_password"
+# PW_CHANGED_AT — unix time of the last password reset: every session, auto-login token and
+# link code minted for the account before it is dead.
+PW_CHANGED_AT = "pw_changed_at"
+
+
+def is_guest_account(user: User) -> bool:
+    return bool((user.notification_settings or {}).get(GUEST_FLAG))
+
+
+def password_changed_at(user: User) -> int:
+    try:
+        return int((user.notification_settings or {}).get(PW_CHANGED_AT) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def pack_link_code(user_id: int, issued: int) -> str:
+    """Payload of a «Привязать Telegram» code: the web user and when the code was minted."""
+    return f"{user_id}:{issued}"
+
+
+def unpack_link_code(raw: object) -> tuple[int, int] | None:
+    """(web user id, issued unix time). A pre-upgrade code is a bare id — issued 0, so a
+    password reset since then already rejects it."""
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    if raw is None:
+        return None
+    uid, _, issued = str(raw).partition(":")
+    try:
+        return int(uid), int(issued or 0)
+    except ValueError:
+        return None
+
 
 class AccountLinkError(Exception):
     """Human-readable refusal (already linked, conflicting e-mails, …)."""

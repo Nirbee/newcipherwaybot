@@ -218,14 +218,12 @@ async def _link_prompt(message: Message, container: AppContainer, code: str) -> 
     account takeover. The confirm screen shows the web account's e-mail so the person can
     tell it isn't theirs and decline.
     """
-    from src.application.services.account_link import TG_LINK_PREFIX
+    from src.application.services.account_link import TG_LINK_PREFIX, unpack_link_code
 
     code = code.strip()
     raw = await container.redis.get(f"{TG_LINK_PREFIX}{code}")  # peek, don't spend yet
-    try:
-        web_user_id = int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        web_user_id = None
+    parsed = unpack_link_code(raw)
+    web_user_id = parsed[0] if parsed else None
     if web_user_id is None:
         await message.answer(
             "🔗 Ссылка привязки устарела. Открой кабинет на сайте и нажми "
@@ -260,7 +258,10 @@ async def acclink_confirm(cb: CallbackQuery, container: AppContainer, db_user: U
     from src.application.services.account_link import (
         TG_LINK_PREFIX,
         AccountLinkError,
+        is_guest_account,
         merge_web_into_telegram,
+        password_changed_at,
+        unpack_link_code,
     )
 
     try:
@@ -275,17 +276,21 @@ async def acclink_confirm(cb: CallbackQuery, container: AppContainer, db_user: U
         await cb.answer()
         return
     raw = await container.redis.getdel(f"{TG_LINK_PREFIX}{code}")  # spend on confirm
-    try:
-        web_user_id = int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        web_user_id = None
-    if web_user_id is None:
+    parsed = unpack_link_code(raw)
+    if parsed is None:
         await cb.answer("Ссылка устарела", show_alert=True)
         return
+    web_user_id, issued = parsed
     async with container.uow() as uow:
         user = await uow.users.get(db_user.id)
         if user is None:
             await cb.answer("Ошибка, попробуй ещё раз", show_alert=True)
+            return
+        web = await uow.users.get(web_user_id)
+        # A code minted before the web account's password reset (the mailbox owner took it
+        # back), or for a still-unclaimed guest account, merges nothing.
+        if web is not None and (is_guest_account(web) or issued < password_changed_at(web)):
+            await cb.answer("Ссылка устарела", show_alert=True)
             return
         try:
             await merge_web_into_telegram(uow, user, web_user_id)

@@ -139,12 +139,158 @@ NOTIFICATION_EVENTS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 _DEFAULT = {ev: text for ev, _, text, _ in NOTIFICATION_EVENTS}
 _META = {ev: (title, ph) for ev, title, _, ph in NOTIFICATION_EVENTS}
 
+# --- e-mail letters (people without Telegram: web cabinet / guest buyers) ----------------
+# Same {placeholder} mechanism as the Telegram set, but a letter has a subject AND a body, so
+# it is a parallel set. Stored in the same table under ``email:<event>`` (body + on/off) and
+# ``email:<event>:subject`` — no schema change. Rows exist only once the owner edits a letter;
+# untouched letters follow the code default (so better defaults reach them on deploy).
+# The body is PLAIN text: the HTML part is built from it with everything escaped, so neither
+# the owner's text nor a value (plan name, user name) can inject markup into the letter.
+_EMAIL_PAY_PH = ("plan", "amount", "expire", "sub_url", "cabinet_url", "support")
+_EMAIL_HOWTO = (
+    "Как подключиться:\n"
+    "1. Установите приложение: на телефоне и Mac — Happ, v2RayTun или Hiddify; "
+    "на Windows — {windows_app}.\n"
+    "2. Скопируйте ссылку-подписку и добавьте её в приложение "
+    "(кнопка «+» → «Вставить из буфера»).\n"
+    "3. Включите VPN."
+)
+# (event, RU title, default subject, default body, placeholders). Order = display order.
+EMAIL_EVENTS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
+    (
+        "purchase",
+        "Оплата подписки",
+        "Подписка оплачена — VPN готов к работе",
+        "Здравствуйте!\n\n"
+        "Оплата получена, подписка активна.\n\n"
+        "Тариф: {plan}\nСумма: {amount}\nДействует до: {expire}\n\n"
+        "Ваша ссылка-подписка:\n{sub_url}\n\n"
+        f"{_EMAIL_HOWTO}\n\n"
+        "Войти в кабинет: {cabinet_url}\n\n"
+        "{support}",
+        (*_EMAIL_PAY_PH, "windows_app"),
+    ),
+    (
+        "renewal",
+        "Продление подписки",
+        "Подписка продлена до {expire}",
+        "Здравствуйте!\n\n"
+        "Оплата получена, подписка продлена.\n\n"
+        "Тариф: {plan}\nСумма: {amount}\nДействует до: {expire}\n\n"
+        "Ссылка-подписка прежняя — приложение подхватит продление само:\n{sub_url}\n\n"
+        "Войти в кабинет: {cabinet_url}\n\n"
+        "{support}",
+        _EMAIL_PAY_PH,
+    ),
+    (
+        "plan_changed",
+        "Смена тарифа",
+        "Тариф изменён на «{plan}»",
+        "Здравствуйте!\n\n"
+        "Оплата получена, тариф изменён.\n\n"
+        "Тариф: {plan}\nСумма: {amount}\nДействует до: {expire}\n\n"
+        "Ваша ссылка-подписка:\n{sub_url}\n\n"
+        "Войти в кабинет: {cabinet_url}\n\n"
+        "{support}",
+        _EMAIL_PAY_PH,
+    ),
+    (
+        "traffic_topup",
+        "Докупка трафика",
+        "Трафик добавлен к подписке",
+        "Здравствуйте!\n\n"
+        "Оплата получена, трафик добавлен к подписке.\n\n"
+        "Сумма: {amount}\nПодписка действует до: {expire}\n\n"
+        "Войти в кабинет: {cabinet_url}\n\n"
+        "{support}",
+        _EMAIL_PAY_PH,
+    ),
+    (
+        "balance_topup",
+        "Пополнение баланса",
+        "Баланс пополнен на {amount}",
+        "Здравствуйте!\n\n"
+        "Баланс пополнен на {amount}. Текущий баланс: {balance}.\n\n"
+        "Войти в кабинет: {cabinet_url}\n\n"
+        "{support}",
+        ("amount", "balance", "cabinet_url", "support"),
+    ),
+    (
+        "expiring",
+        "Подписка скоро закончится",
+        "Подписка закончится через {time}",
+        "Здравствуйте!\n\n"
+        "Подписка «{plan}» закончится через {time} ({expire}).\n\n"
+        "Продлите её заранее, чтобы VPN не отключился:\n{renew_url}\n\n"
+        "{support}",
+        ("plan", "expire", "hours", "time", "renew_url", "support"),
+    ),
+    (
+        "expired",
+        "Подписка закончилась",
+        "Подписка закончилась",
+        "Здравствуйте!\n\n"
+        "Подписка «{plan}» закончилась, VPN отключён.\n\n"
+        "Продлите её — и всё снова заработает в том же приложении:\n{renew_url}\n\n"
+        "{support}",
+        ("plan", "expire", "renew_url", "support"),
+    ),
+)
+
+_EMAIL_DEFAULT = {ev: (subj, body) for ev, _t, subj, body, _ph in EMAIL_EVENTS}
+_EMAIL_META = {ev: (title, ph) for ev, title, _s, _b, ph in EMAIL_EVENTS}
+_EMAIL_SUBJECT_MAX = 255
+
+
+def _email_key(event: str) -> str:
+    return f"email:{event}"
+
+
+def _email_subject_key(event: str) -> str:
+    return f"email:{event}:subject"
+
 
 def render(text: str, **values: Any) -> str:
     """Substitute ``{key}`` placeholders; leaves unknown ones untouched."""
     for key, value in values.items():
         text = text.replace("{" + key + "}", str(value))
     return text
+
+
+def _tidy(text: str) -> str:
+    """An empty block placeholder ({support} with no contact) must not leave a gap."""
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+    out: list[str] = []
+    for line in lines:
+        if not line and (not out or not out[-1]):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+async def _email_rows(uow: UnitOfWork, event: str) -> tuple[Any, Any]:
+    return (
+        await uow.notifications.by_event(_email_key(event)),
+        await uow.notifications.by_event(_email_subject_key(event)),
+    )
+
+
+async def email_template(uow: UnitOfWork, event: str, **values: Any) -> tuple[str, str] | None:
+    """Rendered ``(subject, plain body)`` of a letter, or None when the owner disabled it.
+
+    Values are substituted raw — this is the plain-text part; the HTML part escapes it
+    (see ``src.infrastructure.services.user_mail``). Unknown events render nothing."""
+    if event not in _EMAIL_DEFAULT:
+        return None
+    body_row, subject_row = await _email_rows(uow, event)
+    if body_row is not None and not body_row.enabled:
+        return None
+    default_subject, default_body = _EMAIL_DEFAULT[event]
+    subject = subject_row.text if subject_row is not None else default_subject
+    body = body_row.text if body_row is not None else default_body
+    # A subject is one line: a value with a newline must not smuggle in extra headers.
+    subject = " ".join(render(subject, **values).split())[:_EMAIL_SUBJECT_MAX]
+    return subject, _tidy(render(body, **values))
 
 
 async def notification_text(uow: UnitOfWork, event: str, **values: Any) -> str | None:
@@ -226,3 +372,99 @@ async def update_notification(
         await audit(uow, identity, "notification.update", event)
         await uow.commit()
         return _serialize(event, row.text, row.enabled)
+
+
+# --- e-mail letters: admin «Уведомления» → «Письма» ---------------------------------------
+
+
+def _serialize_email(event: str, subject: str, text: str, enabled: bool) -> dict[str, Any]:
+    title, placeholders = _EMAIL_META[event]
+    default_subject, default_text = _EMAIL_DEFAULT[event]
+    return {
+        "event": event,
+        "title": title,
+        "subject": subject,
+        "text": text,
+        "enabled": enabled,
+        "placeholders": list(placeholders),
+        "is_default": subject == default_subject and text == default_text,
+    }
+
+
+async def _email_state(uow: UnitOfWork, event: str) -> dict[str, Any]:
+    body_row, subject_row = await _email_rows(uow, event)
+    default_subject, default_text = _EMAIL_DEFAULT[event]
+    return _serialize_email(
+        event,
+        subject_row.text if subject_row is not None else default_subject,
+        body_row.text if body_row is not None else default_text,
+        body_row.enabled if body_row is not None else True,
+    )
+
+
+@router.get("/email")
+async def list_email_notifications(
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    async with container.uow() as uow:
+        items = [await _email_state(uow, ev) for ev, *_rest in EMAIL_EVENTS]
+    return {"items": items}
+
+
+class EmailNotificationPatch(BaseModel):
+    subject: str | None = Field(None, min_length=1, max_length=_EMAIL_SUBJECT_MAX)
+    text: str | None = Field(None, min_length=1, max_length=4096)
+    enabled: bool | None = None
+
+
+async def _email_upsert(uow: UnitOfWork, event: str) -> tuple[Any, Any]:
+    """Both rows of a letter, created from the defaults when the owner touches it first."""
+    body_row, subject_row = await _email_rows(uow, event)
+    default_subject, default_text = _EMAIL_DEFAULT[event]
+    if body_row is None:
+        body_row = NotificationTemplate(event=_email_key(event), text=default_text)
+        await uow.notifications.add(body_row)
+    if subject_row is None:
+        subject_row = NotificationTemplate(event=_email_subject_key(event), text=default_subject)
+        await uow.notifications.add(subject_row)
+    return body_row, subject_row
+
+
+@router.patch("/email/{event}")
+async def update_email_notification(
+    event: str,
+    body: EmailNotificationPatch,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    if event not in _EMAIL_DEFAULT:
+        raise HTTPException(404, "unknown e-mail event")
+    async with container.uow() as uow:
+        body_row, subject_row = await _email_upsert(uow, event)
+        if body.subject is not None:
+            subject_row.text = " ".join(body.subject.split())  # one line: no header injection
+        if body.text is not None:
+            body_row.text = body.text
+        if body.enabled is not None:
+            body_row.enabled = body.enabled
+        await audit(uow, identity, "notification.email.update", event)
+        await uow.commit()
+        return await _email_state(uow, event)
+
+
+@router.post("/email/{event}/reset")
+async def reset_email_notification(
+    event: str,
+    identity: AdminIdentity = Depends(require_admin),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Back to the stock subject + text (the on/off switch is kept as is)."""
+    if event not in _EMAIL_DEFAULT:
+        raise HTTPException(404, "unknown e-mail event")
+    async with container.uow() as uow:
+        body_row, subject_row = await _email_upsert(uow, event)
+        body_row.text = _EMAIL_DEFAULT[event][1]
+        subject_row.text = _EMAIL_DEFAULT[event][0]
+        await audit(uow, identity, "notification.email.reset", event)
+        await uow.commit()
+        return await _email_state(uow, event)

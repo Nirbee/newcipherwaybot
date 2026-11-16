@@ -185,6 +185,7 @@ function authView() {
 
   if (authTab === "guest") { root.append(guestCard()); return root; }
   if (authTab === "renew") { root.append(renewCard()); return root; }
+  if (authTab === "forgot") { root.append(forgotCard()); return root; }
 
   const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "email" });
   const pass = el("input", { type: "password", placeholder: "Пароль", autocomplete: authTab === "login" ? "current-password" : "new-password" });
@@ -204,6 +205,9 @@ function authView() {
         } catch (e) { toast(e.message); }
       },
     }, "Войти"));
+    card.append(el("div", { class: "hint center", style: "margin-top:10px" }, [
+      el("span", { class: "link", onclick: () => { authTab = "forgot"; render(); } }, "Забыли пароль?"),
+    ]));
   } else {
     card.append(el("button", {
       class: "btn primary",
@@ -223,6 +227,118 @@ function authView() {
   }
   card.append(oauthButtons());
   root.append(card);
+  return root;
+}
+
+/* ---------- «Забыли пароль?» ----------
+   Step 1 asks only for the e-mail; the answer is the same whether the address is registered
+   or not. The letter carries a one-time link to /web/#reset=<token> (step 2, resetView). */
+
+function forgotCard() {
+  const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "email" });
+  const back = () => el("div", { class: "hint center", style: "margin-top:12px" }, [
+    el("span", { class: "link", onclick: () => { authTab = "login"; render(); } }, "Вернуться ко входу"),
+  ]);
+  const card = el("div", { class: "card" }, [
+    el("h2", {}, "Восстановление пароля"),
+    el("div", { class: "hint" }, "Укажите e-mail аккаунта — пришлём ссылку, по которой можно задать новый пароль."),
+    el("label", {}, "E-mail"), email,
+  ]);
+  const send = el("button", { class: "btn primary" }, "Отправить ссылку");
+  send.onclick = async () => {
+    const value = email.value.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) return toast("Введите корректный e-mail");
+    send.disabled = true;
+    try {
+      await api("POST", `${A}/password/forgot`, { email: value });
+      card.innerHTML = "";
+      card.append(
+        el("h2", {}, "Проверьте почту"),
+        el("div", { class: "hint" },
+          `Если аккаунт с адресом ${value} есть, мы отправили на него письмо со ссылкой для смены пароля. ` +
+          "Ссылка действует 1 час. Письма нет — загляните в «Спам»."),
+        back(),
+      );
+    } catch (e) { toast(e.message); send.disabled = false; }
+  };
+  email.addEventListener("keydown", (e) => { if (e.key === "Enter") send.click(); });
+  card.append(send, back());
+  return card;
+}
+
+let resetToken = "";
+let loginToken = "";
+
+// A link from a letter can be forwarded or opened in someone else's browser: before using its
+// token, say whose account it is (masked e-mail from a read-only preview) and ask.
+function linkProblemCard(message) {
+  return el("div", { class: "card" }, [
+    el("h2", {}, "Ссылка не подходит"),
+    el("div", { class: "hint" }, message),
+    el("button", { class: "btn primary", onclick: () => { resetToken = ""; loginToken = ""; authTab = "forgot"; route("auth"); } }, "Запросить новую ссылку"),
+    el("button", { class: "btn ghost", onclick: () => { resetToken = ""; loginToken = ""; authTab = "login"; route("auth"); } }, "Ко входу"),
+  ]);
+}
+
+function askCard(question, yesLabel, onYes) {
+  return el("div", { class: "card" }, [
+    el("h2", {}, question),
+    el("div", { class: "hint" }, "Если это не ваш адрес — нажмите «Нет» и закройте страницу."),
+    el("button", { class: "btn primary", onclick: onYes }, yesLabel),
+    el("button", { class: "btn ghost", onclick: () => { resetToken = ""; loginToken = ""; authTab = "login"; route("auth"); } }, "Нет, это не я"),
+  ]);
+}
+
+async function resetView() {
+  const root = el("div", {}, [brand()]);
+  let who;
+  try { who = (await api("POST", `${A}/password/reset/preview`, { token: resetToken })).email; }
+  catch (e) { root.append(linkProblemCard(e.message)); return root; }
+
+  const pass = el("input", { type: "password", placeholder: "Новый пароль", autocomplete: "new-password" });
+  const pass2 = el("input", { type: "password", placeholder: "Ещё раз", autocomplete: "new-password" });
+  const save = el("button", { class: "btn primary" }, "Сохранить пароль");
+  save.onclick = async () => {
+    if (pass.value.length < 8) return toast("Пароль от 8 символов");
+    if (pass.value !== pass2.value) return toast("Пароли не совпадают");
+    save.disabled = true;
+    try {
+      const d = await api("POST", `${A}/password/reset`, { token: resetToken, password: pass.value });
+      resetToken = "";
+      store.set(d.access_token, d.refresh_token);
+      toast("Пароль изменён");
+      route("cabinet");
+    } catch (e) { toast(e.message); save.disabled = false; }
+  };
+  pass2.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
+  const form = el("div", { class: "card" }, [
+    el("h2", {}, `Новый пароль для ${who}`),
+    el("div", { class: "hint" }, "Придумайте новый пароль для входа в кабинет. После смены выйдем из аккаунта на остальных устройствах."),
+    el("label", {}, "Пароль"), pass,
+    el("label", {}, "Повторите пароль"), pass2,
+    save,
+  ]);
+  const ask = askCard(`Задать пароль для ${who}?`, "Да, это мой адрес", () => { ask.replaceWith(form); pass.focus(); });
+  root.append(ask);
+  return root;
+}
+
+async function loginLinkView() {
+  const root = el("div", {}, [brand()]);
+  let who;
+  try { who = (await api("POST", `${A}/login/auto/preview`, { token: loginToken })).email; }
+  catch (e) {
+    root.append(linkProblemCard("Ссылка для входа устарела или уже не действует. Войдите с паролем или задайте новый через «Забыли пароль?»."));
+    return root;
+  }
+  root.append(askCard(`Войти как ${who}?`, "Да, войти", async () => {
+    try {
+      const d = await api("POST", `${A}/login/auto`, { token: loginToken });
+      loginToken = "";
+      store.set(d.access_token, d.refresh_token);
+      route("cabinet");
+    } catch (e) { toast(e.message); }
+  }));
   return root;
 }
 
@@ -677,6 +793,8 @@ async function render() {
   a.append(el("div", { class: "muted center" }, "…"));
   let node;
   if (view === "cabinet") node = await cabinetView();
+  else if (view === "reset") node = await resetView();
+  else if (view === "login-link") node = await loginLinkView();
   else node = authView();
   if (seq !== renderSeq) return;  // a newer render superseded us
   a.innerHTML = "";
@@ -685,6 +803,17 @@ async function render() {
 
 async function boot() {
   const params = new URLSearchParams(location.search);
+  // Links from our letters carry their token in the fragment (never sent to the server):
+  // #reset=<token> — set a new password; #login=<token> — one-click login of a guest account.
+  const frag = new URLSearchParams(location.hash.replace(/^#/, ""));
+  if (frag.get("reset") || frag.get("login")) {
+    history.replaceState({}, "", location.pathname + location.search);  // drop it from the address bar
+    resetToken = frag.get("reset") || "";
+    loginToken = resetToken ? "" : frag.get("login");
+    await loadBrand();
+    route(resetToken ? "reset" : "login-link");  // asks «это вы?» before using the token
+    return;
+  }
   // /web/?renew=1 — straight to «Продлить» (the site's button); ?renewed=1 — back from paying.
   if (params.get("renew") !== null || location.hash === "#renew") authTab = "renew";
   if (params.get("renewed") !== null) {

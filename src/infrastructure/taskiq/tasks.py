@@ -383,7 +383,10 @@ async def _notify_overpayment_admins(
 
 
 async def _notify_paid(container: object, payment_id: UUID) -> None:
-    """DM the buyer that an out-of-band payment completed. Best-effort, post-commit."""
+    """DM the buyer that an out-of-band payment completed. Best-effort, post-commit.
+
+    No Telegram (web / guest buyer) -> the owner's e-mail letter for the same event instead.
+    """
     from typing import cast
 
     from src.infrastructure.di import AppContainer
@@ -397,18 +400,24 @@ async def _notify_paid(container: object, payment_id: UUID) -> None:
         if user is None:
             return
         from src.infrastructure.services.reports import fmt_amount
+        from src.infrastructure.services.user_mail import cabinet_base_url, cabinet_login_link
         from src.web.routes.admin.notifications import notification_text
 
         sub_url = None
         text: str | None
+        amount = fmt_amount(txn.amount_minor, txn.currency.value)
+        mail_event: str | None = None
+        mail_values: dict[str, str] = {"amount": amount}
         if txn.type is TransactionType.DEPOSIT:
+            balance = fmt_amount(user.balance_minor, txn.currency.value)
             text = await notification_text(
                 uow,
                 "balance_topup",
                 name=user.first_name or "",
-                amount=fmt_amount(txn.amount_minor, txn.currency.value),
-                balance=fmt_amount(user.balance_minor, txn.currency.value),
+                amount=amount,
+                balance=balance,
             )
+            mail_event, mail_values["balance"] = "balance_topup", balance
         elif txn.type is TransactionType.SUBSCRIPTION_PAYMENT:
             plan_name, expire = "", ""
             if user.current_subscription_id is not None:
@@ -430,20 +439,30 @@ async def _notify_paid(container: object, payment_id: UUID) -> None:
             )
             if text is not None and sub_url and event != "traffic_topup":
                 text += f"\n{sub_url}"
+            mail_event = event
+            mail_values.update(plan=plan_name, expire=expire, sub_url=sub_url or "")
         else:
             text = "✅ Оплата получена."
         telegram_id = user.telegram_id
         email = user.email
+        cabinet = await cabinet_base_url(c, uow) if telegram_id is None and email else ""
+        login_url = cabinet_login_link(c, user, cabinet)
 
     if telegram_id is not None:
         if text is not None:  # None = owner disabled this notification
             await c.notifier.notify_user(telegram_id, text)
-    elif email:  # web / guest buyer has no Telegram — deliver by email
-        body = "Спасибо за оплату!"
-        if sub_url:
-            body += f"\n\nВаша ссылка-подписка:\n{sub_url}\n\nВставьте её в Happ/v2RayTun/Hiddify."
-        mailer = await c.build_mailer()
-        await mailer.send(email, "VPN — подписка активна", body)
+    elif email and mail_event:  # web / guest buyer has no Telegram — deliver by e-mail
+        from src.infrastructure.services.user_mail import send_template_email
+
+        await send_template_email(
+            c,
+            email,
+            mail_event,
+            button_label="Войти в кабинет",
+            button_url=login_url,
+            cabinet_url=login_url,
+            **mail_values,
+        )
 
 
 @broker.task(schedule=[{"cron": "* * * * *"}])
@@ -1155,12 +1174,16 @@ async def send_expiry_reminders() -> int:
     Runs every 5 min; a 15-min look-back window plus per-(step, sub-expiry) Redis SETNX
     means a step never misses or double-fires. ``hours_before == 0`` fires just after expiry.
     Text placeholders: {hours} {time} {plan}.
+
+    People without Telegram but with an e-mail (web cabinet / guest buyers) get the owner's
+    «скоро закончится» / «закончилась» letter on the very same steps instead — the two
+    audiences are disjoint (``telegram_id`` set vs NULL), so nobody is reminded twice.
     """
     from aiogram import Bot
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
     from sqlalchemy import select
 
-    from src.core.enums import SubscriptionStatus
+    from src.core.enums import SubscriptionStatus, UserStatus
     from src.infrastructure.database.models.subscription import Subscription
     from src.infrastructure.database.models.user import User
 
@@ -1176,8 +1199,12 @@ async def send_expiry_reminders() -> int:
     # settings; filled-in SMTP fields aren't enough (the hosting may block outbound mail and
     # the link code would never arrive). Checked before the DB session below.
     from src.infrastructure.services.mailer import mail_verified
+    from src.infrastructure.services.user_mail import cabinet_base_url, cabinet_login_link
 
-    mail_ok = await mail_verified(container.redis, await container.build_mailer())
+    mailer = await container.build_mailer()
+    mail_ok = await mail_verified(container.redis, mailer)
+    # (hours_before, user_id, email, expire_ts, plan_name, expire_text, renew_url)
+    mail_targets: list[tuple[int, int, str, int, str, str, str]] = []
     async with container.uow() as uow:
         steps = [s for s in await uow.reminders.ordered() if s.enabled]
         cfg = container.bot_config
@@ -1189,6 +1216,7 @@ async def send_expiry_reminders() -> int:
         # once per expiry, on the earliest step (the one with the most time left to act)
         hint_step = max((s.hours_before for s in steps if s.hours_before > 0), default=None)
         site = (container.settings.web.public_url or "").strip().rstrip("/")
+        cabinet = await cabinet_base_url(container, uow) if mailer.configured else ""
         for step in steps:
             boundary = now + dt.timedelta(hours=step.hours_before)
             rows = (
@@ -1220,10 +1248,38 @@ async def send_expiry_reminders() -> int:
                         bool(email_ok),
                     )
                 )
+            if not cabinet:
+                continue  # mail not set up / nowhere to renew: no letters
+            mail_rows = (
+                await uow.session.execute(
+                    select(User, Subscription.expire_at, Subscription.plan_snapshot)
+                    .join(Subscription, Subscription.id == User.current_subscription_id)
+                    .where(
+                        User.telegram_id.is_(None),
+                        User.email.is_not(None),
+                        User.status != UserStatus.BLOCKED,
+                        Subscription.status.in_(live if step.hours_before > 0 else at_expiry),
+                        Subscription.expire_at > boundary - lookback,
+                        Subscription.expire_at <= boundary,
+                    )
+                )
+            ).all()
+            for user, exp, snap in mail_rows:
+                mail_targets.append(
+                    (
+                        step.hours_before,
+                        user.id,
+                        str(user.email),
+                        int(exp.timestamp()),
+                        str((snap or {}).get("name") or ""),
+                        fmt_date(exp),
+                        cabinet_login_link(container, user, cabinet),
+                    )
+                )
 
+    sent = await _send_expiry_letters(container, mail_targets)
     if not targets:
-        return 0
-    sent = 0
+        return sent
     bot = Bot(token=container.settings.bot.token)
     try:
         for hours, text, button, tg_id, exp_ts, plan, has_email in targets:
@@ -1270,6 +1326,43 @@ async def send_expiry_reminders() -> int:
     finally:
         await bot.session.close()
     log.info("expiry reminders sent", count=sent)
+    return sent
+
+
+async def _send_expiry_letters(
+    container: AppContainer, targets: list[tuple[int, int, str, int, str, str, str]]
+) -> int:
+    """E-mail leg of send_expiry_reminders. Dedup per (step, user, expiry) like the Telegram
+    leg, in its own key space; a letter SMTP refused releases its key so the next 5-minute
+    tick (still inside the look-back) retries instead of the reminder being lost."""
+    import contextlib
+
+    from src.infrastructure.services.user_mail import send_template_email
+
+    sent = 0
+    for hours, user_id, email, exp_ts, plan, expire, renew_url in targets:
+        key = f"exprem:mail:{hours}:{user_id}:{exp_ts}"
+        if not await container.redis.set(key, "1", nx=True, ex=604800):
+            continue  # already sent this step for this expiry
+        ok = await send_template_email(
+            container,
+            email,
+            "expiring" if hours > 0 else "expired",
+            button_label="Продлить подписку",
+            button_url=renew_url,
+            hours=hours,
+            time=_human_hours(hours),
+            plan=plan,
+            expire=expire,
+            renew_url=renew_url,
+        )
+        if ok:
+            sent += 1
+        else:
+            with contextlib.suppress(Exception):
+                await container.redis.delete(key)
+    if targets:
+        log.info("expiry letters sent", count=sent)
     return sent
 
 

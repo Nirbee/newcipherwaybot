@@ -505,6 +505,18 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "Выкл — аккаунт активен сразу (без письма)",
         "Off — the account is active immediately (no email)",
     ),
+    _p(
+        "WINDOWS_APP_URL",
+        C.INTERFACE,
+        STR,
+        "",
+        "Приложение для Windows (ссылка)",
+        "Windows app link",
+        "Ссылка на скачивание вашего приложения для Windows — подставляется в письма "
+        "покупателям ({windows_app}). Пусто — в письме советуем Happ или Hiddify.",
+        "Download link of your Windows app — used in buyer e-mails ({windows_app}). "
+        "Empty — the e-mail suggests Happ or Hiddify.",
+    ),
     _p("SMTP_HOST", C.INTERFACE, STR, "", "SMTP хост", "SMTP host"),
     _p("SMTP_PORT", C.INTERFACE, INT, 587, "SMTP порт", "SMTP port"),
     _p("SMTP_USER", C.INTERFACE, STR, "", "SMTP логин", "SMTP user"),

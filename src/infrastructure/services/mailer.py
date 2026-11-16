@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import smtplib
 import socket
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
@@ -89,35 +90,45 @@ class Mailer:
         raw = "|".join((self._host, str(self._port), self._user, self._password, self._from))
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    def _send_sync(self, to: str, subject: str, body: str) -> None:
-        msg = MIMEText(body, "plain", "utf-8")
+    def _send_sync(self, to: str, subject: str, body: str, html: str | None = None) -> None:
+        msg: MIMEText | MIMEMultipart
+        if html:
+            # multipart/alternative: plain text first, HTML last (the preferred part).
+            msg = MIMEMultipart("alternative")
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+            msg.attach(MIMEText(html, "html", "utf-8"))
+        else:
+            msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
         msg["From"] = self._from
         msg["To"] = to
+        # The envelope recipient is exactly ``to`` (to_addrs below) — never re-derived from the
+        # headers, so nothing in a header (To/Cc/Bcc) can add a recipient.
         # 465 is implicit TLS (Yandex, Mail.ru, many hosts offer only that); 587/25 = STARTTLS.
         if self._port == 465:
             with _SMTP_SSL(self._host, self._port, timeout=15) as smtp:
                 if self._user:
                     smtp.login(self._user, self._password)
-                smtp.send_message(msg)
+                smtp.send_message(msg, to_addrs=[to])
             return
         with _SMTP(self._host, self._port, timeout=15) as smtp:
             if self._tls:
                 smtp.starttls()
             if self._user:
                 smtp.login(self._user, self._password)
-            smtp.send_message(msg)
+            smtp.send_message(msg, to_addrs=[to])
 
     async def send_strict(self, to: str, subject: str, body: str) -> None:
         """Like send(), but raises — for the admin's «test e-mail», which must show the real
         SMTP error (wrong password, blocked port…) instead of a silent False."""
         await asyncio.to_thread(self._send_sync, to, subject, body)
 
-    async def send(self, to: str, subject: str, body: str) -> bool:
+    async def send(self, to: str, subject: str, body: str, *, html: str | None = None) -> bool:
+        """``body`` is the plain-text part; ``html`` (optional) is sent as its alternative."""
         if not self.configured:
             return False
         try:
-            await asyncio.to_thread(self._send_sync, to, subject, body)
+            await asyncio.to_thread(self._send_sync, to, subject, body, html)
         except Exception as exc:
             log.warning("email send failed", to=to, error=str(exc))
             return False

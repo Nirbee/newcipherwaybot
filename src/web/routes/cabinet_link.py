@@ -18,19 +18,29 @@ import hashlib
 import json
 import re as _re
 import secrets
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
-from src.application.services.account_link import TG_LINK_PREFIX
+from src.application.services.account_link import (
+    TG_LINK_PREFIX,
+    is_guest_account,
+    pack_link_code,
+)
 from src.core.security import hash_password
 from src.infrastructure.database.models.user import User
 from src.infrastructure.di import AppContainer
 from src.web.deps import get_container
 from src.web.routes.cabinet import cabinet_user
-from src.web.routes.cabinet_auth import _client_ip, _rate_limit
+from src.web.routes.cabinet_auth import (
+    GUEST_CLAIM_FIRST,
+    _client_ip,
+    _rate_limit,
+    clear_guest_flag,
+)
 
 router = APIRouter(prefix="/api/cabinet", tags=["cabinet-link"])
 
@@ -159,9 +169,14 @@ async def link_email_confirm(
         other = await uow.users.get_by_email(data["email"])
         if other is not None and other.id != fresh.id:
             raise HTTPException(409, "эта почта уже занята другим аккаунтом")
+        # A code requested before the account got a confirmed address (e.g. a password reset
+        # proved the mailbox meanwhile) must not swap that address out.
+        if fresh.email and fresh.email_verified and fresh.email != data["email"]:
+            raise HTTPException(409, "почта уже привязана")
         fresh.email = data["email"]
         fresh.email_verified = True
         fresh.password_hash = data["password_hash"]
+        clear_guest_flag(fresh)  # a password of their own: no more one-click links in letters
         try:
             await uow.commit()
         except IntegrityError as exc:  # lost the uq_users_email race
@@ -177,12 +192,18 @@ async def link_telegram(
     """One-time deep-link code: open the bot with it and the accounts merge."""
     if user.telegram_id is not None:
         raise HTTPException(409, "Telegram уже привязан")
+    if is_guest_account(user):
+        # Pre-claim guard: a guest purchase on someone else's address must not let its buyer
+        # merge that account (and later the real owner's letters) into their own Telegram.
+        raise HTTPException(403, GUEST_CLAIM_FIRST)
     async with container.uow() as uow:
         bot_username = str(await container.bot_config.value(uow, "BOT_USERNAME") or "")
     if not bot_username:
         raise HTTPException(503, "бот не настроен")
     code = secrets.token_urlsafe(24)
-    await container.redis.set(f"{TG_LINK_PREFIX}{code}", str(user.id), ex=_TG_CODE_TTL)
+    await container.redis.set(
+        f"{TG_LINK_PREFIX}{code}", pack_link_code(user.id, int(time.time())), ex=_TG_CODE_TTL
+    )
     return {
         "ok": True,
         "url": f"https://t.me/{bot_username}?start=link_{code}",
