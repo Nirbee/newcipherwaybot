@@ -53,8 +53,9 @@ _BAD_TTL = 600  # a token the panel/DB didn't recognise — answered 401 without
 _FAIL_LIMIT = 20  # failed resolves per IP per window, then 429 without touching the panel
 _FAIL_WINDOW = 600
 _PANEL_RESOLVE_LIMIT = 300  # panel lookups per minute across ALL clients, then 503
-# Requests per minute, per IP and per token: chat polling / text messages / screenshots.
-_LIMITS = {"get": 30, "post": 10, "photo": 5}
+# Requests per minute, per IP and per token: chat polling / text messages / screenshots,
+# LAN Play reads (the LAN tab polls rooms/devices) / LAN changes (see app_lan.py).
+_LIMITS = {"get": 30, "post": 10, "photo": 5, "lan": 60, "lan-post": 20}
 # Per-user daily quotas on writes (the owner reads every one of them).
 _DAILY = {"post": 200, "photo": 30}
 

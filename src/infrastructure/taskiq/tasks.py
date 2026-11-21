@@ -1399,6 +1399,17 @@ async def snapshot_traffic() -> int:
     return recorded
 
 
+@broker.task(schedule=[{"cron": "*/10 * * * *"}])
+async def lan_cleanup() -> dict[str, int]:
+    """LAN Play housekeeping: lapsed subscriptions leave their rooms (rooms they own are
+    deleted), the Headscale policy is re-applied if it drifted from the DB, and lapsed
+    subscriptions' nodes are expired. Headscale down → nothing changes, the next tick retries
+    (see infrastructure/services/lan.py)."""
+    from src.infrastructure.services.lan import cleanup
+
+    return await cleanup(get_container())
+
+
 @broker.task(schedule=[{"cron": "*/5 * * * *"}])
 async def send_winback_offers() -> int:
     """Win-back funnel (screen 08): N days after a subscription expired, message the user

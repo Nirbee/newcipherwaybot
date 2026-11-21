@@ -99,6 +99,11 @@ ignore = ["B008"]  # FastAPI Depends() in defaults
 "tests/unit/test_change_and_topup.py" = ["RUF001", "RUF002", "RUF003", "E501"]
 # RU operator screen text / button labels asserted verbatim.
 "tests/unit/test_topup_input_fixes.py" = ["RUF001", "RUF002", "RUF003"]
+# RU admin messages of the LAN Play screen (and the test asserting them).
+"src/web/routes/admin/lan.py" = ["RUF001"]
+"src/infrastructure/services/lan.py" = ["RUF001"]
+"src/web/routes/app_lan.py" = ["RUF001"]
+"tests/integration/test_app_lan_api.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

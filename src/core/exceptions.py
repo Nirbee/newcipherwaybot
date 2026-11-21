@@ -69,3 +69,26 @@ class RemnawaveTransientError(RemnawaveError):
 
 class RemnawaveVersionError(RemnawaveError):
     """Panel version is below the supported minimum."""
+
+
+# --- LAN (Headscale) ---------------------------------------------------------
+class HeadscaleError(DomainError):
+    """Headscale is unreachable, rejected the key or answered with an error. The LAN API
+    maps every one of these to a clean 503 — the caller's change is not applied. The message
+    never carries the server's response body (that goes to the logs only)."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class HeadscaleNotFound(HeadscaleError):
+    """The addressed user / node does not exist on the Headscale server (HTTP 404)."""
+
+
+class HeadscaleAuthError(HeadscaleError):
+    """Headscale rejected the API key (401/403)."""
+
+
+class HeadscalePolicyReadOnly(HeadscaleError):
+    """PUT /policy refused: the server runs ``policy.mode: file``, not ``database``."""

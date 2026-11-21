@@ -72,6 +72,7 @@ StepBot/
 │           │                     migration.py (импорт shopbot) · withdrawals.py (выводы)
 │           ├── cabinet.py        /api/cabinet (initData-auth) — для мини-аппы
 │           ├── app_api.py        /api/app/v1 (токен ссылки подписки) — поддержка из Windows-приложения
+│           ├── app_lan.py        /api/app/v1/lan — «LAN для игр»: комнаты по коду, ключи Headscale
 │           ├── panel.py          /webhook/panel — вебхук Remnawave
 │           ├── payments.py       /api/v1/payments/{gateway} — вебхук платежей
 │           └── health.py

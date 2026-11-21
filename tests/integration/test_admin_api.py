@@ -90,6 +90,14 @@ class _FakeRedis:
     async def expire(self, key: str, seconds: int) -> bool:
         return key in self.store
 
+    async def eval(self, script: str, numkeys: int, *args: str) -> int:
+        # Only the compare-and-delete lock release (src/infrastructure/services/lan.py).
+        key, token = args[0], args[1]
+        if "del" in script and self.store.get(key) == token:
+            del self.store[key]
+            return 1
+        return 0
+
     async def ttl(self, key: str) -> int:
         # Expiry isn't modelled: report "has a TTL" so limiters don't re-arm on every hit.
         return 60 if key in self.store else -2

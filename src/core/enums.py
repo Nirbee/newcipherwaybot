@@ -326,6 +326,7 @@ class ConfigCategory(StrEnum):
     BACKUPS = "backup"
     SUPPORT = "support"
     INTERFACE = "ui"
+    LAN = "lan"
 
 
 class WithdrawalStatus(StrEnum):

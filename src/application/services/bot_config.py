@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from src.infrastructure.payments.crypto import SecretBox
 
 _MASK = "••••••••"
+SECRET_MASK = _MASK  # what a SECRET param shows (and echoes back) in the settings UI
 
 
 class BotConfigError(DomainError):

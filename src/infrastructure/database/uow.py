@@ -51,6 +51,12 @@ from src.infrastructure.database.dao.catalog import (
     ServerSquadDAO,
     SettingsDAO,
 )
+from src.infrastructure.database.dao.lan import (
+    LanAccountDAO,
+    LanRoomBanDAO,
+    LanRoomDAO,
+    LanRoomMemberDAO,
+)
 from src.infrastructure.database.dao.promocode import (
     PromocodeActivationDAO,
     PromocodeDAO,
@@ -112,6 +118,10 @@ class UnitOfWork:
         self.constructor_periods = ConstructorPeriodDAO(session)
         self.traffic_packs = TrafficPackDAO(session)
         self.router_devices = RouterDeviceDAO(session)
+        self.lan_rooms = LanRoomDAO(session)
+        self.lan_members = LanRoomMemberDAO(session)
+        self.lan_bans = LanRoomBanDAO(session)
+        self.lan_accounts = LanAccountDAO(session)
         return self
 
     async def __aexit__(

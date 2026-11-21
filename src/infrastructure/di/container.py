@@ -7,6 +7,8 @@ worker and ``scripts/smoke.py`` all construct one of these.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -28,6 +30,7 @@ from src.core.i18n import Translator, load_translations
 from src.infrastructure.database.engine import create_engine, create_session_factory
 from src.infrastructure.database.uow import UnitOfWork
 from src.infrastructure.events import InProcessEventBus
+from src.infrastructure.headscale.client import HeadscaleApi, HeadscaleClient
 from src.infrastructure.payments.crypto import SecretBox
 from src.infrastructure.payments.factory import GatewayFactory
 from src.infrastructure.redis.client import create_redis
@@ -54,6 +57,9 @@ class AppContainer:
 
         self.remnawave_client = RemnawaveHttpClient.from_profile(build_profile(settings.remnawave))
         self.panel_webhook = WebhookVerifier(settings.remnawave.webhook_secret)
+        # LAN Play: server + API key are hot-reload settings, so a client is built per use
+        # (``infrastructure.services.lan.open_headscale``); tests swap in a fake factory.
+        self.headscale_factory: Callable[[str, str], HeadscaleApi] = HeadscaleClient
         self.gateway_factory = GatewayFactory()
         self.secret_box: SecretBox | None = (
             SecretBox(settings.app.crypt_key) if settings.app.crypt_key else None

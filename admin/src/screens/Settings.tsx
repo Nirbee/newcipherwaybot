@@ -9,6 +9,7 @@ import { useNavigate } from "react-router";
 import { api } from "../api/client";
 import { SecretInput, Toggle } from "../components/ui";
 import { useApp } from "../state/app";
+import LanPanel from "./LanPanel";
 
 type Param = {
   key: string;
@@ -31,6 +32,7 @@ const CAT_META: Record<string, { icon: string; ru: string }> = {
   backup: { icon: "💾", ru: "Расписание и хранение бэкапов" },
   ui: { icon: "🤖", ru: "Кнопки бота, прокси, поддержка" },
   support: { icon: "💬", ru: "ИИ-поддержка: модель и база знаний" },
+  lan: { icon: "🎮", ru: "Комнаты для игр по сети в приложении для Windows" },
 };
 
 type Me = { role: string };
@@ -358,6 +360,8 @@ export default function Settings() {
           {(searching || cat || keySet) && visible.length === 0 && <div className="tr dim">—</div>}
         </div>
       )}
+
+      {cat === "lan" && !searching && !keySet && <LanPanel />}
 
       <div className="caps" style={{ marginTop: 14, textAlign: "center" }}>
         {t.hotReloadNote}

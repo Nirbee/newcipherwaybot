@@ -14,7 +14,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.application.common.payments import PaymentContext, PaymentResultKind
@@ -1163,6 +1163,7 @@ async def connection(
 @router.post("/subscription/reset-devices")  # #7: contract/client name — same reset, kicks devices
 async def reset_link(
     request: Request,
+    background: BackgroundTasks,
     user: User = Depends(cabinet_user),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
@@ -1209,6 +1210,10 @@ async def reset_link(
     await forget_link(container, sub.subscription_url)
     with contextlib.suppress(Exception):  # best-effort: link is already rotated
         await container.remnawave_client.drop_connections(panel_ref)
+    # LAN Play: devices registered with the old link are cut off (after the response).
+    from src.infrastructure.services.lan import expire_subscription_nodes
+
+    background.add_task(expire_subscription_nodes, container, sub.id)
     return {
         "ok": True,  # #7: reset-devices contract shape; the url is a useful superset
         "subscription_url": new_url,

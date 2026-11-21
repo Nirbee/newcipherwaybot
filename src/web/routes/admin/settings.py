@@ -7,13 +7,29 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from src.application.services.bot_config import BotConfigError, category_sections
+from src.application.services.bot_config import SECRET_MASK, BotConfigError, category_sections
+from src.core import config_registry as registry
+from src.core.enums import Role
 from src.infrastructure.di import AppContainer
+from src.infrastructure.services.lan import settings_guard as lan_settings_guard
 from src.web.deps import get_container
 from src.web.routes.admin._common import audit
 from src.web.routes.admin.deps import AdminIdentity, require_admin
 
 router = APIRouter(prefix="/settings")
+
+# LAN Play: where the bot sends the Headscale API key, and the key itself — owner only (a
+# rogue server would receive the key and could hand customers' devices out).
+_LAN_SERVER, _LAN_KEY = "LAN_LOGIN_SERVER", "LAN_HEADSCALE_API_KEY"
+
+
+def _norm_server(value: Any) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def _require_owner_for_lan(identity: AdminIdentity, touches: bool) -> None:
+    if touches and identity.role is not Role.OWNER:
+        raise HTTPException(403, "сервер и API-ключ LAN меняет только владелец")
 
 
 @router.get("")
@@ -55,12 +71,27 @@ async def patch_settings(
 ) -> dict[str, Any]:
     if not body.changes:
         raise HTTPException(400, "no changes")
+    changes = dict(body.changes)
     async with container.uow() as uow:
+        old_server = _norm_server(await container.bot_config.value(uow, _LAN_SERVER))
+        _require_owner_for_lan(
+            identity,
+            (_LAN_SERVER in changes and _norm_server(changes[_LAN_SERVER]) != old_server)
+            or (_LAN_KEY in changes and changes[_LAN_KEY] != SECRET_MASK),
+        )
         try:
-            written = await container.bot_config.set_values(uow, body.changes)
-        except BotConfigError as exc:
+            # LAN: https-only server; a new server drops the key issued by the old one.
+            reset = lan_settings_guard(changes, old_server)
+            written = await container.bot_config.set_values(uow, changes)
+        except (BotConfigError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
-        await audit(uow, identity, "settings.patch", None, keys=written)
+        if reset:
+            await container.bot_config.reset(uow, reset)
+            written += reset
+        extra: dict[str, Any] = {}
+        if _LAN_SERVER in written and changes[_LAN_SERVER] != old_server:
+            extra = {"lan_server_old": old_server, "lan_server_new": changes[_LAN_SERVER]}
+        await audit(uow, identity, "settings.patch", None, keys=written, **extra)
         await uow.commit()
     return {"ok": True, "applied": written}
 
@@ -75,8 +106,17 @@ async def reset_settings(
     identity: AdminIdentity = Depends(require_admin),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
+    keys = list(dict.fromkeys(body.keys))
+    _require_owner_for_lan(identity, _LAN_SERVER in keys or _LAN_KEY in keys)
+    extra: dict[str, Any] = {}
     async with container.uow() as uow:
-        await container.bot_config.reset(uow, body.keys)
-        await audit(uow, identity, "settings.reset", None, keys=body.keys)
+        if _LAN_SERVER in keys:
+            old_server = _norm_server(await container.bot_config.value(uow, _LAN_SERVER))
+            default = _norm_server(registry.spec(_LAN_SERVER).default)
+            if old_server != default and _LAN_KEY not in keys:
+                keys.append(_LAN_KEY)  # the key belongs to the server being dropped
+            extra = {"lan_server_old": old_server, "lan_server_new": default}
+        await container.bot_config.reset(uow, keys)
+        await audit(uow, identity, "settings.reset", None, keys=keys, **extra)
         await uow.commit()
-    return {"ok": True}
+    return {"ok": True, "reset": keys}

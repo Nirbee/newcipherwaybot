@@ -1187,6 +1187,78 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "t.me/proxy?server=…&port=…&secret=… (или tg://proxy?…)",
         "t.me/proxy?server=…&port=…&secret=… (or tg://proxy?…)",
     ),
+    # --- LAN Play: virtual LAN for games over our Headscale (rooms by code) -----------------
+    _p(
+        "LAN_ENABLED",
+        C.LAN,
+        BOOL,
+        False,
+        "LAN для игр",
+        "LAN Play",
+        "Комнаты по коду в приложении для Windows: устройства участников видят друг друга",
+        "Code-joined rooms in the Windows app: members' devices see each other",
+    ),
+    _p(
+        "LAN_LOGIN_SERVER",
+        C.LAN,
+        STR,
+        "https://lan.cipherway.ru",
+        "Адрес Headscale",
+        "Headscale URL",
+        "Только https://. Приложение подключается к нему, бот ходит в его API. "
+        "Смена адреса стирает API-ключ",
+        "https:// only. Coordination server; changing it clears the API key",
+    ),
+    _p(
+        "LAN_HEADSCALE_API_KEY",
+        C.LAN,
+        SECRET,
+        "",
+        "API-ключ Headscale",
+        "Headscale API key",
+        "headscale apikeys create --expiration 365d. Не показывается после сохранения",
+        "headscale apikeys create --expiration 365d. Never shown after saving",
+    ),
+    _p(
+        "LAN_MAX_ROOM_MEMBERS",
+        C.LAN,
+        INT,
+        8,
+        "Игроков в комнате",
+        "Members per room",
+        "Максимум участников одной комнаты",
+        "Room size limit",
+    ),
+    _p(
+        "LAN_MAX_ROOMS_OWNED",
+        C.LAN,
+        INT,
+        3,
+        "Своих комнат",
+        "Rooms per subscription",
+        "Сколько комнат может создать одна подписка",
+        "Rooms one subscription may create",
+    ),
+    _p(
+        "LAN_MAX_ROOMS_JOINED",
+        C.LAN,
+        INT,
+        10,
+        "Комнат на подписку",
+        "Room memberships",
+        "Во скольких комнатах (своих и чужих) может состоять одна подписка",
+        "Rooms (own and others') one subscription may be in",
+    ),
+    _p(
+        "LAN_MAX_DEVICES",
+        C.LAN,
+        INT,
+        5,
+        "Устройств в LAN",
+        "LAN devices",
+        "Сколько компьютеров одной подписки можно подключить к LAN",
+        "Devices one subscription may register",
+    ),
 )
 
 _BY_KEY: dict[str, ParamSpec] = {p.key: p for p in REGISTRY}
@@ -1209,6 +1281,7 @@ CATEGORY_ORDER: tuple[ConfigCategory, ...] = (
     C.BACKUPS,
     C.SUPPORT,
     C.INTERFACE,
+    C.LAN,
 )
 
 CATEGORY_NAMES: dict[ConfigCategory, dict[str, str]] = {
@@ -1221,6 +1294,7 @@ CATEGORY_NAMES: dict[ConfigCategory, dict[str, str]] = {
     C.BACKUPS: {"ru": "Бэкапы", "en": "Backups"},
     C.SUPPORT: {"ru": "ИИ-поддержка", "en": "AI support"},
     C.INTERFACE: {"ru": "Интерфейс бота", "en": "Bot interface"},
+    C.LAN: {"ru": "LAN для игр", "en": "LAN Play"},
 }
 
 
