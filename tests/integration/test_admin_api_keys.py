@@ -151,11 +151,14 @@ async def test_closed_screens_and_allowed_screens(
         "/api/admin/site",
         "/api/admin/providers",
         "/api/admin/bot-menu/export",
+        "/api/admin/users/clients/export",
     ):
         res = await http.get(path, headers=auth)
         assert res.status_code == 403, path
     # the rest of a screen with one closed endpoint stays readable
     assert (await http.get("/api/admin/bot-menu", headers=auth)).status_code == 200
+    clients = await http.get("/api/admin/users/clients", headers=auth)
+    assert clients.status_code == 200 and clients.json()["can_export"] is False
 
     scoped, item = await _issue(http, owner, allowed_screens=["routers", "bogus", "admins"])
     assert item["allowed_screens"] == ["routers"]  # unknown/closed screens are dropped

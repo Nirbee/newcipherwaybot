@@ -36,6 +36,15 @@ class SubscriptionDAO(BaseDAO[Subscription]):
         """Resolve by the numeric user id Remnawave >=3.0 panels use instead of the uuid."""
         return await self.find_one(remnawave_id=remnawave_id)
 
+    async def with_panel_username(self) -> Sequence[Subscription]:
+        """Subscriptions whose panel username is recorded and is not the bot's own
+        ``sub_<short_id>`` — the candidates for MultiScript service accounts."""
+        stmt = select(Subscription).where(
+            Subscription.panel_username.is_not(None),
+            Subscription.panel_username.not_like(r"sub\_%", escape="\\"),
+        )
+        return (await self.session.scalars(stmt)).all()
+
     async def active_for_user(self, user_id: int) -> Sequence[Subscription]:
         stmt = select(Subscription).where(
             Subscription.user_id == user_id,

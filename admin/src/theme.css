@@ -1778,3 +1778,147 @@ hr.sep {
     text-align: right;
   }
 }
+
+/* ---------- «Клиенты» (Users screen): tiles, chips, wide table ---------- */
+.cl-tiles .kpi.cl-tile-warn {
+  border-color: var(--warn);
+}
+.cl-tiles .kpi.cl-tile-warn .val {
+  color: var(--warn);
+}
+.cl-tiles .kpi.cl-tile-on {
+  box-shadow: var(--shadow-sm), 0 0 0 2px var(--accent-line);
+}
+.cl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.cl-chip {
+  border: 1px solid var(--border);
+  background: var(--pill);
+  color: var(--muted);
+  font: 500 12.5px/1 "Golos Text", sans-serif;
+  padding: 7px 11px;
+  border-radius: 99px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.cl-chip:hover {
+  color: var(--text);
+}
+.cl-chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+.cl-chip .cnt {
+  font-size: 10.5px;
+  margin-left: 6px;
+  opacity: 0.75;
+}
+.cl-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.cl-updated {
+  font-size: 12px;
+  align-self: center;
+  white-space: nowrap;
+}
+/* the table scrolls sideways inside its own block on narrow screens — the page never does */
+.cl-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 12px;
+}
+.cl-tbl {
+  min-width: 1240px;
+}
+.cl-sort {
+  cursor: pointer;
+  user-select: none;
+}
+.cl-sort:hover {
+  color: var(--text);
+}
+.cl-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.cl-bar {
+  margin-top: 5px;
+}
+.cl-bar .prog {
+  height: 3px;
+}
+.cl-badge {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--pill);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.cl-badge.ok {
+  color: var(--good-ink);
+  border-color: rgba(52, 199, 89, 0.35);
+  background: rgba(52, 199, 89, 0.1);
+}
+.cl-badge.accent {
+  color: var(--text);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.cl-badge.warn {
+  color: var(--warn);
+  border-color: rgba(250, 178, 25, 0.4);
+  background: rgba(250, 178, 25, 0.1);
+}
+.cl-badge.bad {
+  color: var(--bad-ink);
+  border-color: rgba(208, 59, 59, 0.4);
+  background: rgba(208, 59, 59, 0.1);
+}
+.cl-warn {
+  color: var(--warn);
+}
+.cl-bad {
+  color: var(--bad-ink);
+}
+.cl-on {
+  color: var(--good-ink);
+  font-weight: 600;
+}
+.cl-qlabel {
+  font-size: 12px;
+  min-width: 78px;
+  align-self: center;
+}
+.cl-form2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 700px) {
+  .cl-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .cl-form2 {
+    grid-template-columns: 1fr;
+  }
+  .cl-updated {
+    width: 100%;
+  }
+}

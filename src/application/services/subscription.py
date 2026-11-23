@@ -63,15 +63,16 @@ class SubscriptionService:
         req: PurchaseRequest,
         is_trial: bool = False,
         mark_paid: bool = True,
+        description: str | None = None,
+        tag: str | None = None,
     ) -> Subscription:
         """Create a brand-new subscription: panel user first, then persist locally.
 
         ``mark_paid`` records that the user became a paying customer. A free promo grant passes
         False — a gift is neither a trial nor a purchase, so it must not flip has_had_paid (which
-        gates NEW/EXISTING-only promos and feeds paid-conversion analytics)."""
-        short_id = generate_short_id()
+        gates NEW/EXISTING-only promos and feeds paid-conversion analytics).
+        ``description`` / ``tag`` go to the panel user as is (a hand-added client's name / mark)."""
         now = dt.datetime.now(dt.UTC)
-        expire_at = now + dt.timedelta(days=req.duration_days)
         # Constructor purchases override the (service) plan's limits with the picked pack.
         traffic_bytes = (
             req.traffic_limit_bytes
@@ -79,49 +80,122 @@ class SubscriptionService:
             else plan.traffic_limit_bytes or 0
         )
         device_limit = req.device_limit if req.device_limit is not None else plan.device_limit
+        snapshot = _plan_snapshot(plan)
+        snapshot["traffic_limit_bytes"] = traffic_bytes or None
+        snapshot["device_limit"] = device_limit
+        subscription = await self._provision(
+            uow,
+            user=user,
+            plan_id=plan.id,
+            snapshot=snapshot,
+            expire_at=now + dt.timedelta(days=req.duration_days),
+            traffic_limit_bytes=traffic_bytes,
+            device_limit=device_limit,
+            internal_squads=req.internal_squads or tuple(plan.internal_squads),
+            external_squad=req.external_squad or plan.external_squad,
+            is_trial=is_trial,
+            description=description,
+            tag=tag,
+        )
+        if is_trial:
+            user.is_trial_available = False
+        elif mark_paid:
+            user.has_had_paid_subscription = True
+        return subscription
 
-        squads = req.internal_squads or tuple(plan.internal_squads)
+    async def grant_manual(
+        self,
+        uow: UnitOfWork,
+        *,
+        user: User,
+        expire_at: dt.datetime,
+        traffic_limit_bytes: int,
+        device_limit: int | None,
+        internal_squads: tuple[str, ...] = (),
+        description: str | None = None,
+        tag: str | None = None,
+    ) -> Subscription:
+        """A subscription an admin hands out by hand, with no tariff behind it (cash customers,
+        relatives): its own expiry and limits; squads as an unconfigured purchase gets them.
+        Same panel-first path as :meth:`grant`; it is a gift, so the user is not marked paid."""
+        return await self._provision(
+            uow,
+            user=user,
+            plan_id=None,
+            snapshot={
+                "name": "Выдана вручную",
+                "source": "manual",
+                "traffic_limit_bytes": traffic_limit_bytes or None,
+                "device_limit": device_limit,
+            },
+            expire_at=expire_at,
+            traffic_limit_bytes=traffic_limit_bytes,
+            device_limit=device_limit,
+            internal_squads=internal_squads,
+            external_squad=None,
+            is_trial=False,
+            description=description,
+            tag=tag,
+        )
+
+    async def _provision(
+        self,
+        uow: UnitOfWork,
+        *,
+        user: User,
+        plan_id: int | None,
+        snapshot: dict[str, Any],
+        expire_at: dt.datetime,
+        traffic_limit_bytes: int,
+        device_limit: int | None,
+        internal_squads: tuple[str, ...],
+        external_squad: str | None,
+        is_trial: bool,
+        description: str | None,
+        tag: str | None,
+    ) -> Subscription:
+        short_id = generate_short_id()
+        squads = internal_squads
         if not squads:  # unconfigured plan/trial → don't ship a squad-less (dead) panel user
             squads = await self._fallback_squads(uow, is_trial=is_trial)
         spec = self._remnawave.build_spec(
             short_id=short_id,
             telegram_id=user.telegram_id,
             expire_at=expire_at,
-            traffic_limit_bytes=traffic_bytes,
+            traffic_limit_bytes=traffic_limit_bytes,
             device_limit=device_limit,
             internal_squads=squads,
-            external_squad=req.external_squad or plan.external_squad,
+            external_squad=external_squad,
+            description=description,
+            tag=tag,
         )
         # Panel-first: create the panel user OUTSIDE any assumption of a local commit.
         panel_user = await self._remnawave.provision(spec)
 
-        snapshot = _plan_snapshot(plan)
-        snapshot["traffic_limit_bytes"] = traffic_bytes or None
-        snapshot["device_limit"] = device_limit
         subscription = Subscription(
             user_id=user.id,
             remnawave_uuid=panel_user.uuid,
             remnawave_id=panel_user.panel_id,
             short_id=short_id,
-            plan_id=plan.id,
+            panel_username=spec.username,
+            plan_id=plan_id,
             plan_snapshot=snapshot,
             status=SubscriptionStatus.TRIAL if is_trial else SubscriptionStatus.ACTIVE,
             is_trial=is_trial,
-            traffic_limit_bytes=traffic_bytes,
+            traffic_limit_bytes=traffic_limit_bytes,
             device_limit=device_limit,
             internal_squads=list(spec.internal_squads),
             external_squad=spec.external_squad,
-            start_at=now,
+            start_at=dt.datetime.now(dt.UTC),
             expire_at=expire_at,
             subscription_url=panel_user.subscription_url,
         )
-        await uow.subscriptions.add(subscription)
-
+        try:
+            await uow.subscriptions.add(subscription)
+        except Exception:
+            await self._remnawave.discard(panel_user.ref)  # the panel user would be orphaned
+            raise
         user.current_subscription_id = subscription.id
-        if is_trial:
-            user.is_trial_available = False
-        elif mark_paid:
-            user.has_had_paid_subscription = True
         return subscription
 
     async def renew(

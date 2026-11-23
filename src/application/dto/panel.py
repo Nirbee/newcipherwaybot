@@ -65,6 +65,13 @@ class PanelUser:
     status: str | None = None
     description: str | None = None
     created_at: dt.datetime | None = None
+    # Connection facts from ``userTraffic`` — read for the admin «Клиенты» list only: last time
+    # online, first ever connection (None = never connected) and the node used last.
+    online_at: dt.datetime | None = None
+    first_connected_at: dt.datetime | None = None
+    last_node_uuid: str | None = None
+    last_node_name: str | None = None  # some panel builds name the node inline instead
+    last_node_country: str | None = None
 
     @property
     def ref(self) -> PanelUserRef:
@@ -131,6 +138,9 @@ class ProvisionSpec:
     # rule (an omitted field must not disturb an adopted panel user — see _spec_payload).
     reset_device_limit: bool = False
     reset_external_squad: bool = False
+    # A partial update: send ONLY these payload fields (e.g. {"tag"}) — expiry, traffic and
+    # the rest stay exactly as the panel has them. None (default) = the full spec.
+    only: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +151,9 @@ class PanelDevice:
     platform: str | None = None
     device_model: str | None = None
     created_at: str | None = None
+    # Whose device it is — only filled by the all-devices listing: "id:<n>" (3.x numeric user
+    # id) or "uuid:<uuid>" (2.x), the same keys panel_import matches panel users by.
+    user_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -41,7 +41,12 @@ from src.core.constants import (
     PANEL_USERNAME_MAX,
     PANEL_USERNAME_PREFIX,
 )
-from src.core.exceptions import RemnawaveAuthError, RemnawaveError, RemnawaveTransientError
+from src.core.exceptions import (
+    RemnawaveAuthError,
+    RemnawaveError,
+    RemnawaveNotFoundError,
+    RemnawaveTransientError,
+)
 from src.core.logging import get_logger
 from src.infrastructure.remnawave.connection import ConnectionProfile
 
@@ -144,6 +149,29 @@ def _squad_uuids(raw: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _connection_meta(data: dict[str, Any]) -> dict[str, Any]:
+    """When the user was online, first connected and through which node. Panels keep these in
+    the ``userTraffic`` object (``onlineAt``, ``firstConnectedAt``, ``lastConnectedNodeUuid``);
+    older builds had them top-level, some name the node inline (``lastConnectedNode`` with
+    ``nodeName``/``countryCode``). Every field is optional — absent means «unknown»."""
+    traffic = data.get("userTraffic")
+    src = traffic if isinstance(traffic, dict) else {}
+
+    def pick(key: str) -> Any:
+        return src.get(key) if src.get(key) is not None else data.get(key)
+
+    node = pick("lastConnectedNode")
+    node = node if isinstance(node, dict) else {}
+    node_uuid = pick("lastConnectedNodeUuid") or node.get("uuid") or node.get("nodeUuid")
+    return {
+        "online_at": _parse_dt(pick("onlineAt")),
+        "first_connected_at": _parse_dt(pick("firstConnectedAt")),
+        "last_node_uuid": str(node_uuid) if node_uuid else None,
+        "last_node_name": (str(node["nodeName"]) if node.get("nodeName") else None),
+        "last_node_country": (str(node["countryCode"]) if node.get("countryCode") else None),
+    }
+
+
 def _to_panel_user(data: dict[str, Any]) -> PanelUser:
     # Field names verified against a live panel (see docs/context/01): shortUuid,
     # externalSquadUuid, userTraffic — with legacy fallbacks kept for older versions.
@@ -171,6 +199,7 @@ def _to_panel_user(data: dict[str, Any]) -> PanelUser:
         status=str(data.get("status") or "").upper() or None,
         description=data.get("description"),
         created_at=_parse_dt(data.get("createdAt")),
+        **_connection_meta(data),
     )
 
 
@@ -218,6 +247,8 @@ def _spec_payload(spec: ProvisionSpec) -> dict[str, Any]:
         payload["tag"] = spec.tag
     # Caller-supplied passthrough fields (e.g. vlessUuid/shortUuid/status on import).
     payload.update(spec.extra)
+    if spec.only is not None:
+        payload = {k: v for k, v in payload.items() if k in spec.only}
     return payload
 
 
@@ -352,7 +383,8 @@ class RemnawaveHttpClient:
                         status=resp.status_code,
                         body=resp.text[:300],
                     )
-                    raise RemnawaveError(f"panel {resp.status_code}: {resp.text[:200]}")
+                    error = RemnawaveNotFoundError if resp.status_code == 404 else RemnawaveError
+                    raise error(f"panel {resp.status_code}: {resp.text[:200]}")
                 else:
                     return _unwrap(resp.json()) if resp.content else None
             # backoff before retrying a transient failure
@@ -481,7 +513,9 @@ class RemnawaveHttpClient:
             uuid=str(r.uuid) if r.uuid else None,
             telegram_id=r.telegram_id,
         )
-        raise RemnawaveError("panel v3: cannot resolve the numeric user id from this reference")
+        raise RemnawaveNotFoundError(
+            "panel v3: cannot resolve the numeric user id from this reference"
+        )
 
     async def _write_user(self, method: str, payload: dict[str, Any]) -> Any:
         """POST/PATCH /api/users, degrading past stale squad references.
@@ -529,7 +563,8 @@ class RemnawaveHttpClient:
             # 3.0 PATCHes the collection with the numeric id in the body — and refuses
             # an expireAt in the past, so "expire immediately" is clamped to near-now.
             payload = _spec_payload(spec) | {"id": await self._v3_id(ref)}
-            payload["expireAt"] = _v3_expire_at(spec.expire_at)
+            if spec.only is None or "expireAt" in spec.only:
+                payload["expireAt"] = _v3_expire_at(spec.expire_at)
             data = await self._write_user("PATCH", payload)
             return _to_panel_user(dict(data))
         # Backend v2 updates a user via PATCH /api/users with the uuid IN THE BODY —
@@ -540,12 +575,21 @@ class RemnawaveHttpClient:
 
     async def get_user(self, ref: PanelRef) -> PanelUser | None:
         try:
+            return await self.get_user_strict(ref)
+        except RemnawaveError:
+            return None
+
+    async def get_user_strict(self, ref: PanelRef) -> PanelUser | None:
+        """Like :meth:`get_user`, but only an explicit «no such user» (404, unresolvable id)
+        is None — a panel that is down or rejects the credentials raises, so a caller that must
+        not guess (the service-account guard, the orphan clean-up) can tell the two apart."""
+        try:
             if await self._is_v3():
                 path = _PATHS_V3["user"].format(id=await self._v3_id(ref))
             else:
                 path = _PATHS["user"].format(uuid=self._v2_uuid(ref))
             data = await self._request("GET", path)
-        except RemnawaveError:
+        except RemnawaveNotFoundError:
             return None
         return _to_panel_user(dict(data)) if data else None
 
@@ -555,12 +599,16 @@ class RemnawaveHttpClient:
         pagination on /api/users (``start``/``size``, ``total``) — per the panel's contract."""
         out: list[PanelUser] = []
         seen: set[str] = set()
+        received = total = 0  # raw rows seen / the panel's own count, when it reports one
 
-        def take(rows: Any) -> int:
-            added = 0
-            for row in rows or []:
-                if not isinstance(row, dict):
-                    continue
+        def take(raw: Any) -> int:
+            nonlocal received, total
+            rows = raw.get("users") if isinstance(raw, dict) else raw
+            rows = [r for r in (rows or []) if isinstance(r, dict)]
+            received += len(rows)
+            if isinstance(raw, dict) and raw.get("total") is not None:
+                total = max(total, _numeric_id(raw.get("total")) or 0)
+            for row in rows:
                 try:
                     user = _to_panel_user(row)
                 except ValueError:
@@ -570,9 +618,9 @@ class RemnawaveHttpClient:
                     continue
                 seen.add(key)
                 out.append(user)
-                added += 1
-            return added
+            return len(rows)
 
+        complete = False
         if await self._is_v3():
             cursor: str | None = None
             for _ in range(200):  # hard stop: 200 pages x 500 users
@@ -580,23 +628,30 @@ class RemnawaveHttpClient:
                 if cursor:
                     params["cursor"] = cursor
                 data = await self._request("GET", _PATHS_V3["users_stream"], params=params)
-                rows = data.get("users") if isinstance(data, dict) else data
-                if not take(rows) or not isinstance(data, dict) or not data.get("hasMore"):
+                got = take(data)
+                if not isinstance(data, dict) or not data.get("hasMore"):
+                    complete = True
                     break
                 cursor = data.get("nextCursor")
-                if not cursor:
+                if not cursor or not got:
+                    break  # «more» promised but no way to get it: incomplete
+        else:
+            start = 0
+            for _ in range(200):
+                data = await self._request(
+                    "GET", _PATHS["users"], params={"start": start, "size": 500}
+                )
+                got = take(data)
+                start += 500
+                if not got or start >= total:
+                    complete = not total or received >= total
                     break
-            return out
-
-        start = 0
-        for _ in range(200):
-            data = await self._request("GET", _PATHS["users"], params={"start": start, "size": 500})
-            rows = data.get("users") if isinstance(data, dict) else data
-            added = take(rows)
-            total = int(data.get("total") or 0) if isinstance(data, dict) else 0
-            start += 500
-            if not added or start >= total:
-                break
+        # A partial list must never pass for the whole panel: callers decide «not on the
+        # panel» from it (the orphan clean-up, the panel-sync preview).
+        if not complete or (total and received < total):
+            raise RemnawaveTransientError(
+                f"panel returned an incomplete user list ({received} of {total or '?'})"
+            )
         return out
 
     async def get_user_by_telegram_id(self, telegram_id: int) -> PanelUser | None:
@@ -723,6 +778,48 @@ class RemnawaveHttpClient:
                 )
             )
         return devices
+
+    async def list_hwid_devices(self) -> list[PanelDevice]:
+        """Every HWID device of every user in one paged listing (GET /api/hwid/devices,
+        ``start``/``size`` <= 1000, ``total``) — the admin «Клиенты» list counts devices per
+        user from this instead of asking the panel once per customer. Each device names its
+        owner: ``userId`` on 3.x, ``userUuid`` on 2.x."""
+        out: list[PanelDevice] = []
+        start = 0
+        for _ in range(100):  # hard stop: 100 pages x 1000 devices
+            data = await self._request(
+                "GET", "/api/hwid/devices", params={"start": start, "size": 1000}
+            )
+            raw = data.get("devices") if isinstance(data, dict) else data
+            rows = [r for r in (raw or []) if isinstance(r, dict)]
+            for item in rows:
+                if not item.get("hwid"):
+                    continue
+                raw_owner = item.get("user")
+                owner: dict[str, Any] = raw_owner if isinstance(raw_owner, dict) else {}
+                user_id = _numeric_id(item.get("userId", owner.get("id")))
+                user_uuid = item.get("userUuid") or owner.get("uuid")
+                key = (
+                    f"id:{user_id}"
+                    if user_id is not None
+                    else f"uuid:{user_uuid}"
+                    if user_uuid
+                    else None
+                )
+                out.append(
+                    PanelDevice(
+                        hwid=str(item["hwid"]),
+                        platform=item.get("platform"),
+                        device_model=item.get("deviceModel") or item.get("model"),
+                        created_at=item.get("createdAt"),
+                        user_key=key,
+                    )
+                )
+            total = int(data.get("total") or 0) if isinstance(data, dict) else 0
+            start += len(rows)
+            if not rows or start >= total:
+                break
+        return out
 
     async def delete_device(self, ref: PanelRef, hwid: str) -> None:
         """Unbind one HWID (POST /api/hwid/devices/delete — panel-verified route)."""

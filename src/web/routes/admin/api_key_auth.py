@@ -55,6 +55,7 @@ KEY_BLOCKED_PATHS = frozenset(
         "/api/admin/bot-menu/export",  # full export file of the bot menu + its config
         "/api/admin/users/panel-sync",  # pulls every panel user at once (heavy)
         "/api/admin/devversion/export",  # every DevVersion payload of a period in one file
+        "/api/admin/users/clients/export",  # the customer list as a CSV file (OWNER / DEV)
     }
 )
 # Credentials embedded in otherwise useful answers: replaced with "***" for keys.

@@ -80,7 +80,10 @@ class RemnawaveService:
         external_squad: str | None = None,
         unlimited_expire: bool = False,
         tag: str | None = None,
+        description: str | None = None,
     ) -> ProvisionSpec:
+        """``description`` overrides the default ``tg:<id>`` (a hand-added client carries their
+        name there); like ``tag`` it is only sent when set, so updates leave it alone."""
         if unlimited_expire:
             expire_at = dt.datetime.now(dt.UTC) + dt.timedelta(days=UNLIMITED_EXPIRE_DAYS)
         return ProvisionSpec(
@@ -92,13 +95,21 @@ class RemnawaveService:
             device_limit=device_limit,
             internal_squads=internal_squads,
             external_squad=external_squad,
-            description=f"tg:{telegram_id}" if telegram_id else None,
+            description=description or (f"tg:{telegram_id}" if telegram_id else None),
             tag=tag,
         )
 
     async def provision(self, spec: ProvisionSpec) -> PanelUser:
         """Create the panel user for a subscription (panel-first, ADR-0005)."""
         return await self._client.create_user(spec)
+
+    async def discard(self, ref: PanelRef) -> None:
+        """Best effort: remove a panel user this very request just created and could not
+        record (its local save failed) — never leave an orphan nobody pays for."""
+        try:
+            await self._client.delete_user(ref)
+        except Exception as exc:
+            log.warning("panel: orphan not removed", ref=str(ref), error=str(exc))
 
     async def apply(self, ref: PanelRef, spec: ProvisionSpec) -> PanelUser:
         """Push a spec change (renew/change) to an existing panel user."""

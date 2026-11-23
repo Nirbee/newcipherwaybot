@@ -71,6 +71,10 @@ class RemnawaveVersionError(RemnawaveError):
     """Panel version is below the supported minimum."""
 
 
+class RemnawaveNotFoundError(RemnawaveError):
+    """The panel says explicitly that the user isn't there (404 / unresolvable id)."""
+
+
 # --- LAN (Headscale) ---------------------------------------------------------
 class HeadscaleError(DomainError):
     """Headscale is unreachable, rejected the key or answered with an error. The LAN API

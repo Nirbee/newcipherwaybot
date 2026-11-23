@@ -5,7 +5,7 @@ export type Lang = "ru";
 const ru = {
   // sidebar
   dashboard: "Обзор",
-  users: "Пользователи",
+  users: "Клиенты",
   tariffs: "Тарифы и цены",
   promos: "Акции и промокоды",
   botButtons: "Меню бота",

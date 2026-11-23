@@ -42,6 +42,7 @@ class FakeRemnawaveClient:
         self.subpage_config: Any = None
         self.subpage_config_fetches = 0
         self.short_uuid_lookups = 0
+        self.lookup_error: Exception | None = None
 
     async def get_version(self) -> PanelVersion:
         maj, minr, pat = self._version
@@ -79,11 +80,29 @@ class FakeRemnawaveClient:
 
     async def update_user(self, ref: PanelRef, spec: ProvisionSpec) -> PanelUser:
         key = _key(ref)
+        current = self.users.get(key)
+        if spec.only is not None and current is not None:
+            # a partial PATCH: only the named fields change, like on the real panel
+            fields = {
+                "trafficLimitBytes": ("traffic_limit_bytes", spec.traffic_limit_bytes),
+                "hwidDeviceLimit": ("device_limit", spec.device_limit),
+                "tag": ("tag", spec.extra.get("tag", spec.tag)),
+                "expireAt": ("expire_at", spec.expire_at),
+            }
+            changes = dict(fields[k] for k in spec.only if k in fields)
+            self.users[key] = dataclasses.replace(current, **changes)  # type: ignore[arg-type]
+            return self.users[key]
         user = self._make_user(spec, key)
         self.users[key] = user
         return user
 
     async def get_user(self, ref: PanelRef) -> PanelUser | None:
+        return self.users.get(_key(ref))
+
+    async def get_user_strict(self, ref: PanelRef) -> PanelUser | None:
+        """None only for «not found»; ``lookup_error`` simulates a panel that can't answer."""
+        if self.lookup_error is not None:
+            raise self.lookup_error
         return self.users.get(_key(ref))
 
     async def get_user_by_telegram_id(self, telegram_id: int) -> PanelUser | None:
@@ -146,6 +165,13 @@ class FakeRemnawaveClient:
 
     async def list_users(self) -> list[PanelUser]:
         return list(self.users.values())
+
+    async def list_hwid_devices(self) -> list[PanelDevice]:
+        return [
+            dataclasses.replace(d, user_key=f"uuid:{key}")
+            for key, devices in self.devices.items()
+            for d in devices
+        ]
 
     async def get_hosts(self) -> list[PanelHost]:
         return list(self.hosts)

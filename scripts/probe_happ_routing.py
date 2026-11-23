@@ -102,7 +102,8 @@ async def _probe_templates(http: httpx.AsyncClient) -> None:
 async def main(argv: list[str]) -> int:
     container = AppContainer.from_env()
     try:
-        panel_http: httpx.AsyncClient = container.remnawave_client._http
+        # The raw HTTP client sits under the panel guard (services/panel_guard.py).
+        panel_http: httpx.AsyncClient = container.remnawave_client.inner._http
         await _probe_templates(panel_http)
 
         async with container.uow() as uow:

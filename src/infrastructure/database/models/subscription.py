@@ -74,6 +74,11 @@ class Subscription(IntPk, TimestampMixin, Base):
     remnawave_uuid: Mapped[uuid.UUID | None] = mapped_column(Uuid())
     remnawave_id: Mapped[int | None] = mapped_column(BigInt)
     short_id: Mapped[str] = mapped_column(String(16), unique=True)
+    # The panel user's username as Remnawave shows it: ``sub_<short_id>`` for users this bot
+    # created, the original name (``user_5072755730``, ``NL-017``…) for adopted ones. Filled on
+    # creation/adoption and refreshed from the panel snapshot of the «Клиенты» list; NULL until
+    # then. Also how MultiScript service accounts are recognised without asking the panel.
+    panel_username: Mapped[str | None] = mapped_column(String(64))
 
     # --- plan + frozen snapshot -------------------------------------------
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id", ondelete="RESTRICT"))

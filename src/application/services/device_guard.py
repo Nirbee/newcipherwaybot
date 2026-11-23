@@ -13,6 +13,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from src.application.services.panel_guard import is_service_username
 from src.application.services.remnawave import RemnawaveService
 from src.core.enums import SubscriptionStatus
 from src.core.logging import get_logger
@@ -47,6 +48,9 @@ class GuardConfig:
     max_ips: int = 0  # fallback when the subscription has no device_limit; 0 -> skip
     tolerance: int = 1  # NAT/mobile switching slack
     action: str = "alert"  # alert | drop | disable
+    # MultiScript's service accounts (the cascade relay legitimately carries many IPs): never
+    # flagged — and never dropped/disabled (the panel guard would refuse anyway).
+    service_patterns: tuple[str, ...] = ()
 
 
 @dataclass
@@ -90,6 +94,8 @@ class DeviceGuardService:
         if len(subs) >= _SCAN_CAP:
             log.warning("device-guard scan hit the subscription cap", cap=_SCAN_CAP)
         for sub in subs:
+            if is_service_username(sub.panel_username, cfg.service_patterns):
+                continue
             ips = self._ips_for(sub, usage)
             limit = sub.device_limit or cfg.max_ips
             if limit <= 0 or len(ips) <= limit + cfg.tolerance:

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from src.application.services.ids import generate_referral_code, generate_short_id
+from src.application.services.panel_guard import is_service_username
 from src.core.enums import Currency, SubscriptionStatus
 from src.infrastructure.database.models.subscription import Subscription
 from src.infrastructure.database.models.user import User
@@ -111,15 +112,18 @@ def _sub_keys(sub: Subscription) -> set[str]:
     return keys
 
 
-async def find_panel_only(uow: UnitOfWork, panel_users: list[PanelUser]) -> list[PanelOnlyUser]:
-    """Panel users no bot subscription points at (panel id, uuid, short uuid or link code)."""
+async def find_panel_only(
+    uow: UnitOfWork, panel_users: list[PanelUser], *, service_patterns: tuple[str, ...] = ()
+) -> list[PanelOnlyUser]:
+    """Panel users no bot subscription points at (panel id, uuid, short uuid or link code).
+    MultiScript's service accounts (``service_patterns``) are never offered for adoption."""
     subs = await uow.subscriptions.list()
     linked: set[str] = set()
     for sub in subs:
         linked |= _sub_keys(sub)
     out: list[PanelOnlyUser] = []
     for p in panel_users:
-        if _panel_keys(p) & linked:
+        if _panel_keys(p) & linked or is_service_username(p.username, service_patterns):
             continue
         tid = telegram_id_of(p)
         bot_user = await uow.users.find_one(telegram_id=tid) if tid else None
@@ -184,6 +188,7 @@ async def adopt(uow: UnitOfWork, candidates: list[PanelOnlyUser], keys: set[str]
             remnawave_uuid=p.uuid,
             remnawave_id=p.panel_id,
             short_id=short,
+            panel_username=(p.username or "")[:64] or None,
             status=status,
             is_trial=False,
             expire_at=p.expire_at,

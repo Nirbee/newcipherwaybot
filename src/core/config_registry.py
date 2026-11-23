@@ -474,6 +474,19 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "Nightly reconciliation with Remnawave; heals drift from manual panel edits",
     ),
     _p(
+        "PANEL_SERVICE_USERNAMES",
+        C.SECURITY,
+        STR,
+        "cascade_relay_b74178, ms-status-monitor, cascade_relay_*",
+        "Служебные учётки панели",
+        "Panel service accounts",
+        "Имена пользователей Remnawave через запятую (можно с * в конце), которых бот никогда "
+        "не меняет: служебные учётки MultiScript. Не импортируются, скрыты в «Клиентах». "
+        "Каскад и мониторинг защищены всегда, даже если поле очистить. Меняет только владелец",
+        "Comma-separated Remnawave usernames (wildcards allowed) the bot never writes to: "
+        "MultiScript service accounts. Not imported, hidden in «Clients»",
+    ),
+    _p(
         "WEB_CABINET_ENABLED",
         C.INTERFACE,
         BOOL,

@@ -219,6 +219,10 @@ class AuthType(StrEnum):
     TELEGRAM = "telegram"
     EMAIL = "email"
     OAUTH = "oauth"
+    # Added by hand in the admin («+ Добавить клиента»): a cash customer or a relative with
+    # neither Telegram nor e-mail — the bot only keeps their subscription. Stored as the NAME
+    # in a VARCHAR(16) without a CHECK constraint, so the new member needs no migration.
+    MANUAL = "manual"
 
 
 # --- admin cabinet domain ---------------------------------------------------

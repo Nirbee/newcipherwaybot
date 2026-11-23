@@ -669,10 +669,17 @@ async def panel_write_retry(subscription_id: int) -> None:
             return  # gone / never provisioned — nothing to reconcile
         should_be_enabled = sub.status.is_usable
     # Panel-first, outside the DB txn (#1). A raise here re-queues via retry_on_error.
-    if should_be_enabled:
-        await container.remnawave_client.enable_user(panel_ref)
-    else:
-        await container.remnawave_client.disable_user(panel_ref)
+    from src.application.services.panel_guard import PanelServiceAccountError
+
+    try:
+        if should_be_enabled:
+            await container.remnawave_client.enable_user(panel_ref)
+        else:
+            await container.remnawave_client.disable_user(panel_ref)
+    except PanelServiceAccountError:
+        # MultiScript's own account: refused for good — retrying would only refuse again.
+        log.warning("panel_write_retry: service account skipped", subscription_id=subscription_id)
+        return
     log.info("panel_write_retry", subscription_id=subscription_id, enabled=should_be_enabled)
 
 
@@ -688,6 +695,42 @@ async def reconcile_disabled_subs() -> int:
         fixed = await container.resync.reconcile_disabled(uow)
         await uow.commit()
     return fixed
+
+
+@broker.task(schedule=[{"cron": "41 * * * *"}])
+async def expire_orphaned_subscriptions() -> int:
+    """Hourly: subscriptions still ACTIVE/TRIAL in the bot long after their expiry, whose panel
+    user is gone (deleted in the panel) — nothing would ever update them, and they inflated the
+    «active»/«trial» counters for months. Marked EXPIRED in the bot's DB only; the panel is only
+    read (one full list + one lookup per candidate). A grace window is left to ``apply_grace``.
+    Too many candidates at once -> nothing changes and the admins get an alert."""
+    from src.application.services.clients import ORPHAN_LIMIT, expire_orphaned
+    from src.infrastructure.services.reports import send_topic_report
+
+    container = get_container()
+    try:
+        panel_users = await container.remnawave_client.list_users()
+    except Exception as exc:  # unreachable, or an incomplete list — never guess from it
+        log.warning("expire_orphaned: panel list unusable", error=str(exc))
+        return 0
+    async with container.uow() as uow:
+        report = await expire_orphaned(
+            uow, panel_users, dt.datetime.now(dt.UTC), client=container.remnawave_client
+        )
+        await uow.commit()
+    if report.over_limit:
+        log.warning("expire_orphaned: too many candidates", candidates=report.candidates)
+        await send_topic_report(
+            container,
+            "alerts",
+            f"⚠️ Уборка зависших подписок остановлена: {report.candidates} подписок выглядят "
+            f"удалёнными из панели (порог {ORPHAN_LIMIT}). Похоже на сбой панели или "
+            "сопоставления — ничего не изменено, проверьте «Синхронизацию с панелью».",
+        )
+        return 0
+    if report.changed or report.skipped:
+        log.info("expire_orphaned", subscriptions=report.changed, skipped=report.skipped)
+    return len(report.changed)
 
 
 @broker.task(schedule=[{"cron": "0 */6 * * *"}])
@@ -985,6 +1028,7 @@ async def device_guard_scan() -> int:
     report topic. A Redis cooldown keeps it to one alert per subscription per day.
     """
     from src.application.services.device_guard import GuardConfig
+    from src.application.services.panel_guard import parse_patterns
     from src.core.enums import ServerNodeStatus
     from src.infrastructure.services.reports import send_topic_report
 
@@ -997,6 +1041,9 @@ async def device_guard_scan() -> int:
             max_ips=int(await cfg_svc.value(uow, "DEVICE_GUARD_MAX_IPS") or 0),
             tolerance=int(await cfg_svc.value(uow, "DEVICE_GUARD_TOLERANCE") or 0),
             action=str(await cfg_svc.value(uow, "DEVICE_GUARD_ACTION") or "alert"),
+            service_patterns=parse_patterns(
+                str(await cfg_svc.value(uow, "PANEL_SERVICE_USERNAMES") or "")
+            ),
         )
         nodes = [
             str(n.node_uuid)

@@ -24,9 +24,9 @@ from src.infrastructure.database.models.ticket import TicketMessage
 
 if TYPE_CHECKING:
     from src.application.common.notifier import Notifier
+    from src.application.common.panel import RemnawaveClient
     from src.application.services.bot_config import BotConfigService
     from src.infrastructure.database.models.user import User
-    from src.infrastructure.remnawave.client import RemnawaveHttpClient
 
 log = get_logger(__name__)
 
@@ -125,7 +125,7 @@ def _strip_md(t: str) -> str:
 class AiSupportService:
     def __init__(
         self,
-        remnawave: RemnawaveHttpClient,
+        remnawave: RemnawaveClient,
         notifier: Notifier,
         config: BotConfigService,
         uow_factory: Any,  # callable returning a UnitOfWork context manager

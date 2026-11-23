@@ -28,6 +28,7 @@ from src.application.common.payments import (
     WebhookResult,
 )
 from src.application.services.bot_config import BotConfigService
+from src.application.services.clients import PanelSnapshotService
 from src.application.services.connection import sign_dl, verify_dl
 from src.application.services.panel_sync import PanelSyncService
 from src.application.services.payment import PaymentService
@@ -129,6 +130,7 @@ class ApiTestContainer:
         self.notifier = LogNotifier()
         self.panel_sync = PanelSyncService(self.remnawave_client)
         self.traffic = TrafficService(self.remnawave_client)  # no cache: deterministic
+        self.panel_snapshot = PanelSnapshotService(self.remnawave_client)
         self.telemetry = TelemetryReporter(
             enabled=False, url="", app_version="test", install_id="test"
         )
@@ -1779,6 +1781,474 @@ async def test_create_user_rejects_duplicate_email(
         "/api/admin/users", headers=auth, json={"email": "DUP@example.com"}
     )
     assert second.status_code == 409
+
+
+# --- «Клиенты»: list, manual add, quick actions, service accounts ---------------------------
+
+
+async def _subscribed(
+    container: ApiTestContainer, telegram_id: int, *, days: int = 30, **user_fields: Any
+) -> tuple[int, int]:
+    """A bot user with a live subscription provisioned on the fake panel."""
+    from src.application.dto.pricing import PurchaseRequest
+    from tests.factories import make_plan, make_user
+
+    async with container.uow() as uow:
+        user = await make_user(uow, telegram_id=telegram_id, **user_fields)
+        plan, _ = await make_plan(uow, code=f"p{telegram_id}")
+        req = PurchaseRequest(
+            user_id=user.id, plan_id=plan.id, duration_days=days, currency=Currency.RUB
+        )
+        sub = await container.subscriptions.grant(uow, user=user, plan=plan, req=req)
+        await uow.commit()
+        return user.id, sub.id
+
+
+async def test_clients_list_counters_and_panel_columns(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import dataclasses
+
+    from src.core.enums import SubscriptionStatus
+    from src.infrastructure.database.models.subscription import Subscription
+
+    http, container = client
+    auth = await _login(http)
+    uid, sid = await _subscribed(container, 5551001, username="nina")
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(sid)
+        assert sub is not None and sub.remnawave_uuid is not None
+        panel_uuid = sub.remnawave_uuid
+        # a stale ACTIVE: expired in August, its panel user deleted since
+        stale = User(telegram_id=5551002, referral_code="STALE1")
+        await uow.users.add(stale)
+        old = Subscription(
+            user_id=stale.id,
+            short_id="stale0001",
+            status=SubscriptionStatus.ACTIVE,
+            expire_at=dt.datetime(2026, 8, 1, tzinfo=dt.UTC),
+        )
+        await uow.subscriptions.add(old)
+        stale.current_subscription_id = old.id
+        await uow.commit()
+    fake = container.remnawave_client
+    fake.users[panel_uuid] = dataclasses.replace(
+        fake.users[panel_uuid], online_at=dt.datetime.now(dt.UTC), tag="VIP"
+    )
+
+    res = await http.get("/api/admin/users/clients?sort=id&desc=false", headers=auth)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["panel"]["ok"] is True and body["can_export"] is True
+    counters = body["counters"]
+    assert counters["active"] == 1
+    assert counters["expired"] == 1  # the stale ACTIVE shows as expired
+    assert counters["online"] == 1
+    row = next(r for r in body["items"] if r["id"] == uid)
+    assert row["tag"] == "VIP" and row["in_panel"] is True
+    assert row["panel_username"].startswith("sub_")
+    # search by the start of the Telegram ID and by the panel name
+    found = (await http.get("/api/admin/users/clients?q=5551001", headers=auth)).json()
+    assert [r["id"] for r in found["items"]] == [uid]
+    expiring = (await http.get("/api/admin/users/clients?chip=expired", headers=auth)).json()
+    assert [r["telegram_id"] for r in expiring["items"]] == [5551002]
+
+    # the legacy counters agree: no inflated «active»
+    legacy = (await http.get("/api/admin/users/counters", headers=auth)).json()
+    assert legacy["active"] == 1 and legacy["expired"] == 1
+
+    # CSV of the current selection
+    csv_res = await http.get("/api/admin/users/clients/export?chip=active", headers=auth)
+    assert csv_res.status_code == 200
+    assert csv_res.headers["content-type"].startswith("text/csv")
+    assert "5551001" in csv_res.text and "5551002" not in csv_res.text
+
+
+async def test_clients_list_works_while_the_panel_is_down(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+    uid, _ = await _subscribed(container, 5552001)
+
+    async def down() -> list[Any]:
+        raise RuntimeError("connection refused")
+
+    container.remnawave_client.list_users = down  # type: ignore[method-assign]
+    body = (await http.get("/api/admin/users/clients", headers=auth)).json()
+    assert body["panel"]["ok"] is False
+    assert body["panel"]["error"] == "error"  # a code, not the exception text
+    row = next(r for r in body["items"] if r["id"] == uid)
+    assert row["status"] == "active" and row["in_panel"] is False and row["online_at"] is None
+
+
+async def test_manual_client_without_telegram_or_email(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from src.core.enums import AuthType
+
+    http, container = client
+    auth = await _login(http)
+    res = await http.post(
+        "/api/admin/users/manual",
+        headers=auth,
+        json={
+            "name": "  Бабушка   Нина tg:999 ",
+            "tag": "nl_017",
+            "term": "days",
+            "days": 30,
+            "traffic_gb": 50,
+            "device_limit": 2,
+        },
+    )
+    assert res.status_code == 200, res.text
+    out = res.json()
+    assert out["subscription_url"] and out["panel_username"].startswith("sub_")
+    async with container.uow() as uow:
+        user = await uow.users.get(out["user_id"])
+        assert user is not None
+        assert user.auth_type is AuthType.MANUAL
+        assert user.telegram_id is None and user.email is None
+        assert user.first_name == "Бабушка Нина tg:999"
+        assert user.current_subscription_id == out["subscription_id"]
+        sub = await uow.subscriptions.get(out["subscription_id"])
+        assert sub is not None and sub.plan_id is None
+        assert (sub.plan_snapshot or {}).get("source") == "manual"
+        assert sub.traffic_limit_bytes == 50 * 1024**3 and sub.device_limit == 2
+        panel = container.remnawave_client.users[sub.remnawave_uuid]
+    assert panel.tag == "NL_017"  # upper-cased like Remnawave wants it
+    # a «tg:<id>» typed into the name never reaches the panel's description
+    from src.web.routes.admin.users import ManualClientIn
+
+    body = ManualClientIn(name="Нина tg:999 TG: 12", term="forever")
+    assert body.panel_description(None) == "Нина"
+    assert body.panel_description(4242) == "tg:4242 Нина"
+    assert ManualClientIn(name="tg:1", term="forever").panel_description(None) == "клиент"
+    assert panel.expire_at is not None
+    assert (
+        dt.timedelta(days=29) < panel.expire_at - dt.datetime.now(dt.UTC) <= dt.timedelta(days=30)
+    )
+    # the audit trail
+    async with container.uow() as uow:
+        rows = await uow.audit.list()
+        assert any(r.action == "user.create_manual" for r in rows)
+
+
+async def test_manual_client_by_plan_and_forever(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from tests.factories import make_plan
+
+    http, container = client
+    auth = await _login(http)
+    async with container.uow() as uow:
+        plan, _ = await make_plan(uow, code="manual-plan", device_limit=5)
+        await uow.commit()
+        plan_id = plan.id
+    res = await http.post(
+        "/api/admin/users/manual",
+        headers=auth,
+        json={"name": "Петя", "telegram": "700700", "term": "plan", "plan_id": plan_id, "days": 90},
+    )
+    assert res.status_code == 200, res.text
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(res.json()["subscription_id"])
+        assert sub is not None and sub.plan_id == plan_id and sub.device_limit == 5
+        user = await uow.users.get(res.json()["user_id"])
+        assert user is not None and user.telegram_id == 700700
+        assert not user.has_had_paid_subscription  # a gift, not a purchase
+    res = await http.post(
+        "/api/admin/users/manual",
+        headers=auth,
+        json={"name": "Вечный", "email": "Eternal@Example.com", "term": "forever"},
+    )
+    assert res.status_code == 200, res.text
+    expire = dt.datetime.fromisoformat(res.json()["expire_at"])
+    assert expire - dt.datetime.now(dt.UTC) > dt.timedelta(days=3000)
+
+
+async def test_manual_client_conflicts_and_validation(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+    uid, _ = await _subscribed(container, 800800, username="TakenName")
+    before = container.remnawave_client.created_count()
+
+    res = await http.post(
+        "/api/admin/users/manual",
+        headers=auth,
+        json={"name": "Дубль", "telegram": "800800", "term": "days", "days": 7},
+    )
+    assert res.status_code == 409
+    assert res.json()["detail"]["user_id"] == uid  # «открыть карточку»
+    res = await http.post(
+        "/api/admin/users/manual",
+        headers=auth,
+        json={"name": "Дубль", "telegram": "@takenname", "term": "days", "days": 7},
+    )
+    assert res.status_code == 409 and res.json()["detail"]["user_id"] == uid
+    for bad in (
+        {"name": "x", "term": "days"},  # no days
+        {"name": "x", "term": "plan", "days": 30},  # no plan
+        {"name": "x", "term": "until", "until": "2020-01-01"},  # in the past
+        {"name": "x", "term": "days", "days": 7, "tag": "плохая метка"},
+        {"name": "   ", "term": "days", "days": 7},
+        {"name": "x", "term": "days", "days": 7, "email": "not-an-email"},
+        {"name": "x", "term": "until", "until": "2100-01-01"},  # past Remnawave's «forever»
+    ):
+        res = await http.post("/api/admin/users/manual", headers=auth, json=bad)
+        assert res.status_code == 422, bad
+    assert container.remnawave_client.created_count() == before  # nothing reached the panel
+
+
+async def test_manual_client_panel_failure_saves_nothing(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from src.core.exceptions import RemnawaveError
+
+    http, container = client
+    auth = await _login(http)
+
+    async def refuse(spec: Any) -> Any:
+        raise RemnawaveError("panel 400: bad payload")
+
+    container.remnawave_client.create_user = refuse  # type: ignore[method-assign]
+    async with container.uow() as uow:
+        users_before = await uow.users.count()
+    res = await http.post(
+        "/api/admin/users/manual",
+        headers=auth,
+        json={"name": "Не дошёл", "term": "days", "days": 7},
+    )
+    assert res.status_code == 502
+    async with container.uow() as uow:
+        assert await uow.users.count() == users_before
+
+
+async def test_manual_client_local_failure_removes_the_panel_user(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Panel user created, bot record not saved -> the panel user is removed again."""
+    from src.web.routes.admin import users as users_route
+
+    http, container = client
+    auth = await _login(http)
+
+    async def broken(*_: Any, **__: Any) -> None:
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(users_route, "_audit_manual", broken)
+    with pytest.raises(RuntimeError):
+        await http.post(
+            "/api/admin/users/manual",
+            headers=auth,
+            json={"name": "Сирота", "term": "days", "days": 7},
+        )
+    fake = container.remnawave_client
+    assert fake.users == {} and len(fake.deleted) == 1
+
+
+async def test_quick_actions_forever_and_limits(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    http, container = client
+    auth = await _login(http)
+    uid, sid = await _subscribed(container, 900900)
+
+    res = await http.post(f"/api/admin/users/{uid}/extend", headers=auth, json={"forever": True})
+    assert res.status_code == 200, res.text
+    res = await http.post(
+        f"/api/admin/users/{uid}/extend", headers=auth, json={"forever": True, "days": 3}
+    )
+    assert res.status_code == 422
+    res = await http.post(
+        f"/api/admin/users/{uid}/limits",
+        headers=auth,
+        json={"traffic_gb": 100, "device_limit": 0, "tag": "family"},
+    )
+    assert res.status_code == 200, res.text
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(sid)
+        assert sub is not None and sub.expire_at is not None
+        assert sub.expire_at - dt.datetime.now(dt.UTC) > dt.timedelta(days=3000)
+        assert sub.traffic_limit_bytes == 100 * 1024**3 and sub.device_limit == 0
+        panel = container.remnawave_client.users[sub.remnawave_uuid]
+    assert panel.tag == "FAMILY" and panel.traffic_limit_bytes == 100 * 1024**3
+    assert panel.device_limit == 0  # 0 on the panel = no device limit
+    bad = await http.post(f"/api/admin/users/{uid}/limits", headers=auth, json={"tag": "a-b"})
+    assert bad.status_code == 422
+    res = await http.post(
+        f"/api/admin/users/{uid}/extend", headers=auth, json={"until": "2100-01-01"}
+    )
+    assert res.status_code == 422  # after Remnawave's «forever»
+
+
+async def test_limits_change_only_what_was_sent_and_respect_grace(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    import dataclasses
+
+    http, container = client
+    auth = await _login(http)
+    uid, sid = await _subscribed(container, 901901)
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(sid)
+        assert sub is not None
+        panel_uuid = sub.remnawave_uuid
+    fake = container.remnawave_client
+    # the panel's own expiry differs from the bot's (e.g. a grace window's short one)
+    panel_expire = dt.datetime.now(dt.UTC) + dt.timedelta(days=2)
+    fake.users[panel_uuid] = dataclasses.replace(fake.users[panel_uuid], expire_at=panel_expire)
+
+    res = await http.post(f"/api/admin/users/{uid}/limits", headers=auth, json={"tag": "VIP"})
+    assert res.status_code == 200, res.text
+    panel = fake.users[panel_uuid]
+    assert panel.tag == "VIP" and panel.expire_at == panel_expire  # expiry not sent
+
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(sid)
+        assert sub is not None
+        sub.grace_until = dt.datetime.now(dt.UTC) + dt.timedelta(days=2)
+        await uow.commit()
+    res = await http.post(f"/api/admin/users/{uid}/limits", headers=auth, json={"traffic_gb": 500})
+    assert res.status_code == 409 and "льготном" in res.json()["detail"]
+    res = await http.post(f"/api/admin/users/{uid}/limits", headers=auth, json={"device_limit": 4})
+    assert res.status_code == 200  # devices / tag are still fine in grace
+    assert fake.users[panel_uuid].device_limit == 4
+    assert fake.users[panel_uuid].expire_at == panel_expire
+
+
+async def test_demo_session_sees_masked_clients_and_cannot_probe(
+    client: tuple[httpx.AsyncClient, ApiTestContainer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, container = client
+    uid, _ = await _subscribed(container, 902902, email="secret.client@example.com")
+    monkeypatch.setattr(container.settings.admin, "demo_enabled", True)
+    res = await http.post("/api/admin/auth/demo")
+    demo = {"Authorization": f"Bearer {res.json()['token']}"}
+
+    body = (await http.get("/api/admin/users/clients?refresh=true", headers=demo)).json()
+    row = next(r for r in body["items"] if r["id"] == uid)
+    assert row["email"] != "secret.client@example.com" and "***" in row["email"]
+    assert row["short_id"] == "***"
+    assert body["can_export"] is False
+    # no search oracle by e-mail
+    found = (await http.get("/api/admin/users/clients?q=secret.client", headers=demo)).json()
+    assert found["total"] == 0
+    detail = (await http.get(f"/api/admin/users/{uid}", headers=demo)).json()
+    assert "***" in detail["email"]
+    assert detail["subscription"]["subscription_url"] == "***"
+    # the owner still finds them
+    owner = await _login(http)
+    found = (await http.get("/api/admin/users/clients?q=secret.client", headers=owner)).json()
+    assert [r["id"] for r in found["items"]] == [uid]
+
+
+async def test_service_account_setting_is_owner_only_and_safe(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    from src.application.services.ids import generate_referral_code
+    from src.core.enums import AuthType, Role
+
+    http, container = client
+    owner = await _login(http)
+    for bad in ("*", "s*", "sub_*", "user_*"):
+        res = await http.patch(
+            "/api/admin/settings",
+            headers=owner,
+            json={"changes": {"PANEL_SERVICE_USERNAMES": f"cascade_relay_*, {bad}"}},
+        )
+        assert res.status_code == 400, bad
+    res = await http.patch(
+        "/api/admin/settings",
+        headers=owner,
+        json={"changes": {"PANEL_SERVICE_USERNAMES": "ms-status-monitor, relay_backup_*"}},
+    )
+    assert res.status_code == 200, res.text
+
+    async with container.uow() as uow:
+        await uow.users.add(
+            User(
+                username="dev_admin",
+                auth_type=AuthType.EMAIL,
+                role=Role.DEV,
+                referral_code=generate_referral_code(),
+                password_hash=hash_password("DevAdmin123!"),
+            )
+        )
+        await uow.commit()
+    res = await http.post(
+        "/api/admin/auth/login", json={"username": "dev_admin", "password": "DevAdmin123!"}
+    )
+    dev = {"Authorization": f"Bearer {res.json()['token']}"}
+    res = await http.patch(
+        "/api/admin/settings", headers=dev, json={"changes": {"PANEL_SERVICE_USERNAMES": ""}}
+    )
+    assert res.status_code == 403
+
+
+async def test_service_accounts_are_hidden_and_never_written(
+    client: tuple[httpx.AsyncClient, ApiTestContainer],
+) -> None:
+    """MultiScript's cascade relay adopted by the import: only under «Служебные», and every
+    action that would write to the panel is refused before reaching it."""
+    import dataclasses
+
+    from src.core.enums import SubscriptionStatus
+    from src.infrastructure.database.models.subscription import Subscription
+
+    http, container = client
+    auth = await _login(http)
+    uid, sid = await _subscribed(container, 919191)
+    async with container.uow() as uow:
+        sub = await uow.subscriptions.get(sid)
+        assert sub is not None
+        sub.panel_username = "cascade_relay_b74178"
+        panel_uuid = sub.remnawave_uuid
+        monitor = User(first_name="ms-status-monitor", referral_code="MSMON1")
+        await uow.users.add(monitor)
+        msub = Subscription(
+            user_id=monitor.id,
+            short_id="msmon0001",
+            status=SubscriptionStatus.ACTIVE,
+            panel_username="ms-status-monitor",
+            expire_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=3650),
+        )
+        await uow.subscriptions.add(msub)
+        monitor.current_subscription_id = msub.id
+        await uow.commit()
+    fake = container.remnawave_client
+    fake.users[panel_uuid] = dataclasses.replace(
+        fake.users[panel_uuid], username="cascade_relay_b74178"
+    )
+    panel_before = fake.users[panel_uuid]
+
+    body = (await http.get("/api/admin/users/clients", headers=auth)).json()
+    assert uid not in [r["id"] for r in body["items"]]
+    assert body["counters"]["service"] == 2
+    service = (await http.get("/api/admin/users/clients?chip=service", headers=auth)).json()
+    assert {r["id"] for r in service["items"]} == {uid, monitor.id}
+    detail = (await http.get(f"/api/admin/users/{uid}", headers=auth)).json()
+    assert detail["is_service"] is True
+
+    for path, payload in (
+        ("/extend", {"days": 30}),
+        ("/extend", {"forever": True}),
+        ("/sync", None),
+        ("/hwid", {"value": 5}),
+        ("/limits", {"traffic_gb": 1}),
+        ("/reset-traffic", None),
+        ("/reset-devices", None),
+    ):
+        res = await http.post(f"/api/admin/users/{uid}{path}", headers=auth, json=payload)
+        assert res.status_code == 403, (path, res.text)
+        assert "служебная" in res.json()["detail"]
+    res = await http.delete(f"/api/admin/users/{uid}", headers=auth)
+    assert res.status_code == 403
+    assert container.remnawave_client.users[panel_uuid] == panel_before
+    async with container.uow() as uow:
+        assert await uow.users.get(uid) is not None  # never deleted from the bot either
 
 
 # --- scoped admin accounts (staff.py) ------------------------------------------------------

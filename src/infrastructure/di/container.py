@@ -13,7 +13,14 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from src.application.services.bot_config import BotConfigService
+from src.application.services.clients import PanelSnapshotService
 from src.application.services.device_guard import DeviceGuardService
+from src.application.services.panel_guard import (
+    GuardedPanelClient,
+    is_service_username,
+    parse_patterns,
+    ref_keys,
+)
 from src.application.services.panel_sync import PanelSyncService
 from src.application.services.payment import PaymentService
 from src.application.services.pricing import PricingService
@@ -55,7 +62,13 @@ class AppContainer:
         self.session_factory: async_sessionmaker[AsyncSession] = create_session_factory(self.engine)
         self.redis: Redis = create_redis(settings)
 
-        self.remnawave_client = RemnawaveHttpClient.from_profile(build_profile(settings.remnawave))
+        # Every panel call of the app goes through the guard: writes aimed at MultiScript's
+        # service accounts (cascade relay, status monitor) are refused, whatever path they come
+        # from — see application/services/panel_guard.py.
+        self.remnawave_client = GuardedPanelClient(
+            RemnawaveHttpClient.from_profile(build_profile(settings.remnawave)),
+            self._service_accounts,
+        )
         self.panel_webhook = WebhookVerifier(settings.remnawave.webhook_secret)
         # LAN Play: server + API key are hot-reload settings, so a client is built per use
         # (``infrastructure.services.lan.open_headscale``); tests swap in a fake factory.
@@ -99,6 +112,7 @@ class AppContainer:
         self.device_guard = DeviceGuardService(self.remnawave_client)
         self.resync = RemnawaveResyncService(self.remnawave_client, self.subscriptions)
         self.traffic = TrafficService(self.remnawave_client, cache=self.redis)
+        self.panel_snapshot = PanelSnapshotService(self.remnawave_client)  # «Клиенты» list
         self.ai_support = AiSupportService(
             self.remnawave_client, self.notifier, self.bot_config, self.uow
         )
@@ -123,6 +137,20 @@ class AppContainer:
                 password=str(await cfg.value(uow, "SMTP_PASSWORD") or ""),
                 from_addr=str(await cfg.value(uow, "SMTP_FROM") or ""),
             )
+
+    async def _service_accounts(self) -> tuple[tuple[str, ...], frozenset[str]]:
+        """For the panel guard: the configured service usernames, and the panel keys of the
+        subscriptions the bot itself has recorded under such a name."""
+        async with self.uow() as uow:
+            raw = await self.bot_config.value(uow, "PANEL_SERVICE_USERNAMES")
+            patterns = parse_patterns(str(raw or ""))
+            subs = await uow.subscriptions.with_panel_username()
+        keys: set[str] = set()
+        for sub in subs:
+            if is_service_username(sub.panel_username, patterns):
+                ref = sub.panel_ref
+                keys |= ref_keys(ref) if ref is not None else set()
+        return patterns, frozenset(keys)
 
     def uow(self) -> UnitOfWork:
         """A fresh unit of work. Use as ``async with container.uow() as uow: ...``."""

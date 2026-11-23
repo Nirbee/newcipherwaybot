@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 from src.application.services.bot_config import SECRET_MASK, BotConfigError, category_sections
 from src.application.services.devversion import settings_guard as devversion_settings_guard
+from src.application.services.panel_guard import SERVICE_SETTING
+from src.application.services.panel_guard import settings_guard as service_accounts_guard
 from src.core import config_registry as registry
 from src.core.enums import Role
 from src.infrastructure.di import AppContainer
@@ -41,6 +43,13 @@ def _require_dev_for_devversion(identity: AdminIdentity, keys: Iterable[str]) ->
         Role.DEV,
     ):
         raise HTTPException(403, "настройки DevVersion меняет только владелец или разработчик")
+
+
+def _require_owner_for_service_accounts(identity: AdminIdentity, keys: Iterable[str]) -> None:
+    """MultiScript's service accounts the bot must never touch: OWNER only (a wrong list could
+    either expose the cascade to the bot's sweeps or block ordinary customers' renewals)."""
+    if SERVICE_SETTING in keys and identity.role is not Role.OWNER:
+        raise HTTPException(403, "список служебных учёток панели меняет только владелец")
 
 
 @router.get("")
@@ -84,6 +93,7 @@ async def patch_settings(
         raise HTTPException(400, "no changes")
     changes = dict(body.changes)
     _require_dev_for_devversion(identity, changes)
+    _require_owner_for_service_accounts(identity, changes)
     async with container.uow() as uow:
         old_server = _norm_server(await container.bot_config.value(uow, _LAN_SERVER))
         _require_owner_for_lan(
@@ -95,6 +105,7 @@ async def patch_settings(
             # LAN: https-only server; a new server drops the key issued by the old one.
             reset = lan_settings_guard(changes, old_server)
             devversion_settings_guard(changes)  # JSON-object flags, bounded upload interval
+            service_accounts_guard(changes)  # no pattern broad enough to catch customers
             written = await container.bot_config.set_values(uow, changes)
         except (BotConfigError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
