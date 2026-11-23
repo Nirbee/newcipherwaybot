@@ -61,6 +61,7 @@ KEY_SCREENS: dict[str, str] = {
     "bot-menu": "Меню бота",
     "miniapp": "Мини-приложение",
     "report-topics": "Группа отчётов",
+    "devversion": "DevVersion",
 }
 
 

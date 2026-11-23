@@ -468,6 +468,7 @@ const ru = {
   squadPanelName: "на панели",
   // routers
   routers: "Роутеры",
+  devversion: "DevVersion",
   routersTitle: "Роутеры",
   routersCreate: "Добавить роутер",
   routersEligibleHosts: "Локации для роутеров",

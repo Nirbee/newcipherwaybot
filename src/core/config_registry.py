@@ -1259,6 +1259,49 @@ REGISTRY: tuple[ParamSpec, ...] = (
         "Сколько компьютеров одной подписки можно подключить к LAN",
         "Devices one subscription may register",
     ),
+    # --- DevVersion: opt-in diagnostics from the Windows app (/api/app/v1/telemetry) ---------
+    _p(
+        "DEVVERSION_TELEMETRY_ENABLED",
+        C.DEVVERSION,
+        BOOL,
+        True,
+        "Приём отчётов DevVersion",
+        "DevVersion reports",
+        "Выключите — приложения перестанут отправлять диагностику (сбор включает сам "
+        "пользователь, после согласия)",
+        "Off: apps stop sending diagnostics (users opt in themselves)",
+    ),
+    _p(
+        "DEVVERSION_UPLOAD_INTERVAL",
+        C.DEVVERSION,
+        INT,
+        3600,
+        "Интервал отправки (сек)",
+        "Upload interval (s)",
+        "Как часто приложение отправляет отчёт: от 600 до 86400",
+        "How often the app uploads a report: 600..86400",
+    ),
+    _p(
+        "DEVVERSION_FLAGS",
+        C.DEVVERSION,
+        STR,
+        "{}",
+        "Флаги функций DevVersion",
+        "DevVersion feature flags",
+        'Плоский JSON-объект, например {"new_probe": true}: ключи a-z, 0-9, _ (до 32), '
+        "значения — true/false, число или строка до 64 символов, не больше 50 флагов",
+        'Flat JSON object, e.g. {"new_probe": true}, passed to the app as is',
+    ),
+    _p(
+        "DEVVERSION_ALLOWED_SUBSCRIPTIONS",
+        C.DEVVERSION,
+        STR,
+        "",
+        "Подписки с доступом к DevVersion",
+        "DevVersion subscriptions",
+        "Номера подписок через запятую. Пусто — все платные подписки (пробные не принимаются)",
+        "Comma-separated subscription ids. Empty — every paid subscription (no trials)",
+    ),
 )
 
 _BY_KEY: dict[str, ParamSpec] = {p.key: p for p in REGISTRY}
@@ -1282,6 +1325,7 @@ CATEGORY_ORDER: tuple[ConfigCategory, ...] = (
     C.SUPPORT,
     C.INTERFACE,
     C.LAN,
+    C.DEVVERSION,
 )
 
 CATEGORY_NAMES: dict[ConfigCategory, dict[str, str]] = {
@@ -1295,6 +1339,7 @@ CATEGORY_NAMES: dict[ConfigCategory, dict[str, str]] = {
     C.SUPPORT: {"ru": "ИИ-поддержка", "en": "AI support"},
     C.INTERFACE: {"ru": "Интерфейс бота", "en": "Bot interface"},
     C.LAN: {"ru": "LAN для игр", "en": "LAN Play"},
+    C.DEVVERSION: {"ru": "DevVersion", "en": "DevVersion"},
 }
 
 

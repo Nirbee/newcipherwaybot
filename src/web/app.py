@@ -27,6 +27,7 @@ from src.web.routes import (
     agent,
     app_api,
     app_lan,
+    app_telemetry,
     cabinet,
     cabinet_auth,
     cabinet_link,
@@ -191,6 +192,7 @@ def create_app() -> FastAPI:
     app.include_router(cabinet_routers.router)
     app.include_router(app_api.router)  # Windows app: support chat by subscription link
     app.include_router(app_lan.router)  # Windows app: LAN Play rooms over Headscale
+    app.include_router(app_telemetry.router)  # Windows app: DevVersion diagnostics reports
     app.include_router(agent.router)
     app.include_router(agent.short_router)
 

@@ -165,6 +165,7 @@ export default function Layout() {
     { icon: "🚫", path: "/blacklist", label: t.blacklist },
     { group: t.gSystem, icon: "🌍", path: "/servers", label: t.servers },
     { icon: "📡", path: "/routers", label: t.routers },
+    { icon: "📊", path: "/devversion", label: t.devversion },
     { icon: "⚙️", path: "/settings", label: t.settings },
     { icon: "🛠️", path: "/maintenance", label: t.maintenance },
     ...(me.data?.role === "OWNER"

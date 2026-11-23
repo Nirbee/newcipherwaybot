@@ -35,6 +35,11 @@ class WebSettings(BaseModel):
     # client can't dodge rate limits by sending its own. Comma-separated in the env.
     # NoDecode: take the env value as a plain comma list (not JSON) — split by the validator.
     trusted_proxies: Annotated[list[str], NoDecode] = DEFAULT_TRUSTED_PROXIES
+    # DevVersion reports: offline IP -> provider (ASN) / region databases (DB-IP Lite, .mmdb).
+    # The worker keeps them fresh there (shared volume); no files -> asn/region stay empty.
+    geoip_dir: str = "/app/geoip"
+    # false -> never download (put dbip-asn-lite.mmdb / dbip-city-lite.mmdb there yourself).
+    geoip_download: bool = True
 
     @field_validator("public_url", mode="before")
     @classmethod

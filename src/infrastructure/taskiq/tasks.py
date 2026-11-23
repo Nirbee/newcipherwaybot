@@ -1410,6 +1410,28 @@ async def lan_cleanup() -> dict[str, int]:
     return await cleanup(get_container())
 
 
+@broker.task(schedule=[{"cron": "41 3 * * *"}])
+async def devversion_retention() -> int:
+    """Daily: delete DevVersion reports older than 90 days (the consent text promises it), then
+    alert the admins (once a day) if the table still takes more than 3 GB."""
+    from src.infrastructure.services.devversion import check_table_size, purge_old
+
+    container = get_container()
+    deleted = await purge_old(container)
+    await check_table_size(container)
+    return deleted
+
+
+@broker.task(schedule=[{"cron": "37 * * * *"}])
+async def refresh_geoip() -> dict[str, str]:
+    """Hourly check of the offline provider/region databases for DevVersion reports: a missing
+    or month-old one is downloaded (DB-IP Lite, at most one attempt per 6 hours) into the
+    volume web reads them from. Fresh files → nothing to do."""
+    from src.infrastructure.services.geoip import refresh_if_due
+
+    return await refresh_if_due(get_container())
+
+
 @broker.task(schedule=[{"cron": "*/5 * * * *"}])
 async def send_winback_offers() -> int:
     """Win-back funnel (screen 08): N days after a subscription expired, message the user
@@ -1623,6 +1645,9 @@ async def run_backup() -> str | None:
             "pg_dump",
             "--no-owner",
             "--format=plain",
+            # DevVersion reports: schema only — bulky diagnostics with a 90-day life, not
+            # something a restore needs (and not something a backup should spread around).
+            "--exclude-table-data=devversion_reports",
             f"--file={dump_path}",
             "--host",
             db.host,

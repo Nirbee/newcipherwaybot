@@ -36,6 +36,8 @@ dependencies = [
     "structlog>=24.1",
     # Encrypted backups
     "pyzipper>=0.3.6",
+    # Offline IP -> provider (ASN) / region lookup for DevVersion reports (DB-IP Lite .mmdb)
+    "maxminddb>=2.6",
 ]
 
 [project.optional-dependencies]

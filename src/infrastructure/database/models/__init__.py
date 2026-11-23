@@ -14,6 +14,7 @@ from src.infrastructure.database.models.broadcast_template import BroadcastTempl
 from src.infrastructure.database.models.cabinet_token import CabinetRefreshToken
 from src.infrastructure.database.models.campaign import Campaign
 from src.infrastructure.database.models.constructor import ConstructorPeriod, TrafficPack
+from src.infrastructure.database.models.devversion import DevversionReport
 from src.infrastructure.database.models.holiday import Holiday
 from src.infrastructure.database.models.lan_room import (
     LanAccount,
@@ -58,6 +59,7 @@ __all__ = [
     "CabinetRefreshToken",
     "Campaign",
     "ConstructorPeriod",
+    "DevversionReport",
     "Holiday",
     "LanAccount",
     "LanRoom",

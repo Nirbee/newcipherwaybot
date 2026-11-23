@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.application.services.bot_config import SECRET_MASK, BotConfigError, category_sections
+from src.application.services.devversion import settings_guard as devversion_settings_guard
 from src.core import config_registry as registry
 from src.core.enums import Role
 from src.infrastructure.di import AppContainer
@@ -30,6 +32,15 @@ def _norm_server(value: Any) -> str:
 def _require_owner_for_lan(identity: AdminIdentity, touches: bool) -> None:
     if touches and identity.role is not Role.OWNER:
         raise HTTPException(403, "сервер и API-ключ LAN меняет только владелец")
+
+
+def _require_dev_for_devversion(identity: AdminIdentity, keys: Iterable[str]) -> None:
+    """DevVersion switch / interval / flags / allow-list: OWNER or DEV only."""
+    if any(k.startswith("DEVVERSION_") for k in keys) and identity.role not in (
+        Role.OWNER,
+        Role.DEV,
+    ):
+        raise HTTPException(403, "настройки DevVersion меняет только владелец или разработчик")
 
 
 @router.get("")
@@ -72,6 +83,7 @@ async def patch_settings(
     if not body.changes:
         raise HTTPException(400, "no changes")
     changes = dict(body.changes)
+    _require_dev_for_devversion(identity, changes)
     async with container.uow() as uow:
         old_server = _norm_server(await container.bot_config.value(uow, _LAN_SERVER))
         _require_owner_for_lan(
@@ -82,6 +94,7 @@ async def patch_settings(
         try:
             # LAN: https-only server; a new server drops the key issued by the old one.
             reset = lan_settings_guard(changes, old_server)
+            devversion_settings_guard(changes)  # JSON-object flags, bounded upload interval
             written = await container.bot_config.set_values(uow, changes)
         except (BotConfigError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -108,6 +121,7 @@ async def reset_settings(
 ) -> dict[str, Any]:
     keys = list(dict.fromkeys(body.keys))
     _require_owner_for_lan(identity, _LAN_SERVER in keys or _LAN_KEY in keys)
+    _require_dev_for_devversion(identity, keys)
     extra: dict[str, Any] = {}
     async with container.uow() as uow:
         if _LAN_SERVER in keys:

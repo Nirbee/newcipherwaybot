@@ -19,6 +19,7 @@ from src.core.enums import SubscriptionStatus, UserStatus
 from src.infrastructure.database.models.lan_room import LanRoom, LanRoomBan, LanRoomMember
 from src.infrastructure.services import lan as lan_service
 from src.infrastructure.taskiq import tasks
+from src.web.routes.app_api import ip_key
 from tests.fakes.headscale import FakeHeadscale
 from tests.integration.test_admin_api import ApiTestContainer, _login, _tma_headers, client
 from tests.integration.test_app_api import _h, _sub
@@ -459,7 +460,8 @@ async def test_join_is_rate_limited(client: Client) -> None:
     assert codes[:10] == [404] * 10 and codes[10] == 429
     # per IP as well: other subscriptions from the same address hit the IP ceiling
     container.redis.store.pop(f"rl:auth:lan-join:{sub_id}")
-    container.redis.store["rl:auth:lan-join-ip:127.0.0.1"] = "30"
+    ip = ip_key(container, "127.0.0.1")  # type: ignore[arg-type]
+    container.redis.store[f"rl:auth:lan-join-ip:{ip}"] = "30"
     assert (await _join(http, h, "AAAAAB")).status_code == 429
 
 

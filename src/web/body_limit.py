@@ -21,6 +21,7 @@ MB = 1024 * KB
 DEFAULT_RULES: tuple[tuple[str, bool, int], ...] = (
     ("/api/app/v1/support/photo", False, 11 * MB),
     ("/api/cabinet/support/photo", False, 11 * MB),
+    ("/api/app/v1/telemetry", False, 512 * KB),  # DevVersion reports (MAX_REPORT_BYTES)
     ("/api/app/v1/", True, 16 * KB),
 )
 

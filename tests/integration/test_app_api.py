@@ -25,6 +25,7 @@ from src.infrastructure.database.models.subscription import Subscription
 from src.infrastructure.database.models.ticket import Ticket, TicketMessage
 from src.infrastructure.services.ai_support import AiSupportService
 from src.infrastructure.services.notification import LogNotifier
+from src.web.routes.app_api import ip_key
 from src.web.routes.panel import _apply_user_event
 from tests.factories import make_user
 from tests.integration.test_admin_api import ApiTestContainer, _login, _tma_headers, client
@@ -242,8 +243,12 @@ async def test_ipv6_clients_are_limited_per_64(
     for i in range(5):  # a fresh address of the same /64 every request
         h = _h("SixTok12345678") | {"X-Real-IP": f"2001:db8:1:2::{i + 1:x}"}
         assert (await http.get("/api/app/v1/me", headers=h)).status_code == 200
-    # all five landed in ONE per-IP counter — rotating within the /64 doesn't reset it
-    assert container.redis.store["rl:auth:app-get:2001:db8:1:2::/64"] == "5"
+    # all five landed in ONE per-IP counter — rotating within the /64 doesn't reset it — and
+    # the counter is keyed by an HMAC of the /64, never the address itself
+    key = ip_key(container, "2001:db8:1:2::1")  # type: ignore[arg-type]
+    assert key == ip_key(container, "2001:db8:1:2::ff")  # type: ignore[arg-type]
+    assert container.redis.store[f"rl:auth:app-get:{key}"] == "5"
+    assert not any("2001:db8" in k for k in container.redis.store)
 
 
 async def test_global_panel_resolve_ceiling_is_503(

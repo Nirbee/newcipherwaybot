@@ -44,7 +44,7 @@ from src.infrastructure.services.lan import (
     unique_code,
 )
 from src.web.deps import get_container
-from src.web.routes.app_api import AppIdentity, _ip_bucket, app_identity
+from src.web.routes.app_api import AppIdentity, app_identity, ip_key
 from src.web.routes.cabinet_auth import _client_ip, _rate_limit
 
 if TYPE_CHECKING:
@@ -296,7 +296,7 @@ async def lan_room_join(
     caller: LanCaller = Depends(lan_caller("lan-post")),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, Any]:
-    ip = _ip_bucket(_client_ip(request))
+    ip = ip_key(container, _client_ip(request))
     await _rate_limit(
         container, "lan-join", str(caller.sub_id), limit=_JOIN_LIMIT_SUB, window=_JOIN_WINDOW
     )

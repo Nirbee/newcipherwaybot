@@ -54,8 +54,9 @@ _FAIL_LIMIT = 20  # failed resolves per IP per window, then 429 without touching
 _FAIL_WINDOW = 600
 _PANEL_RESOLVE_LIMIT = 300  # panel lookups per minute across ALL clients, then 503
 # Requests per minute, per IP and per token: chat polling / text messages / screenshots,
-# LAN Play reads (the LAN tab polls rooms/devices) / LAN changes (see app_lan.py).
-_LIMITS = {"get": 30, "post": 10, "photo": 5, "lan": 60, "lan-post": 20}
+# LAN Play reads (the LAN tab polls rooms/devices) / LAN changes (see app_lan.py), DevVersion
+# config/upload/delete (app_telemetry.py; uploads have their own per-hour/day caps there).
+_LIMITS = {"get": 30, "post": 10, "photo": 5, "lan": 60, "lan-post": 20, "telemetry": 20}
 # Per-user daily quotas on writes (the owner reads every one of them).
 _DAILY = {"post": 200, "photo": 30}
 
@@ -96,6 +97,17 @@ def _ip_bucket(ip: str) -> str:
     if addr.version == 6:
         return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return ip
+
+
+def ip_key(container: AppContainer, ip: str) -> str:
+    """What the per-IP limiters key on: an HMAC of the IP bucket (IPv6 /64), not the address —
+    Redis never holds client IPs in the clear. Keyed by a secret derived from the app's JWT
+    secret (domain-separated, so the JWT key itself is never used as is)."""
+    if not ip:
+        return ""
+    app = container.settings.app
+    secret = hashlib.sha256(b"cw:ip-key:" + (app.jwt_secret or app.crypt_key).encode()).digest()
+    return hmac.new(secret, _ip_bucket(ip).encode(), hashlib.sha256).hexdigest()[:32]
 
 
 async def forget_link(container: AppContainer, subscription_url: str | None) -> None:
@@ -209,7 +221,7 @@ def app_identity(kind: str) -> Callable[..., Awaitable[AppIdentity]]:
         token = request.headers.get("x-subscription-token", "").strip()
         if not _TOKEN_RE.fullmatch(token):
             raise _unauthorized()
-        ip = _ip_bucket(_client_ip(request))
+        ip = ip_key(container, _client_ip(request))
         await _rate_limit(container, f"app-{kind}", ip, limit=limit, window=60)
         await _rate_limit(container, f"app-{kind}-t", _token_key(token), limit=limit, window=60)
         ident = await _identity_for_token(container, token, ip)

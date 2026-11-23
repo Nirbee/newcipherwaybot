@@ -33,6 +33,7 @@ const CAT_META: Record<string, { icon: string; ru: string }> = {
   ui: { icon: "🤖", ru: "Кнопки бота, прокси, поддержка" },
   support: { icon: "💬", ru: "ИИ-поддержка: модель и база знаний" },
   lan: { icon: "🎮", ru: "Комнаты для игр по сети в приложении для Windows" },
+  devversion: { icon: "📊", ru: "Диагностика из приложения для Windows (тестовый режим)" },
 };
 
 type Me = { role: string };
@@ -362,6 +363,13 @@ export default function Settings() {
       )}
 
       {cat === "lan" && !searching && !keySet && <LanPanel />}
+      {cat === "devversion" && !searching && !keySet && (
+        <div className="row" style={{ marginTop: 16 }}>
+          <button className="btn secondary" onClick={() => nav("/devversion")}>
+            📊 Открыть раздел DevVersion: сводки и отчёты
+          </button>
+        </div>
+      )}
 
       <div className="caps" style={{ marginTop: 14, textAlign: "center" }}>
         {t.hotReloadNote}

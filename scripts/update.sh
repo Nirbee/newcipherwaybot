@@ -160,7 +160,8 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="backups/pre-update-$STAMP.sql.gz"
 DB_USER=$(grep '^DATABASE__USER=' .env | cut -d= -f2 || true)
 DB_NAME=$(grep '^DATABASE__NAME=' .env | cut -d= -f2 || true)
-$COMPOSE exec -T postgres pg_dump -U "${DB_USER:-vpn}" "${DB_NAME:-vpn}" | gzip > "$BACKUP" \
+# DevVersion reports: schema only (bulky diagnostics with a 90-day life).
+$COMPOSE exec -T postgres pg_dump --exclude-table-data=devversion_reports -U "${DB_USER:-vpn}" "${DB_NAME:-vpn}" | gzip > "$BACKUP" \
   || fail "бэкап не снялся — обновление отменено (стек запущен? $COMPOSE ps)"
 [ -s "$BACKUP" ] || fail "бэкап пустой — обновление отменено"
 ok "снят: $BACKUP ($(du -h "$BACKUP" | cut -f1))"

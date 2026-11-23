@@ -327,6 +327,7 @@ class ConfigCategory(StrEnum):
     SUPPORT = "support"
     INTERFACE = "ui"
     LAN = "lan"
+    DEVVERSION = "devversion"
 
 
 class WithdrawalStatus(StrEnum):

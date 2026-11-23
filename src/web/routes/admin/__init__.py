@@ -18,6 +18,7 @@ from src.web.routes.admin import (
     campaigns,
     catalog,
     dashboard,
+    devversion,
     lan,
     maintenance,
     menu,
@@ -64,6 +65,7 @@ _protected.include_router(staff.router)
 _protected.include_router(api_keys.router)
 _protected.include_router(settings.router)
 _protected.include_router(lan.router)  # /settings/lan/* — LAN Play check + rooms
+_protected.include_router(devversion.router)  # /devversion/* — app diagnostics (DevVersion)
 _protected.include_router(menu.router)
 _protected.include_router(reminders.router)
 _protected.include_router(notifications.router)

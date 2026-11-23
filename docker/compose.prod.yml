@@ -26,6 +26,8 @@ x-app: &app
     - uploads:/app/uploads
     - backups:/app/backups
     - update-signals:/app/update-signals
+    # DevVersion: offline provider/region databases — the worker downloads, web reads.
+    - geoip:/app/geoip
 
 services:
   postgres:
@@ -190,3 +192,4 @@ volumes:
   caddy_config:
   # Shared signal dir: web drops an update-request file, the updater picks it up.
   update-signals:
+  geoip:

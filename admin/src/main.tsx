@@ -17,6 +17,7 @@ import BotButtons from "./screens/BotButtons";
 import BotImages from "./screens/BotImages";
 import Campaigns from "./screens/Campaigns";
 import Dashboard from "./screens/Dashboard";
+import DevVersion from "./screens/DevVersion";
 import Login from "./screens/Login";
 import Maintenance from "./screens/Maintenance";
 import Miniapp from "./screens/Miniapp";
@@ -75,6 +76,7 @@ const router = createHashRouter([
       { path: "blacklist", element: <Blacklist /> },
       { path: "servers", element: <Servers /> },
       { path: "routers", element: <Routers /> },
+      { path: "devversion", element: <DevVersion /> },
       { path: "settings", element: <Settings /> },
       { path: "maintenance", element: <Maintenance /> },
       { path: "admins", element: <Admins /> },

@@ -51,6 +51,7 @@ from src.infrastructure.database.dao.catalog import (
     ServerSquadDAO,
     SettingsDAO,
 )
+from src.infrastructure.database.dao.devversion import DevversionReportDAO
 from src.infrastructure.database.dao.lan import (
     LanAccountDAO,
     LanRoomBanDAO,
@@ -122,6 +123,7 @@ class UnitOfWork:
         self.lan_members = LanRoomMemberDAO(session)
         self.lan_bans = LanRoomBanDAO(session)
         self.lan_accounts = LanAccountDAO(session)
+        self.devversion_reports = DevversionReportDAO(session)
         return self
 
     async def __aexit__(

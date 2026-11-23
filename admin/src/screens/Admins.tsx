@@ -26,6 +26,7 @@ const LABEL_KEY: Record<string, keyof Dict> = {
   stats: "statsTitle", broadcasts: "broadcasts", notifications: "notifications",
   reminders: "reminders", campaigns: "campaigns", partners: "partners", sales: "salesTitle",
   "ai-support": "aiSupport", blacklist: "blacklist", miniapp: "miniapp", site: "site",
+  devversion: "devversion",
 };
 
 function screenLabel(t: Dict, key: string): string {
