@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 
 from src.application.dto.pricing import PurchaseRequest
@@ -106,6 +107,9 @@ async def test_trial_carryover_adds_bonus_days_on_change(uow: UnitOfWork) -> Non
         # without carryover the trial remainder is dropped
         sub.is_trial = True
         sub.expire_at = dt.datetime.now(dt.UTC) + dt.timedelta(days=5)
+        # the panel says the same (a change never moves the panel's expiry back)
+        panel = fake.users[sub.remnawave_uuid]
+        fake.users[sub.remnawave_uuid] = dataclasses.replace(panel, expire_at=sub.expire_at)
         await subs.change(
             uow, sub, user=user, plan=paid_plan, req=change_req, carryover_trial=False
         )

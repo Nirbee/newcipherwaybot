@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 from typing import Any
 
@@ -131,7 +132,7 @@ async def _change(
 async def test_user_reported_plan_change_scenarios(uow: UnitOfWork) -> None:
     """Proof for every case in the bug report: switching/renewing NEVER resets the term, and the
     price is the full list price of the new period (unused value carries over as bonus days)."""
-    purchase, _ = _services()
+    purchase, fake = _services()
     async with uow:
         user = await make_user(uow, balance_minor=100_000_000)
         a, _ = await make_plan(uow, price_minor=30000, days=30, public_code="A", name="A")  # 300₽
@@ -154,6 +155,9 @@ async def test_user_reported_plan_change_scenarios(uow: UnitOfWork) -> None:
             await _buy(purchase, uow, user.id, a.id, 30)
             s = (await uow.subscriptions.active_for_user(user.id))[0]
             s.expire_at = dt.datetime.now(dt.UTC) + dt.timedelta(days=days_remaining)
+            # the panel says the same (renewals never count from an earlier date than it has)
+            panel = fake.users[s.remnawave_uuid]
+            fake.users[s.remnawave_uuid] = dataclasses.replace(panel, expire_at=s.expire_at)
             await uow.commit()
             return s
 

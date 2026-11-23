@@ -12,6 +12,7 @@ import pytest
 
 from src.application.dto.panel import PanelDevice, PanelUser
 from src.application.services import clients
+from src.application.services.bot_config import BotConfigService
 from src.application.services.clients import (
     PanelSnapshotService,
     effective_status,
@@ -260,13 +261,16 @@ async def test_rows_chips_search_and_service_accounts(uow: UnitOfWork) -> None:
 
     rows = data.rows
     counts = clients.counters(rows, NOW)
-    assert counts["all"] == 4  # the relay is not a customer
+    # «all» = panel users (the relay is not a customer); the one whose panel user is gone is
+    # «former», the one who never bought — «no_sub»
+    assert counts["all"] == 2
     assert counts["service"] == 1
     assert counts["active"] == 2
     assert counts["online"] == 1
     assert counts["never"] == 1
     assert counts["exp3"] == 1 and counts["exp7"] == 1
-    assert counts["expired"] == 1 and counts["expired_week"] == 1
+    assert counts["expired"] == 0 and counts["expired_week"] == 0
+    assert counts["former"] == 1
     assert counts["no_sub"] == 1
     assert counts["devices_over"] == 1  # 2 devices on a limit of 1
 
@@ -348,6 +352,7 @@ async def test_hourly_task_expires_orphans_and_tolerates_a_dead_panel(
 
     class _Container:
         remnawave_client = fake
+        bot_config = BotConfigService()
 
         def uow(self) -> UnitOfWork:
             return uow
@@ -384,6 +389,7 @@ async def test_hourly_task_alerts_instead_of_mass_expiring(
 
     class _Container:
         remnawave_client = fake
+        bot_config = BotConfigService()
 
         def uow(self) -> UnitOfWork:
             return uow
@@ -396,3 +402,155 @@ async def test_hourly_task_alerts_instead_of_mass_expiring(
     async with uow:
         subs = await uow.subscriptions.list()
         assert all(s.status is SubscriptionStatus.ACTIVE for s in subs)
+
+
+# --- counted the way the panel (MultiScript) counts --------------------------------------------
+
+
+async def test_tiles_and_all_count_panel_users_like_multiscript(uow: UnitOfWork) -> None:
+    """60 panel users, 2 of them MultiScript's: 58 customers, «active» = panel ACTIVE."""
+    fake = FakeRemnawaveClient()
+    users = [_panel("cascade_relay_b74178"), _panel("ms-status-monitor")]
+    users += [_panel(f"sub_a{i}") for i in range(51)]  # ACTIVE
+    users += [_panel(f"sub_e{i}", status="EXPIRED", is_enabled=False) for i in range(5)]
+    users += [_panel(f"sub_d{i}", status="DISABLED", is_enabled=False) for i in range(2)]
+    for u in users:
+        fake.users[u.uuid] = u
+    snap = await PanelSnapshotService(fake).get()
+    tiles = clients.panel_tiles(snap, PATTERNS, NOW)
+    assert tiles is not None
+    assert tiles["total"] == 58 and tiles["service"] == 2 and tiles["active"] == 51
+
+    async with uow:
+        for i, u in enumerate(users):
+            # the stored status lags behind (still ACTIVE for the expired ones)
+            await _sub(
+                uow,
+                1000 + i,
+                status=SubscriptionStatus.ACTIVE,
+                expire_at=NOW + dt.timedelta(days=10),
+                remnawave_uuid=u.uuid,
+                panel_username=u.username,
+            )
+        await _sub(
+            uow, 2000, status=SubscriptionStatus.EXPIRED, expire_at=NOW - dt.timedelta(days=60)
+        )  # its panel user is gone
+        await make_user(uow, telegram_id=3000)  # never bought
+        await uow.commit()
+        data = await clients.load_rows(uow, snap, service_patterns=PATTERNS, now=NOW)
+    counts = clients.counters(data.rows, NOW)
+    assert counts["all"] == 58 and counts["service"] == 2
+    assert counts["active"] == 51  # by the panel's ACTIVE, not the stale stored status
+    assert counts["expired"] == 5 and counts["disabled"] == 2
+    assert counts["former"] == 1 and counts["no_sub"] == 1
+    expired_row = next(r for r in data.rows if r["panel_username"] == "sub_e0")
+    assert expired_row["status"] == "expired"  # shown as the panel has it
+
+
+async def test_row_shows_the_panel_expiry_and_notes_the_bots(uow: UnitOfWork) -> None:
+    panel_end = NOW + dt.timedelta(days=370)
+    groketi = _panel("user_groketi", expire_at=panel_end)
+    fake = FakeRemnawaveClient()
+    fake.users[groketi.uuid] = groketi
+    snap = await PanelSnapshotService(fake).get()
+    async with uow:
+        await _sub(
+            uow,
+            7,
+            status=SubscriptionStatus.EXPIRED,
+            expire_at=NOW - dt.timedelta(days=45),
+            remnawave_uuid=groketi.uuid,
+        )
+        await uow.commit()
+        data = await clients.load_rows(uow, snap, service_patterns=PATTERNS, now=NOW)
+    row = data.rows[0]
+    assert row["status"] == "active"  # the panel's word
+    assert row["expire_at"] == panel_end.isoformat()
+    assert row["bot_expire_at"] is not None  # «в боте: …»
+
+
+# --- pull: expiries extended in the panel directly ------------------------------------------
+
+
+async def test_pull_takes_over_a_later_panel_expiry(uow: UnitOfWork) -> None:
+    later = NOW + dt.timedelta(days=370)
+    groketi = _panel("user_groketi", expire_at=later)
+    vip = _panel("VIP-777", expire_at=NOW + dt.timedelta(days=14))
+    same = _panel("sub_same", expire_at=NOW + dt.timedelta(days=5, minutes=30))
+    grace_user = _panel("sub_grace", expire_at=NOW + dt.timedelta(days=1))
+    off = _panel("sub_off", expire_at=later, status="DISABLED", is_enabled=False)
+    relay = _panel("cascade_relay_b74178", expire_at=later)
+    async with uow:
+        g = await _sub(
+            uow,
+            7,
+            status=SubscriptionStatus.EXPIRED,
+            expire_at=NOW - dt.timedelta(days=45),
+            remnawave_uuid=groketi.uuid,
+        )
+        v = await _sub(
+            uow,
+            95,
+            status=SubscriptionStatus.ACTIVE,
+            expire_at=NOW - dt.timedelta(days=16),
+            remnawave_uuid=vip.uuid,
+        )
+        s = await _sub(
+            uow,
+            96,
+            status=SubscriptionStatus.ACTIVE,
+            expire_at=NOW + dt.timedelta(days=5),
+            remnawave_uuid=same.uuid,
+        )
+        gr = await _sub(
+            uow,
+            33,
+            status=SubscriptionStatus.LIMITED,
+            expire_at=NOW - dt.timedelta(days=4),
+            grace_until=NOW + dt.timedelta(days=1),
+            remnawave_uuid=grace_user.uuid,
+        )
+        o = await _sub(
+            uow,
+            97,
+            status=SubscriptionStatus.EXPIRED,
+            expire_at=NOW - dt.timedelta(days=5),
+            remnawave_uuid=off.uuid,
+        )
+        r = await _sub(
+            uow,
+            94,
+            status=SubscriptionStatus.EXPIRED,
+            expire_at=NOW - dt.timedelta(days=5),
+            remnawave_uuid=relay.uuid,
+        )
+        report = await clients.pull_from_panel(
+            uow, [groketi, vip, same, grace_user, off, relay], NOW, service_patterns=PATTERNS
+        )
+        assert sorted(report.changed) == sorted([g.id, v.id])
+        assert g.expire_at == later and g.status is SubscriptionStatus.ACTIVE
+        assert v.status is SubscriptionStatus.ACTIVE
+        assert s.expire_at == NOW + dt.timedelta(days=5)  # within the hour of drift
+        assert gr.status is SubscriptionStatus.LIMITED  # grace is left alone
+        assert o.status is SubscriptionStatus.EXPIRED  # the panel says DISABLED
+        assert r.status is SubscriptionStatus.EXPIRED  # a service account
+        trail = [a for a in await uow.audit.list() if a.action == "subscription.panel_pull"]
+        assert {a.entity for a in trail} == {f"sub:{g.id}", f"sub:{v.id}"}
+
+
+async def test_pull_stops_on_too_many_changes(uow: UnitOfWork) -> None:
+    panels = [_panel(f"sub_p{i}", expire_at=NOW + dt.timedelta(days=90)) for i in range(4)]
+    async with uow:
+        subs = [
+            await _sub(
+                uow,
+                500 + i,
+                status=SubscriptionStatus.EXPIRED,
+                expire_at=NOW - dt.timedelta(days=3),
+                remnawave_uuid=p.uuid,
+            )
+            for i, p in enumerate(panels)
+        ]
+        report = await clients.pull_from_panel(uow, panels, NOW, service_patterns=PATTERNS, limit=3)
+        assert report.over_limit and report.candidates == 4 and report.changed == []
+        assert all(sub.status is SubscriptionStatus.EXPIRED for sub in subs)

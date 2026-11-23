@@ -11,8 +11,15 @@ connected, devices over the limit…) could not be pushed to SQL anyway. When th
 unreachable the list still works on bot data; panel columns stay empty and the answer says
 why (``panel.error``).
 
-Also here: :func:`expire_orphaned` — the clean-up of subscriptions still ACTIVE/TRIAL in the
-bot long after their expiry whose panel user no longer exists (DB only, never the panel).
+Rows with a panel user are shown the way the panel has them (status, expiry, traffic) — the
+panel is what the customer's apps actually see; a bot expiry that differs is shown next to it.
+The «all» chip and the panel-side chips/tiles count panel users only (as MultiScript does);
+bot users without a panel user have chips of their own (no subscription / former).
+
+Also here, for the hourly task (DB only, never a panel write): :func:`pull_from_panel` —
+expiries extended in the panel directly (MultiScript) are taken over by the bot; and
+:func:`expire_orphaned` — subscriptions still ACTIVE/TRIAL long after their expiry whose panel
+user no longer exists.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from src.core.constants import UNLIMITED_EXPIRE_DAYS
 from src.core.enums import Role, SubscriptionStatus, UserStatus
 from src.core.exceptions import RemnawaveAuthError, RemnawaveError, RemnawaveTransientError
 from src.core.logging import get_logger
+from src.infrastructure.database.models.audit_log import AuditLog
 from src.infrastructure.database.models.server_node import ServerNode
 from src.infrastructure.database.models.server_squad import ServerSquad
 from src.infrastructure.database.models.subscription import Subscription
@@ -47,6 +55,8 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 ONLINE_WINDOW = dt.timedelta(minutes=2)
+# Bot and panel expiries closer than this are «the same» (clock skew, the v3 near-now clamp).
+_DRIFT = dt.timedelta(hours=1)
 # A far-future expiry is how «бессрочно» is stored (now + UNLIMITED_EXPIRE_DAYS, or 2099).
 _FOREVER_AFTER = dt.timedelta(days=UNLIMITED_EXPIRE_DAYS // 2)
 _LIVE = frozenset({"active", "trial", "limited", "grace"})
@@ -230,6 +240,12 @@ def effective_status(
     return "active"
 
 
+def panel_state(user: PanelUser) -> str:
+    """ACTIVE / LIMITED / EXPIRED / DISABLED as the panel has it (an old payload without a
+    status: by the enabled flag)."""
+    return (user.status or ("ACTIVE" if user.is_enabled else "DISABLED")).upper()
+
+
 def _source(snapshot: dict[str, Any] | None) -> str:
     raw = str((snapshot or {}).get("source") or "")
     return raw or "bot"
@@ -330,12 +346,17 @@ def _row(
     now: dt.datetime,
 ) -> dict[str, Any]:
     has_sub = r["sub_id"] is not None
-    # The bot's expiry is what was paid for (the panel's may be a grace window's short one);
-    # the panel's only fills in for a subscription the bot has no date for.
-    expire_at = (_aware(r["expire_at"]) if has_sub else None) or (
-        _aware(panel.expire_at) if panel is not None else None
-    )
+    bot_expire = _aware(r["expire_at"]) if has_sub else None
     grace_until = _aware(r["grace_until"]) if has_sub else None
+    panel_expire = _aware(panel.expire_at) if panel is not None else None
+    # With a panel user, the panel is what the customer's apps see: its expiry and status are
+    # shown; the bot's own date only as a note when the two differ by more than an hour.
+    expire_at = panel_expire or bot_expire if panel is not None else bot_expire
+    bot_differs = (
+        panel_expire is not None
+        and bot_expire is not None
+        and abs((panel_expire - bot_expire).total_seconds()) > _DRIFT.total_seconds()
+    )
     status = effective_status(
         user_status=r["user_status"],
         sub_status=r["sub_status"] if has_sub else None,
@@ -344,6 +365,9 @@ def _row(
         now=now,
         panel_status=panel.status if panel is not None else None,
     )
+    if panel is not None:
+        status = _panel_view_status(status, panel, r["sub_status"], r["is_trial"])
+    panel_mode = bool(snap.users)
     panel_name = (panel.username if panel is not None else None) or r["panel_username"]
     used = panel.traffic_used_bytes if panel is not None else int(r["traffic_used_bytes"] or 0)
     limit = int(r["traffic_limit_bytes"] or 0) if has_sub else 0
@@ -385,6 +409,7 @@ def _row(
         "source": _source(snapshot) if has_sub else None,
         "expire_at": expire_at.isoformat() if expire_at else None,
         "expire_forever": bool(expire_at and expire_at - now > _FOREVER_AFTER),
+        "bot_expire_at": bot_expire.isoformat() if bot_differs and bot_expire else None,
         "grace_until": grace_until.isoformat() if grace_until and status == "grace" else None,
         "traffic_used_bytes": used,
         "traffic_limit_bytes": limit,
@@ -402,10 +427,31 @@ def _row(
         "squads": [squads.get(str(s).lower(), str(s)[:8]) for s in squad_ids],
         "tag": panel.tag if panel is not None else None,
         "panel_username": panel_name,
-        "panel_status": panel.status if panel is not None else None,
+        "panel_status": panel_state(panel) if panel is not None else None,
         "in_panel": panel is not None,
+        # «all» = panel users (as in MultiScript); without panel data, the bot's subscriptions
+        "in_scope": panel is not None if panel_mode else has_sub,
+        # had a subscription whose panel user is gone
+        "former": (
+            panel_mode
+            and has_sub
+            and panel is None
+            and r["sub_status"] is not SubscriptionStatus.PENDING
+        ),
         "created_at": created_at.isoformat() if created_at else None,
     }
+
+
+def _panel_view_status(bot_view: str, panel: PanelUser, sub_status: Any, is_trial: Any) -> str:
+    """The status of a row with a panel user, by the panel. Blocked in the bot and a grace
+    window (the panel says ACTIVE then) keep the bot's word."""
+    if bot_view in ("blocked", "grace"):
+        return bot_view
+    raw = panel_state(panel)
+    if raw == "ACTIVE":
+        trial = sub_status is SubscriptionStatus.TRIAL or bool(is_trial)
+        return "trial" if trial else "active"
+    return {"LIMITED": "limited", "EXPIRED": "expired", "DISABLED": "disabled"}.get(raw, bot_view)
 
 
 # --- chips, search, sort ----------------------------------------------------------------------
@@ -455,24 +501,33 @@ def _chips(now: dt.datetime) -> dict[str, Callable[[dict[str, Any]], bool]]:
         at = _dt(row["created_at"])
         return at is not None and now - at <= dt.timedelta(days=7)
 
+    def active(row: dict[str, Any]) -> bool:
+        if row["in_panel"]:
+            return (row["panel_status"] or "").upper() == "ACTIVE"  # as MultiScript counts
+        return row["status"] in _LIVE
+
+    def scoped(check: Callable[[dict[str, Any]], bool]) -> Callable[[dict[str, Any]], bool]:
+        return lambda row: bool(row["in_scope"]) and check(row)
+
     return {
-        "all": lambda row: True,
-        "active": lambda row: row["status"] in _LIVE,
-        "online": online,
-        "exp3": expiring(3),
-        "exp7": expiring(7),
-        "expired_week": expired_week,
-        "never": lambda row: bool(row["never_connected"]),
-        "gone": gone,
-        "near_limit": near_limit,
-        "devices_over": devices_over,
+        "all": scoped(lambda row: True),
+        "active": scoped(active),
+        "online": scoped(online),
+        "exp3": scoped(expiring(3)),
+        "exp7": scoped(expiring(7)),
+        "expired_week": scoped(expired_week),
+        "never": scoped(lambda row: bool(row["never_connected"])),
+        "gone": scoped(gone),
+        "near_limit": scoped(near_limit),
+        "devices_over": scoped(devices_over),
         "new_week": new_week,
-        "limited": lambda row: row["status"] == "limited",
-        "disabled": lambda row: row["status"] == "disabled",
-        "expired": lambda row: row["status"] == "expired",
-        "top_traffic": lambda row: row["traffic_used_bytes"] > 0,
-        "no_sub": lambda row: row["status"] == "none",
-        "trial": lambda row: row["status"] == "trial",
+        "limited": scoped(lambda row: row["status"] == "limited"),
+        "disabled": scoped(lambda row: row["status"] == "disabled"),
+        "expired": scoped(lambda row: row["status"] == "expired"),
+        "top_traffic": scoped(lambda row: row["traffic_used_bytes"] > 0),
+        "no_sub": lambda row: not row["subscription_id"],
+        "former": lambda row: bool(row["former"]),
+        "trial": scoped(lambda row: row["status"] == "trial"),
         "blocked": lambda row: row["status"] == "blocked",
     }
 
@@ -485,6 +540,40 @@ def counters(rows: list[dict[str, Any]], now: dt.datetime) -> dict[str, int]:
     out["top_traffic"] = min(out["top_traffic"], TOP_TRAFFIC)
     out["service"] = len(rows) - len(regular)
     return out
+
+
+def panel_tiles(
+    snap: PanelSnapshot, patterns: tuple[str, ...], now: dt.datetime
+) -> dict[str, int] | None:
+    """The five tiles straight from the panel, the way MultiScript counts them: every panel
+    user except the service accounts (also those not adopted into the bot yet). None without
+    panel data — the page then falls back to the bot's own counters."""
+    if not snap.users:
+        return None
+    service = [u for u in snap.users if is_service_username(u.username, patterns)]
+    users = [u for u in snap.users if not is_service_username(u.username, patterns)]
+
+    status = panel_state
+
+    def expiring(u: PanelUser) -> bool:
+        end = _aware(u.expire_at)
+        return status(u) == "ACTIVE" and end is not None and now < end <= now + dt.timedelta(7)
+
+    def online(u: PanelUser) -> bool:
+        at = _aware(u.online_at)
+        return at is not None and now - at <= ONLINE_WINDOW
+
+    def never(u: PanelUser) -> bool:
+        return snap.has_connection_facts and u.online_at is None and u.first_connected_at is None
+
+    return {
+        "total": len(users),
+        "active": sum(1 for u in users if status(u) == "ACTIVE"),
+        "online": sum(1 for u in users if online(u)),
+        "exp7": sum(1 for u in users if expiring(u)),
+        "never": sum(1 for u in users if never(u)),
+        "service": len(service),
+    }
 
 
 def _haystack(row: dict[str, Any], *, private: bool = False) -> str:
@@ -611,6 +700,119 @@ def to_csv(rows: list[dict[str, Any]]) -> str:
             out.append("" if value is None else _csv_cell(value))
         writer.writerow(out)
     return "\ufeff" + buf.getvalue()  # BOM: Excel opens the Cyrillic as UTF-8
+
+
+# --- panel -> bot: expiries extended in the panel directly -------------------------------------
+
+PULL_LIMIT = 30  # more in one run looks like a fault (wrong matching, panel clock), not reality
+_PULLABLE = (
+    SubscriptionStatus.ACTIVE,
+    SubscriptionStatus.TRIAL,
+    SubscriptionStatus.LIMITED,
+    SubscriptionStatus.EXPIRED,
+)
+_LIVE_STATUSES = (SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIAL, SubscriptionStatus.LIMITED)
+
+
+@dataclass(slots=True)
+class PullReport:
+    changed: list[int] = field(default_factory=list)
+    candidates: int = 0
+    over_limit: bool = False
+
+
+async def pull_from_panel(
+    uow: UnitOfWork,
+    panel_users: list[PanelUser],
+    now: dt.datetime,
+    *,
+    service_patterns: tuple[str, ...],
+    limit: int = PULL_LIMIT,
+) -> PullReport:
+    """Take over the expiry the panel has when it is LATER than the bot's by more than an hour
+    and the panel user is ACTIVE — the owner extended someone in the panel (MultiScript)
+    directly. Otherwise the bot keeps calling them «expired» (reminders, win-back) and a
+    renewal in the bot would count from the stale date. An EXPIRED/LIMITED sub becomes ACTIVE.
+
+    Only the bot's DB is written. Skipped: grace windows (their panel expiry is artificial),
+    service accounts, DISABLED/PENDING subs, a panel user two subs point at, and a revival that
+    would clash with another live sub of the same plan. More than ``limit`` changes at once ->
+    nothing is changed (``over_limit``; the caller alerts). Caller commits."""
+    report = PullReport()
+    if not panel_users:
+        return report
+    index: dict[str, PanelUser] = {}
+    for user in panel_users:
+        for key in _panel_keys(user):
+            index.setdefault(key, user)
+    subs = (
+        await uow.session.scalars(
+            select(Subscription).where(
+                Subscription.status.in_(_PULLABLE), Subscription.grace_until.is_(None)
+            )
+        )
+    ).all()
+    by_panel: dict[int, list[tuple[Subscription, PanelUser]]] = {}
+    for sub in subs:
+        panel = next((index[k] for k in _sub_keys(sub) if k in index), None)
+        if panel is not None:
+            by_panel.setdefault(id(panel), []).append((sub, panel))
+    candidates: list[tuple[Subscription, dt.datetime]] = []
+    for group in by_panel.values():
+        if len(group) != 1:
+            continue  # ambiguous: two subs on one panel user — the panel sync screen first
+        sub, panel = group[0]
+        if is_service_username(panel.username, service_patterns) or is_service_username(
+            sub.panel_username, service_patterns
+        ):
+            continue
+        if panel_state(panel) != "ACTIVE":
+            continue
+        panel_end, bot_end = _aware(panel.expire_at), _aware(sub.expire_at)
+        if panel_end is None or panel_end <= now:
+            continue
+        if bot_end is not None and panel_end - bot_end <= _DRIFT:
+            continue
+        candidates.append((sub, panel_end))
+    report.candidates = len(candidates)
+    if len(candidates) > limit:
+        report.over_limit = True
+        return report
+    for sub, panel_end in candidates:
+        revive = sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.LIMITED)
+        if revive and sub.status is SubscriptionStatus.EXPIRED and sub.plan_id is not None:
+            clash = await uow.session.scalar(
+                select(Subscription.id).where(
+                    Subscription.user_id == sub.user_id,
+                    Subscription.plan_id == sub.plan_id,
+                    Subscription.id != sub.id,
+                    Subscription.status.in_(_LIVE_STATUSES),
+                )
+            )
+            if clash is not None:
+                continue  # one live sub per (user, plan) — leave it to the admin
+        old_end, old_status = sub.expire_at, sub.status
+        sub.expire_at = panel_end
+        if revive:
+            sub.status = SubscriptionStatus.ACTIVE
+        uow.session.add(
+            AuditLog(
+                actor_user_id=None,
+                actor_label="system",
+                action="subscription.panel_pull",
+                entity=f"sub:{sub.id}",
+                payload={
+                    "expire_from": old_end.isoformat() if old_end else None,
+                    "expire_to": panel_end.isoformat(),
+                    "status_from": old_status.value,
+                    "status_to": sub.status.value,
+                },
+            )
+        )
+        report.changed.append(sub.id)
+    if report.changed:
+        await uow.session.flush()
+    return report
 
 
 # --- clean-up of stale statuses ---------------------------------------------------------------

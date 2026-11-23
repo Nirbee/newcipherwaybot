@@ -699,12 +699,23 @@ async def reconcile_disabled_subs() -> int:
 
 @broker.task(schedule=[{"cron": "41 * * * *"}])
 async def expire_orphaned_subscriptions() -> int:
-    """Hourly: subscriptions still ACTIVE/TRIAL in the bot long after their expiry, whose panel
-    user is gone (deleted in the panel) — nothing would ever update them, and they inflated the
-    «active»/«trial» counters for months. Marked EXPIRED in the bot's DB only; the panel is only
-    read (one full list + one lookup per candidate). A grace window is left to ``apply_grace``.
-    Too many candidates at once -> nothing changes and the admins get an alert."""
-    from src.application.services.clients import ORPHAN_LIMIT, expire_orphaned
+    """Hourly bot <- panel reconciliation, from one full panel list (the panel is only READ):
+
+    1. ``pull_from_panel`` — an expiry the owner extended in the panel directly (MultiScript)
+       is taken over by the bot (+ ACTIVE again), so it stops sending «expired»/win-back and a
+       renewal in the bot counts from the right date;
+    2. ``expire_orphaned`` — subscriptions still ACTIVE/TRIAL long after their expiry whose
+       panel user is gone are marked EXPIRED (they inflated the counters for months).
+
+    Grace windows are left to ``apply_grace``. Too many changes at once in either step ->
+    that step changes nothing and the admins get an alert."""
+    from src.application.services.clients import (
+        ORPHAN_LIMIT,
+        PULL_LIMIT,
+        expire_orphaned,
+        pull_from_panel,
+    )
+    from src.application.services.panel_guard import parse_patterns
     from src.infrastructure.services.reports import send_topic_report
 
     container = get_container()
@@ -713,11 +724,25 @@ async def expire_orphaned_subscriptions() -> int:
     except Exception as exc:  # unreachable, or an incomplete list — never guess from it
         log.warning("expire_orphaned: panel list unusable", error=str(exc))
         return 0
+    now = dt.datetime.now(dt.UTC)
     async with container.uow() as uow:
-        report = await expire_orphaned(
-            uow, panel_users, dt.datetime.now(dt.UTC), client=container.remnawave_client
+        patterns = parse_patterns(
+            str(await container.bot_config.value(uow, "PANEL_SERVICE_USERNAMES") or "")
         )
+        pulled = await pull_from_panel(uow, panel_users, now, service_patterns=patterns)
+        report = await expire_orphaned(uow, panel_users, now, client=container.remnawave_client)
         await uow.commit()
+    if pulled.over_limit:
+        log.warning("panel_pull: too many changes", candidates=pulled.candidates)
+        await send_topic_report(
+            container,
+            "alerts",
+            f"⚠️ Сверка сроков с панелью остановлена: у {pulled.candidates} подписок срок в "
+            f"панели позже, чем в боте (порог {PULL_LIMIT}). Похоже на сбой панели или "
+            "сопоставления — ничего не изменено.",
+        )
+    elif pulled.changed:
+        log.info("panel_pull", subscriptions=pulled.changed)
     if report.over_limit:
         log.warning("expire_orphaned: too many candidates", candidates=report.candidates)
         await send_topic_report(
@@ -727,10 +752,10 @@ async def expire_orphaned_subscriptions() -> int:
             f"удалёнными из панели (порог {ORPHAN_LIMIT}). Похоже на сбой панели или "
             "сопоставления — ничего не изменено, проверьте «Синхронизацию с панелью».",
         )
-        return 0
+        return len(pulled.changed)
     if report.changed or report.skipped:
         log.info("expire_orphaned", subscriptions=report.changed, skipped=report.skipped)
-    return len(report.changed)
+    return len(pulled.changed) + len(report.changed)
 
 
 @broker.task(schedule=[{"cron": "0 */6 * * *"}])

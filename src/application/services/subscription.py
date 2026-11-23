@@ -7,6 +7,7 @@ import math
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from src.application.dto.panel import PanelRef, ProvisionSpec
 from src.application.dto.pricing import PurchaseRequest
 from src.application.services.ids import generate_short_id
 from src.application.services.remnawave import RemnawaveService
@@ -222,8 +223,17 @@ class SubscriptionService:
         if adopt_plan is not None and subscription.plan_id is None:
             subscription.plan_id = adopt_plan.id
             subscription.plan_snapshot = _plan_snapshot(adopt_plan)
-        base = subscription.expire_at or dt.datetime.now(dt.UTC)
-        subscription.expire_at = max(base, dt.datetime.now(dt.UTC)) + dt.timedelta(days=days)
+        # The base is the latest of: now, the bot's expiry, the panel's expiry — someone
+        # extended in the panel directly (MultiScript) must not lose those days when paying in
+        # the bot. A grace window's panel expiry is artificial, so it doesn't count.
+        now = dt.datetime.now(dt.UTC)
+        panel_expire = (
+            None
+            if subscription.grace_until is not None
+            else await self._remnawave.panel_expiry(panel_ref)
+        )
+        base = max(d for d in (now, subscription.expire_at, panel_expire) if d is not None)
+        subscription.expire_at = base + dt.timedelta(days=days)
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.grace_until = None  # paying lifts the grace window; full limits are restored
         spec = self._remnawave.build_spec(
@@ -235,7 +245,8 @@ class SubscriptionService:
             internal_squads=tuple(subscription.internal_squads or ()),
             external_squad=subscription.external_squad,
         )
-        await self._remnawave.apply(panel_ref, spec)
+        # the panel's expiry is already in the base — no second lookup
+        await self._remnawave.apply(panel_ref, spec, allow_shorten=True)
         return subscription
 
     async def set_expiry(
@@ -273,7 +284,8 @@ class SubscriptionService:
             internal_squads=tuple(subscription.internal_squads or ()),
             external_squad=subscription.external_squad,
         )
-        await self._remnawave.apply(panel_ref, spec)
+        # «до даты» from the admin: may move the expiry earlier on purpose
+        await self._remnawave.apply(panel_ref, spec, allow_shorten=True)
         return subscription
 
     async def change(
@@ -342,7 +354,7 @@ class SubscriptionService:
         # unlimited devices or has no external squad, the old panel value must be CLEARED, not
         # left in place. create/renew keep the omit-semantics — only CHANGE opts into the clear.
         spec = replace(spec, reset_device_limit=True, reset_external_squad=True)
-        await self._remnawave.apply(panel_ref, spec)
+        await self._push_keeping_panel_expiry(subscription, panel_ref, spec)
         return subscription
 
     async def push_limits(
@@ -363,8 +375,18 @@ class SubscriptionService:
             internal_squads=tuple(subscription.internal_squads or ()),
             external_squad=subscription.external_squad,
         )
-        await self._remnawave.apply(panel_ref, spec)
+        await self._push_keeping_panel_expiry(subscription, panel_ref, spec)
         return subscription
+
+    async def _push_keeping_panel_expiry(
+        self, subscription: Subscription, panel_ref: PanelRef, spec: ProvisionSpec
+    ) -> None:
+        """Push ``spec`` without moving the panel's expiry back; when the panel's is later
+        (extended there directly), the bot's row takes it over too."""
+        kept = await self._remnawave.keep_panel_expiry(panel_ref, spec)
+        if kept.expire_at != spec.expire_at:
+            subscription.expire_at = kept.expire_at
+        await self._remnawave.apply(panel_ref, kept, allow_shorten=True)
 
     async def enter_grace(
         self,
@@ -399,7 +421,8 @@ class SubscriptionService:
             internal_squads=tuple(subscription.internal_squads or ()),
             external_squad=subscription.external_squad,
         )
-        await self._remnawave.apply(panel_ref, spec)
+        # the grace window's expiry is short on purpose
+        await self._remnawave.apply(panel_ref, spec, allow_shorten=True)
         await self._remnawave.reset_traffic(panel_ref)
         await self._remnawave.enable(panel_ref)
         subscription.status = SubscriptionStatus.LIMITED

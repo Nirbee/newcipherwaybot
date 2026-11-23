@@ -1837,7 +1837,23 @@ hr.sep {
   border-radius: 12px;
 }
 .cl-tbl {
-  min-width: 1240px;
+  min-width: 1280px;
+}
+/* a long cell (a tag like POLINADRUGAKATI) is cut with «…», never spills into the next column */
+.cl-tbl .tr > span {
+  min-width: 0;
+}
+.cl-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.cl-botdate {
+  font-size: 11px;
+  margin-top: 2px;
+  white-space: nowrap;
 }
 .cl-sort {
   cursor: pointer;

@@ -1842,7 +1842,9 @@ async def test_clients_list_counters_and_panel_columns(
     assert body["panel"]["ok"] is True and body["can_export"] is True
     counters = body["counters"]
     assert counters["active"] == 1
-    assert counters["expired"] == 1  # the stale ACTIVE shows as expired
+    # its panel user is gone: not in «Все» / «Истёкшие» but under «Бывшие»
+    assert counters["all"] == 1 and counters["former"] == 1 and counters["expired"] == 0
+    assert body["tiles"]["total"] == 1 and body["tiles"]["active"] == 1
     assert counters["online"] == 1
     row = next(r for r in body["items"] if r["id"] == uid)
     assert row["tag"] == "VIP" and row["in_panel"] is True
@@ -1850,8 +1852,8 @@ async def test_clients_list_counters_and_panel_columns(
     # search by the start of the Telegram ID and by the panel name
     found = (await http.get("/api/admin/users/clients?q=5551001", headers=auth)).json()
     assert [r["id"] for r in found["items"]] == [uid]
-    expiring = (await http.get("/api/admin/users/clients?chip=expired", headers=auth)).json()
-    assert [r["telegram_id"] for r in expiring["items"]] == [5551002]
+    former = (await http.get("/api/admin/users/clients?chip=former", headers=auth)).json()
+    assert [r["telegram_id"] for r in former["items"]] == [5551002]
 
     # the legacy counters agree: no inflated «active»
     legacy = (await http.get("/api/admin/users/counters", headers=auth)).json()

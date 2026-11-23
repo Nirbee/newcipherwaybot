@@ -8,6 +8,7 @@ concrete client's job.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 from src.application.common.panel import RemnawaveClient
 from src.application.dto.panel import PanelRef, PanelUser, PanelVersion, ProvisionSpec
@@ -111,8 +112,42 @@ class RemnawaveService:
         except Exception as exc:
             log.warning("panel: orphan not removed", ref=str(ref), error=str(exc))
 
-    async def apply(self, ref: PanelRef, spec: ProvisionSpec) -> PanelUser:
-        """Push a spec change (renew/change) to an existing panel user."""
+    async def panel_expiry(self, ref: PanelRef) -> dt.datetime | None:
+        """The panel user's current expiry, or None when the panel didn't answer / has none."""
+        try:
+            user = await self._client.get_user(ref)
+        except Exception as exc:
+            log.warning("panel expiry unknown", ref=str(ref), error=str(exc))
+            return None
+        if user is None or user.expire_at is None:
+            return None
+        value = user.expire_at
+        return value if value.tzinfo is not None else value.replace(tzinfo=dt.UTC)
+
+    async def keep_panel_expiry(self, ref: PanelRef, spec: ProvisionSpec) -> ProvisionSpec:
+        """Never move the panel's expiry BACK: an owner who extended someone directly in the
+        panel (MultiScript) must not lose that when the bot pushes its own, older date."""
+        if spec.only is not None and "expireAt" not in spec.only:
+            return spec  # a partial update that doesn't touch the expiry
+        current = await self.panel_expiry(ref)
+        if current is None or current <= spec.expire_at:
+            return spec
+        log.info(
+            "panel expiry kept",
+            ref=str(ref),
+            bot=spec.expire_at.isoformat(),
+            panel=current.isoformat(),
+        )
+        return replace(spec, expire_at=current)
+
+    async def apply(
+        self, ref: PanelRef, spec: ProvisionSpec, *, allow_shorten: bool = False
+    ) -> PanelUser:
+        """Push a spec change (renew/change) to an existing panel user. The expiry never goes
+        earlier than the panel's current one unless ``allow_shorten`` (an admin's explicit «до
+        даты», a grace window's deliberately short expiry)."""
+        if not allow_shorten:
+            spec = await self.keep_panel_expiry(ref, spec)
         return await self._client.update_user(ref, spec)
 
     async def enable(self, ref: PanelRef) -> None:

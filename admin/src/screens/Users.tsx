@@ -25,6 +25,7 @@ type ClientRow = {
   source: string | null;
   expire_at: string | null;
   expire_forever: boolean;
+  bot_expire_at: string | null; // set when the bot's own expiry differs from the panel's
   grace_until: string | null;
   traffic_used_bytes: number;
   traffic_limit_bytes: number;
@@ -40,12 +41,15 @@ type ClientRow = {
   created_at: string | null;
 };
 
+type Tiles = { total: number; active: number; online: number; exp7: number; never: number; service: number };
+
 type ClientsResp = {
   items: ClientRow[];
   total: number;
   limit: number;
   offset: number;
   counters: Record<string, number>;
+  tiles: Tiles | null; // straight from the panel, as MultiScript counts; null when it's down
   panel: { ok: boolean; error: string | null; devices_error: string | null; fetched_at: string | null };
   can_export: boolean;
 };
@@ -148,7 +152,7 @@ const SOURCE: Record<string, string> = {
 
 /* chip id, label, one-line explanation under the row */
 const CHIPS: [string, string, string][] = [
-  ["all", "Все", "Все клиенты бота, кроме служебных учёток MultiScript."],
+  ["all", "Все", "Все ключи в панели, кроме служебных учёток MultiScript — как в панели."],
   ["active", "Активные", "Подписка действует: оплаченная, пробная или в льготном периоде."],
   ["online", "Онлайн сейчас", "Были в сети за последние 2 минуты."],
   ["exp3", "Кончается за 3 дня", "Подписка закончится в ближайшие 3 дня: самое время напомнить про продление."],
@@ -161,9 +165,10 @@ const CHIPS: [string, string, string][] = [
   ["new_week", "Новые за неделю", "Пришли в бота за последние 7 дней."],
   ["limited", "Упёрлись в лимит", "Трафик исчерпан — панель ограничила доступ (LIMITED)."],
   ["disabled", "Отключённые", "Подписка отключена: возврат, отзыв или вручную."],
-  ["expired", "Истёкшие", "Срок подписки закончился."],
+  ["expired", "Истёкшие", "Ключ в панели есть, но срок закончился (EXPIRED)."],
   ["top_traffic", "Топ-20 по трафику", "20 клиентов с наибольшим расходом трафика."],
   ["no_sub", "Без подписки", "Запускали бота, но ничего не покупали."],
+  ["former", "Бывшие (нет в панели)", "Подписка была, но ключа в панели уже нет: истёк и удалён, отключён или возврат."],
   ["trial", "Пробные", "Сейчас на пробном периоде."],
   ["blocked", "Заблокированные", "Заблокированы администратором."],
   ["service", "Служебные", "Служебные учётки MultiScript (каскад, мониторинг): бот их не меняет, здесь они только для просмотра."],
@@ -182,7 +187,8 @@ const COLS: [string, string, string | null][] = [
   ["tag", "Метка", "tag"],
   ["source", "Источник", "source"],
 ];
-const GRID = "minmax(190px,2fr) 128px 112px 150px 104px minmax(110px,1fr) 92px minmax(90px,1fr) 90px 82px";
+const GRID =
+  "minmax(190px,2fr) 128px minmax(118px,130px) 150px 104px minmax(110px,1fr) 92px minmax(90px,1fr) minmax(96px,120px) 86px";
 const PAGE = 50;
 /* panel.error is a code, never the exception text */
 const PANEL_ERR: Record<string, string> = {
@@ -212,6 +218,18 @@ function Badge({ status }: { status: string }) {
 }
 
 function ExpireCell({ r, now }: { r: ClientRow; now: number }) {
+  if (!r.bot_expire_at) return <ExpireMain r={r} now={now} />;
+  return (
+    <span>
+      <ExpireMain r={r} now={now} />
+      <div className="dim cl-botdate" title="Срок в базе бота отличается от панели">
+        в боте: {dt(r.bot_expire_at)}
+      </div>
+    </span>
+  );
+}
+
+function ExpireMain({ r, now }: { r: ClientRow; now: number }) {
   if (r.status === "grace" && r.grace_until) {
     return <span className="cl-warn">льгота до {dt(r.grace_until)}</span>;
   }
@@ -664,12 +682,24 @@ export default function Users() {
     setSort((s) => (s.key === key ? { key, desc: !s.desc } : { key, desc: key !== "name" && key !== "status" && key !== "node" }));
   }
 
+  // Tiles as MultiScript counts them (panel users); the bot's own counters when the panel is down.
+  const pt = data?.tiles ?? null;
+  const total = pt ? pt.total : c.all;
+  const service = pt ? pt.service : c.service;
+  const panelOnly = pt && c.all !== undefined ? Math.max(0, pt.total - c.all) : 0;
+  const totalNote = [
+    pt ? "ключи в панели" : "по данным бота",
+    service ? `ещё ${service} служебных MultiScript` : "",
+    panelOnly ? `${panelOnly} только в панели` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const tiles: [string, string, number | undefined, string, string | undefined][] = [
-    ["all", "Всего клиентов", c.all, "", undefined],
-    ["active", "Активных", c.active, c.all !== undefined ? `из ${c.all}` : "", undefined],
-    ["online", "Онлайн сейчас", c.online, "за последние 2 минуты", undefined],
-    ["exp7", "Кончаются за 7 дней", c.exp7, "напомните про продление", "warn"],
-    ["never", "Ни разу не подключались", c.never, "помогите настроить", undefined],
+    ["all", "Всего клиентов", total, totalNote, undefined],
+    ["active", "Активных", pt ? pt.active : c.active, total !== undefined ? `из ${total}` : "", undefined],
+    ["online", "Онлайн сейчас", pt ? pt.online : c.online, "за последние 2 минуты", undefined],
+    ["exp7", "Кончаются за 7 дней", pt ? pt.exp7 : c.exp7, "напомните про продление", "warn"],
+    ["never", "Ни разу не подключались", pt ? pt.never : c.never, "помогите настроить", undefined],
   ];
 
   return (
@@ -783,7 +813,15 @@ export default function Users() {
                 <span className="cl-ellipsis dim" style={{ fontSize: 12 }} title={r.squads.join(", ")}>
                   {r.squads.join(", ") || "—"}
                 </span>
-                <span>{r.tag ? <span className="cap-pill">{r.tag}</span> : <span className="dim">—</span>}</span>
+                <span style={{ minWidth: 0 }}>
+                  {r.tag ? (
+                    <span className="cap-pill cl-tag" title={r.tag}>
+                      {r.tag}
+                    </span>
+                  ) : (
+                    <span className="dim">—</span>
+                  )}
+                </span>
                 <span className="dim" style={{ fontSize: 11.5 }}>
                   {r.source ? SOURCE[r.source] ?? r.source : "—"}
                 </span>

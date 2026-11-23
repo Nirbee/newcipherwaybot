@@ -343,6 +343,8 @@ async def list_clients(
     panel answered and when. ``refresh`` re-reads the panel (not for read-only keys)."""
     private = _restricted(identity)
     snap, rows, now = await _client_rows(container, refresh=refresh and not private)
+    async with container.uow() as uow:
+        patterns = await _service_patterns(container, uow)
     picked = clients.select_rows(
         rows, chip=chip, q=q, sort=sort, desc=desc, now=now, private=private
     )
@@ -356,6 +358,8 @@ async def list_clients(
         "limit": limit,
         "offset": offset,
         "counters": counts,
+        # the five tiles as MultiScript counts them (panel users); null without panel data
+        "tiles": clients.panel_tiles(snap, patterns, now),
         "panel": {
             "ok": snap.error is None,
             "error": snap.error,
